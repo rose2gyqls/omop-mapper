@@ -144,3 +144,4 @@ logs/
 *.log
 temp/
 tmp/
+data/
