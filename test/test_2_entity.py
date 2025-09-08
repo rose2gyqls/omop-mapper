@@ -6,10 +6,16 @@
 import sys
 import os
 import logging
+import numpy as np
 from typing import Dict, Any, List
+from transformers import AutoTokenizer, AutoModel
+import torch
+from sklearn.metrics.pairwise import cosine_similarity
 
-# 프로젝트 루트 디렉토리를 Python 경로에 추가
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+# 프로젝트 루트의 src 디렉토리를 Python 경로에 추가
+project_root = os.path.dirname(os.path.dirname(__file__))
+src_path = os.path.join(project_root, 'src')
+sys.path.insert(0, src_path)
 
 from omop_mapper.entity_mapping_api import (
     EntityMappingAPI, 
@@ -31,7 +37,203 @@ class EntityMappingTester:
     def __init__(self):
         """테스트 초기화"""
         self.api = EntityMappingAPI()
+        
+        # SapBERT 모델 초기화
+        self.model_name = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
+        logger.info(f"🤖 SapBERT 모델 로딩 중: {self.model_name}")
+        
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.model = AutoModel.from_pretrained(self.model_name)
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.model.to(self.device)
+            self.model.eval()
+            logger.info(f"✅ SapBERT 모델 로딩 완료 (Device: {self.device})")
+        except Exception as e:
+            logger.error(f"❌ SapBERT 모델 로딩 실패: {e}")
+            raise
+            
         logger.info("✅ EntityMappingTester 초기화 완료")
+    
+    def _get_sapbert_embedding(self, text: str) -> np.ndarray:
+        """
+        SapBERT를 사용하여 텍스트의 임베딩을 생성
+        
+        Args:
+            text: 임베딩을 생성할 텍스트
+            
+        Returns:
+            임베딩 벡터 (768차원)
+        """
+        try:
+            # 토크나이징
+            inputs = self.tokenizer(
+                text, 
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True, 
+                max_length=512
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # 임베딩 생성
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # CLS 토큰의 임베딩 사용
+                embedding = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+                
+            return embedding.flatten()
+            
+        except Exception as e:
+            logger.error(f"SapBERT 임베딩 생성 실패: {e}")
+            return np.zeros(768)  # 기본값 반환
+    
+    def _search_concepts_by_name(self, entity_name: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        """
+        concept_name이 일치하는 후보군을 찾는 간단한 검색
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            top_k: 상위 K개 결과 반환
+            
+        Returns:
+            List[매칭된 컨셉 후보들]
+        """
+        # concepts 인덱스에서 concept_name 기반 검색
+        query = {
+            "query": {
+                "bool": {
+                    "should": [
+                        # 대소문자 무시 정확 일치
+                        {
+                            "term": {
+                                "concept_name.keyword": {
+                                    "value": entity_name.lower(),
+                                    "boost": 9.0
+                                }
+                            }
+                        },
+                        # 부분 일치
+                        {
+                            "match": {
+                                "concept_name": {
+                                    "query": entity_name,
+                                    "boost": 5.0
+                                }
+                            }
+                        }
+                    ],
+                    "minimum_should_match": 1
+                }
+            },
+            "size": top_k,
+            "sort": [
+                {"_score": {"order": "desc"}},
+                {"concept_name.keyword": {"order": "asc"}}
+            ]
+        }
+        
+        try:
+            # concepts 인덱스에서 검색
+            response = self.api.es_client.es_client.search(
+                index="concepts",
+                body=query
+            )
+            
+            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            
+        except Exception as e:
+            logger.error(f"concept_name 검색 실패: {e}")
+            return []
+    
+    def _search_concepts_hybrid(self, entity_name: str, top_k: int = 10, 
+                               text_weight: float = 0.4, semantic_weight: float = 0.6) -> List[Dict[str, Any]]:
+        """
+        문자열 일치도와 의미적 유사도를 결합한 하이브리드 검색
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            top_k: 상위 K개 결과 반환
+            text_weight: 문자열 일치도 가중치
+            semantic_weight: 의미적 유사도 가중치
+            
+        Returns:
+            List[하이브리드 점수로 정렬된 컨셉 후보들]
+        """
+        logger.info(f"🔍 하이브리드 검색 시작: '{entity_name}' (텍스트:{text_weight}, 의미:{semantic_weight})")
+        
+        # 1단계: 엔티티 임베딩 생성
+        entity_embedding = self._get_sapbert_embedding(entity_name)
+        logger.info(f"📊 엔티티 임베딩 생성 완료 (Shape: {entity_embedding.shape})")
+        
+        # 2단계: 문자열 기반 검색으로 초기 후보 확보
+        text_candidates = self._search_concepts_by_name(entity_name, top_k=50)  # 더 많은 후보 확보
+        logger.info(f"📝 문자열 검색 결과: {len(text_candidates)}개 후보")
+        
+        if not text_candidates:
+            logger.warning("문자열 검색 결과 없음")
+            return []
+        
+        # 3단계: 각 후보에 대해 하이브리드 점수 계산
+        hybrid_candidates = []
+        
+        for candidate in text_candidates:
+            try:
+                source = candidate['_source']
+                concept_name = source.get('concept_name', '')
+                elasticsearch_score = candidate['_score']
+                
+                # 문자열 유사도 (정규화된 Elasticsearch 점수)
+                max_es_score = text_candidates[0]['_score'] if text_candidates else 1.0
+                text_similarity = elasticsearch_score / max_es_score
+                
+                # 의미적 유사도 계산
+                concept_embedding = source.get('concept_embedding')
+                if concept_embedding and len(concept_embedding) == 768:
+                    concept_emb_array = np.array(concept_embedding).reshape(1, -1)
+                    entity_emb_array = entity_embedding.reshape(1, -1)
+                    semantic_similarity = cosine_similarity(entity_emb_array, concept_emb_array)[0][0]
+                else:
+                    # 임베딩이 없는 경우 문자열 유사도로 대체
+                    semantic_similarity = self.api._calculate_similarity(entity_name, concept_name)
+                    logger.debug(f"임베딩 없음 - 문자열 유사도 사용: {concept_name}")
+                
+                # 하이브리드 점수 계산
+                hybrid_score = (text_weight * text_similarity) + (semantic_weight * semantic_similarity)
+                
+                # 후보 정보 저장
+                hybrid_candidate = {
+                    '_source': source,
+                    '_score': elasticsearch_score,
+                    'text_similarity': text_similarity,
+                    'semantic_similarity': semantic_similarity,
+                    'hybrid_score': hybrid_score,
+                    'original_candidate': candidate
+                }
+                
+                hybrid_candidates.append(hybrid_candidate)
+                
+            except Exception as e:
+                logger.error(f"하이브리드 점수 계산 실패: {e}")
+                continue
+        
+        # 4단계: 하이브리드 점수로 정렬
+        hybrid_candidates.sort(key=lambda x: x['hybrid_score'], reverse=True)
+        
+        # 상위 K개 반환
+        top_candidates = hybrid_candidates[:top_k]
+        
+        logger.info(f"🎯 하이브리드 검색 완료: 상위 {len(top_candidates)}개 후보 반환")
+        
+        # 점수 정보 로깅
+        for i, candidate in enumerate(top_candidates[:3], 1):
+            source = candidate['_source']
+            logger.info(f"  {i}. {source.get('concept_name', 'N/A')}")
+            logger.info(f"     텍스트: {candidate['text_similarity']:.3f}, "
+                       f"의미: {candidate['semantic_similarity']:.3f}, "
+                       f"하이브리드: {candidate['hybrid_score']:.3f}")
+        
+        return top_candidates
     
     def test_entity_mapping_6_steps(self, entity_name: str, entity_type: str, 
                                    golden_concept_id: str, golden_concept_name: str) -> None:
@@ -68,11 +270,11 @@ class EntityMappingTester:
         
         entity_info = entities_to_map[0]
         
-        # ===== 1단계: Elasticsearch 검색 → 상위 5개 후보 (쿼리의 Function Score 기반) =====
-        print(f"\n🔍 1단계: Elasticsearch 검색 → 상위 5개 후보 (Function Score 기반)")
+        # ===== 1단계: 하이브리드 검색 → 문자열 일치도 + 의미적 유사도 =====
+        print(f"\n🔍 1단계: 하이브리드 검색 → 문자열 일치도 + 의미적 유사도")
         print(f"{'='*60}")
         
-        candidates = self.api._search_similar_concepts(entity_input, entity_info, top_k=5)
+        candidates = self._search_concepts_hybrid(preprocessed_name, top_k=5, text_weight=0.4, semantic_weight=0.6)
         
         if not candidates:
             print("❌ 검색 결과 없음")
@@ -81,8 +283,12 @@ class EntityMappingTester:
         print(f"총 {len(candidates)}개 후보 발견:")
         for i, candidate in enumerate(candidates, 1):
             source = candidate['_source']
-            score = candidate['_score']
-            print(f"  {i}. Function Score: {score:.2f}")
+            hybrid_score = candidate.get('hybrid_score', 0.0)
+            text_sim = candidate.get('text_similarity', 0.0)
+            semantic_sim = candidate.get('semantic_similarity', 0.0)
+            
+            print(f"  {i}. 하이브리드 점수: {hybrid_score:.3f}")
+            print(f"     └ 텍스트 유사도: {text_sim:.3f} | 의미적 유사도: {semantic_sim:.3f}")
             print(f"     컨셉 ID: {source.get('concept_id', 'N/A')}")
             print(f"     컨셉명: {source.get('concept_name', 'N/A')}")
             print(f"     도메인: {source.get('domain_id', 'N/A')}")
@@ -99,11 +305,14 @@ class EntityMappingTester:
         
         for i, candidate in enumerate(candidates, 1):
             source = candidate['_source']
+            # 하이브리드 후보에서는 original_candidate가 있을 수 있음
+            original_candidate = candidate.get('original_candidate', candidate)
+            
             if source.get('standard_concept') == 'S':
-                standard_candidates.append(candidate)
+                standard_candidates.append(original_candidate)
                 print(f"  {i}. ✅ Standard: {source.get('concept_name', 'N/A')}")
             else:
-                non_standard_candidates.append(candidate)
+                non_standard_candidates.append(original_candidate)
                 print(f"  {i}. ⚠️ Non-standard: {source.get('concept_name', 'N/A')}")
         
         print(f"\n  📊 분류 결과: Standard {len(standard_candidates)}개, Non-standard {len(non_standard_candidates)}개")
@@ -171,32 +380,43 @@ class EntityMappingTester:
             
             print()
         
-        # ===== 5단계: 모든 후보군에 대해 Python 유사도 재계산 → Re-ranking =====
-        print(f"🐍 5단계: 모든 후보군에 대해 Python 유사도 재계산 → Re-ranking")
+        # ===== 5단계: 모든 후보군에 대해 하이브리드 점수 기반 Re-ranking =====
+        print(f"🎯 5단계: 모든 후보군에 대해 하이브리드 점수 기반 Re-ranking")
         print(f"{'='*60}")
         
         all_standard_candidates = []
         
-        # 1. Standard 후보들에 대해 Python 유사도 재계산
-        print("  📊 Standard 후보들 Python 유사도 재계산:")
+        # 1. Standard 후보들에 대해 하이브리드 점수 사용
+        print("  📊 Standard 후보들 하이브리드 점수:")
         for i, candidate in enumerate(standard_candidates, 1):
             source = candidate['_source']
             original_score = candidate['_score']
             
-            # Python 유사도 재계산
-            python_similarity = self.api._calculate_similarity(preprocessed_name, source.get('concept_name', ''))
+            # 하이브리드 후보에서 해당 후보 찾기
+            hybrid_score = 0.0
+            text_sim = 0.0
+            semantic_sim = 0.0
+            
+            # candidates는 하이브리드 후보들이므로 매칭되는 것 찾기
+            for hybrid_candidate in candidates:
+                if hybrid_candidate['_source'].get('concept_id') == source.get('concept_id'):
+                    hybrid_score = hybrid_candidate.get('hybrid_score', 0.0)
+                    text_sim = hybrid_candidate.get('text_similarity', 0.0)
+                    semantic_sim = hybrid_candidate.get('semantic_similarity', 0.0)
+                    break
             
             print(f"    {i}. {source.get('concept_name', 'N/A')}")
-            print(f"       Elasticsearch 점수: {original_score:.2f}")
-            print(f"       Python 유사도: {python_similarity:.3f}")
+            print(f"       하이브리드 점수: {hybrid_score:.3f} (텍스트: {text_sim:.3f}, 의미: {semantic_sim:.3f})")
             
             all_standard_candidates.append({
                 'concept': source,
-                'final_score': python_similarity,  # Python 유사도 사용
+                'final_score': hybrid_score,  # 하이브리드 점수 사용
                 'is_original_standard': True,
                 'original_candidate': candidate,
                 'elasticsearch_score': original_score,
-                'python_similarity': python_similarity
+                'hybrid_score': hybrid_score,
+                'text_similarity': text_sim,
+                'semantic_similarity': semantic_sim
             })
             print()
         
@@ -235,32 +455,33 @@ class EntityMappingTester:
             print("❌ 처리된 후보 없음")
             return
         
-        # 점수별 정렬 (Python 유사도 기준)
+        # 점수별 정렬 (하이브리드 점수 기준)
         sorted_candidates = sorted(all_standard_candidates, key=lambda x: x['final_score'], reverse=True)
         
-        print("최종 후보 순위 (Python 유사도 기준):")
+        print("최종 후보 순위 (하이브리드 점수 기준):")
         for i, candidate in enumerate(sorted_candidates, 1):
             concept = candidate['concept']
-            final_score = candidate['final_score']  # Python 유사도 점수
+            final_score = candidate['final_score']  # 하이브리드 점수
             is_standard = candidate['is_original_standard']
             mapping_type = "직접 Standard" if is_standard else "Non-standard → Standard"
             
-            # 점수 정규화 (Python 유사도는 이미 0~1 사이이므로 그대로 사용)
+            # 점수 정규화 (하이브리드 점수는 이미 0~1 사이)
             normalized_score = self.api._normalize_score(final_score)
             confidence = self.api._determine_confidence(normalized_score)
             
-            print(f"  {i}. Python 유사도: {final_score:.3f} → 정규화: {normalized_score:.3f} ({confidence})")
+            print(f"  {i}. 하이브리드 점수: {final_score:.3f} → 정규화: {normalized_score:.3f} ({confidence})")
+            
+            # 세부 점수 정보
+            if 'hybrid_score' in candidate:
+                text_sim = candidate.get('text_similarity', 0.0)
+                semantic_sim = candidate.get('semantic_similarity', 0.0)
+                print(f"     └ 텍스트: {text_sim:.3f} | 의미: {semantic_sim:.3f}")
+            
             print(f"     컨셉 ID: {concept.get('concept_id', 'N/A')}")
             print(f"     컨셉명: {concept.get('concept_name', 'N/A')}")
             print(f"     도메인: {concept.get('domain_id', 'N/A')}")
             print(f"     어휘체계: {concept.get('vocabulary_id', 'N/A')}")
             print(f"     매핑 방법: {mapping_type}")
-            
-            # 추가 정보 출력
-            if is_standard and 'elasticsearch_score' in candidate:
-                print(f"     Elasticsearch 점수: {candidate['elasticsearch_score']:.2f}")
-            elif not is_standard and 'python_similarity' in candidate:
-                print(f"     Python 유사도: {candidate['python_similarity']:.3f}")
             
             print()
         
@@ -310,6 +531,17 @@ def main():
         entity_type="diagnostic",
         golden_concept_id="4215140",
         golden_concept_name="Acute coronary syndrome"
+    )
+
+    # 테스트 케이스 3: ST-segment elevation myocardial infarction (STEMI)
+    print("\n" + "="*80)
+    print("📋 테스트 케이스 3: ST-segment elevation myocardial infarction (STEMI)")
+    print("="*80)
+    tester.test_entity_mapping_6_steps(
+        entity_name="ST-segment elevation myocardial infarction (STEMI)",
+        entity_type="diagnostic",
+        golden_concept_id="4296653",
+        golden_concept_name="Acute ST segment elevation myocardial infarction"
     )
     
     print("\n🎉 모든 테스트 완료!")
