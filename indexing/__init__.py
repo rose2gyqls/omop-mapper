@@ -11,7 +11,6 @@ Elasticsearch에 인덱싱하는 기능을 제공합니다.
 
 # 로컬 임베딩 생성 방식
 from .sapbert_embedder import SapBERTEmbedder
-from .main_indexer import ConceptIndexingPipeline
 
 # 공통 모듈
 from .elasticsearch_indexer import ConceptElasticsearchIndexer
@@ -23,7 +22,6 @@ __author__ = "rose"
 __all__ = [
     # 로컬 임베딩 방식
     "SapBERTEmbedder",
-    "ConceptIndexingPipeline",
     
     # 공통
     "ConceptElasticsearchIndexer", 
