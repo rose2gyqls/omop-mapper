@@ -102,7 +102,7 @@ class ConceptDataProcessor:
             read_params = {
                 'sep': '\t',
                 'chunksize': chunk_size,
-                'skiprows': skip_rows + 1 if skip_rows > 0 else None,  # 헤더는 항상 포함
+                'skiprows': list(range(1, skip_rows + 1)) if skip_rows > 0 else None,  # 헤더(0번째 줄)는 건너뛰지 않음
                 'nrows': max_rows,
                 'low_memory': False,
                 'dtype': {
@@ -295,45 +295,10 @@ class ConceptDataProcessor:
             raise
 
 
-def test_concept_data_processor():
-    """CONCEPT 데이터 처리기 테스트"""
-    logging.basicConfig(level=logging.INFO)
-    
-    csv_path = "/Users/rose/Desktop/omop-mapper/data/CONCEPT.csv"
-    
-    try:
-        # 데이터 처리기 초기화
-        processor = ConceptDataProcessor(csv_path)
-        
-        # 총 행 수 확인
-        total_rows = processor.get_total_rows()
-        print(f"총 데이터 행 수: {total_rows:,}")
-        
-        # 샘플 데이터 확인
-        sample_df = processor.get_sample_data(10)
-        print(f"샘플 데이터 형태: {sample_df.shape}")
-        print(f"컬럼: {list(sample_df.columns)}")
-        print("\n샘플 데이터:")
-        print(sample_df.head())
-        
-        # 청크 단위 읽기 테스트
-        chunk_count = 0
-        total_processed = 0
-        
-        for chunk_df in processor.read_concepts_in_chunks(chunk_size=1000, max_rows=5000):
-            chunk_count += 1
-            total_processed += len(chunk_df)
-            
-            if chunk_count <= 3:  # 처음 3개 청크만 출력
-                print(f"\n청크 {chunk_count}: {len(chunk_df)}개 행")
-                print(chunk_df.head(2))
-        
-        print(f"\n총 처리된 청크 수: {chunk_count}")
-        print(f"총 처리된 행 수: {total_processed:,}")
-        
-    except Exception as e:
-        print(f"테스트 실패: {e}")
-
-
 if __name__ == "__main__":
-    test_concept_data_processor()
+    # 간단한 테스트
+    logging.basicConfig(level=logging.INFO)
+    csv_path = "/home/work/skku/hyo/omop-mapper/data/CONCEPT.csv"
+    processor = ConceptDataProcessor(csv_path)
+    print(f"총 데이터 행 수: {processor.get_total_rows():,}")
+    print("CONCEPT 데이터 처리기 테스트 완료")

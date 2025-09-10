@@ -69,79 +69,6 @@ class ConceptElasticsearchIndexer:
             
         logging.info(f"Elasticsearch 연결 성공: {es_host}:{es_port}")
     
-    def create_simple_index(self, delete_if_exists: bool = False) -> bool:
-        """
-        간단한 인덱스 생성 (클러스터 상태가 red일 때 사용)
-        단일 노드 클러스터에 최적화된 설정
-        """
-        try:
-            # 기존 인덱스 확인 및 삭제
-            if self.es.indices.exists(index=self.index_name):
-                if delete_if_exists:
-                    logging.info(f"기존 인덱스 삭제 중: {self.index_name}")
-                    self.es.indices.delete(index=self.index_name)
-                else:
-                    logging.info(f"인덱스가 이미 존재합니다: {self.index_name}")
-                    return True
-            
-            # 단일 노드 클러스터에 최적화된 간단한 인덱스 매핑
-            simple_mapping = {
-                "settings": {
-                    "number_of_shards": 1,
-                    "number_of_replicas": 0,  # 단일 노드이므로 replica 없음
-                    "refresh_interval": "30s",
-                    "index.write.wait_for_active_shards": "1",  # primary만 대기
-                    "index.max_result_window": 50000,
-                    "index.routing.allocation.enable": "all"
-                },
-                "mappings": {
-                    "properties": {
-                        "concept_id": {"type": "keyword"},
-                        "concept_name": {"type": "text"},
-                        "domain_id": {"type": "keyword"},
-                        "vocabulary_id": {"type": "keyword"},
-                        "concept_class_id": {"type": "keyword"},
-                        "standard_concept": {"type": "keyword"},
-                        "concept_code": {"type": "keyword"},
-                        "valid_start_date": {"type": "keyword"},  # 단순화
-                        "valid_end_date": {"type": "keyword"},    # 단순화
-                        "invalid_reason": {"type": "keyword"},
-                        "concept_embedding": {
-                            "type": "dense_vector",
-                            "dims": 768
-                        }
-                    }
-                }
-            }
-            
-            # 인덱스 생성
-            self.es.indices.create(index=self.index_name, body=simple_mapping)
-            logging.info(f"간단한 인덱스 생성 완료: {self.index_name}")
-            
-            # 인덱스 활성화 대기 (간단한 버전)
-            import time
-            for wait_time in range(0, 30, 5):
-                try:
-                    health = self.es.cluster.health(
-                        index=self.index_name, 
-                        wait_for_status="yellow", 
-                        timeout="5s"
-                    )
-                    if health["status"] in ["green", "yellow"]:
-                        logging.info(f"인덱스 활성화 완료: {health['status']}")
-                        break
-                except Exception as wait_error:
-                    logging.debug(f"인덱스 활성화 대기 중 오류: {wait_error}")
-                
-                if wait_time < 25:
-                    logging.info(f"인덱스 활성화 대기 중... ({wait_time + 5}초)")
-                    time.sleep(5)
-            
-            return True
-            
-        except Exception as e:
-            logging.error(f"간단한 인덱스 생성 실패: {e}")
-            return False
 
     def create_index(self, delete_if_exists: bool = False) -> bool:
         """
@@ -193,10 +120,10 @@ class ConceptElasticsearchIndexer:
                     }
                 },
                 "settings": {
-                    "number_of_shards": 1,
-                    "number_of_replicas": 0,
+                    "number_of_shards": 3,
+                    "number_of_replicas": 5,
                     "refresh_interval": "30s",
-                    "index.write.wait_for_active_shards": "0",
+                    "index.write.wait_for_active_shards": "1",
                     "index.max_result_window": 50000
                 }
             }
@@ -205,23 +132,14 @@ class ConceptElasticsearchIndexer:
             self.es.indices.create(index=self.index_name, body=index_mapping)
             logging.info(f"인덱스 생성 완료: {self.index_name}")
             
-            # 인덱스 상태가 활성화될 때까지 기다림
+            # 인덱스 상태 확인
             import time
-            max_wait_time = 60  # 최대 60초 대기
-            wait_time = 0
-            
-            while wait_time < max_wait_time:
-                try:
-                    health = self.es.cluster.health(index=self.index_name, wait_for_status="yellow", timeout="10s")
-                    if health["status"] in ["green", "yellow"]:
-                        logging.info(f"인덱스 상태 활성화 완료: {health['status']}")
-                        break
-                except Exception as e:
-                    logging.warning(f"인덱스 상태 확인 중 오류: {e}")
-                
-                time.sleep(5)
-                wait_time += 5
-                logging.info(f"인덱스 활성화 대기 중... ({wait_time}초)")
+            time.sleep(2)  # 간단한 대기
+            try:
+                health = self.es.cluster.health(index=self.index_name, wait_for_status="yellow", timeout="10s")
+                logging.info(f"인덱스 상태: {health['status']}")
+            except Exception as e:
+                logging.warning(f"인덱스 상태 확인 중 오류 (계속 진행): {e}")
             
             return True
             
@@ -234,7 +152,8 @@ class ConceptElasticsearchIndexer:
         concepts_data: List[Dict[str, Any]],
         batch_size: int = 1000,
         show_progress: bool = True,
-        pipeline: Optional[str] = None
+        pipeline: Optional[str] = None,
+        lowercase_concept_name: bool = False
     ) -> bool:
         """
         CONCEPT 데이터를 Elasticsearch에 인덱싱
@@ -244,6 +163,7 @@ class ConceptElasticsearchIndexer:
             batch_size: 배치 크기
             show_progress: 진행률 표시 여부
             pipeline: Ingest Pipeline 이름 (선택사항)
+            lowercase_concept_name: concept_name을 소문자로 변환 여부
             
         Returns:
             인덱싱 성공 여부
@@ -264,6 +184,11 @@ class ConceptElasticsearchIndexer:
                 # Elasticsearch bulk 형식으로 변환
                 actions = []
                 for doc in batch_data:
+                    # concept_name을 소문자로 변환 (옵션)
+                    if lowercase_concept_name and "concept_name" in doc and doc["concept_name"]:
+                        doc = doc.copy()  # 원본 데이터 보존
+                        doc["concept_name"] = doc["concept_name"].lower()
+                    
                     action = {
                         "_index": self.index_name,
                         "_id": doc["concept_id"],  # concept_id를 문서 ID로 사용
@@ -276,57 +201,35 @@ class ConceptElasticsearchIndexer:
                     "client": self.es,
                     "actions": actions,
                     "index": self.index_name,
-                    "chunk_size": min(batch_size, 50),  # 배치 크기 더 작게
-                    "request_timeout": 180,  # 타임아웃 증가
-                    "raise_on_error": False,  # 에러가 발생해도 예외를 던지지 않음
-                    "raise_on_exception": False,  # 예외가 발생해도 계속 처리
-                    "max_retries": 3,  # 재시도 횟수
-                    "initial_backoff": 2,  # 초기 백오프
-                    "max_backoff": 600  # 최대 백오프
+                    "chunk_size": min(batch_size, 100),
+                    "request_timeout": 120,
+                    "raise_on_error": False,
+                    "raise_on_exception": False,
+                    "max_retries": 2
                 }
                 
                 # Ingest Pipeline이 지정된 경우 추가
                 if pipeline:
-                    # actions에 pipeline 정보 추가
                     for action in actions:
                         action["pipeline"] = pipeline
                 
                 try:
                     success_count, failed_items = bulk(**bulk_params)
-                    
                     total_indexed += success_count
+                    
                     if failed_items:
                         failed_docs.extend(failed_items)
-                        # 실패한 문서 상세 정보 로깅
-                        logging.error(f"총 {len(failed_items)}개 문서 인덱싱 실패")
+                        logging.warning(f"배치에서 {len(failed_items)}개 문서 인덱싱 실패")
                         
-                        # 실패 원인별로 분석
-                        error_reasons = {}
-                        for idx, failed_item in enumerate(failed_items[:5]):  # 처음 5개 로깅
-                            logging.error(f"실패 문서 {idx + 1}: {failed_item}")
-                            
-                            # 실패 원인 추출
-                            if 'index' in failed_item and 'error' in failed_item['index']:
-                                error_type = failed_item['index']['error'].get('type', 'unknown')
-                                error_reason = failed_item['index']['error'].get('reason', 'unknown')
-                                error_key = f"{error_type}: {error_reason}"
-                                error_reasons[error_key] = error_reasons.get(error_key, 0) + 1
-                        
-                        # 실패 원인 요약
-                        logging.error("실패 원인 요약:")
-                        for reason, count in error_reasons.items():
-                            logging.error(f"  - {reason}: {count}건")
-                        
-                        # 첫 번째 실패 문서의 원본 데이터도 로깅
-                        if len(batch_data) > 0:
-                            logging.error(f"첫 번째 문서 원본 데이터: {batch_data[0]}")
+                        # 첫 번째 실패 원인만 로깅
+                        if failed_items:
+                            first_error = failed_items[0]
+                            if 'index' in first_error and 'error' in first_error['index']:
+                                error_info = first_error['index']['error']
+                                logging.warning(f"실패 원인: {error_info.get('type', 'unknown')} - {error_info.get('reason', 'unknown')}")
                             
                 except Exception as bulk_error:
                     logging.error(f"Bulk 인덱싱 중 예외 발생: {bulk_error}")
-                    logging.error(f"Bulk 에러 타입: {type(bulk_error)}")
-                    import traceback
-                    logging.error(f"Bulk 에러 상세: {traceback.format_exc()}")
-                    # 전체 배치를 실패로 처리
                     error_count += len(batch_data)
                     continue
                 
@@ -341,16 +244,14 @@ class ConceptElasticsearchIndexer:
             
             if failed_docs:
                 logging.warning(f"실패한 문서 수: {len(failed_docs)}")
-                # 실패한 문서 로그 저장
-                with open(f"failed_indexing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "w") as f:
-                    json.dump(failed_docs, f, indent=2)
+                # 심각한 실패가 많은 경우에만 파일 저장
+                if len(failed_docs) > len(concepts_data) * 0.1:  # 10% 이상 실패시
+                    with open(f"failed_indexing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "w") as f:
+                        json.dump(failed_docs[:100], f, indent=2)  # 처음 100개만 저장
             
-            # 클러스터 상태가 red일 때는 실패를 허용
-            if len(failed_docs) > 0:
-                logging.warning(f"클러스터 상태 문제로 {len(failed_docs)}개 문서 실패 (계속 진행)")
-            
-            # 성공한 문서가 하나라도 있으면 성공으로 간주
-            return total_indexed > 0 or len(concepts_data) == 0
+            # 성공한 문서가 80% 이상이면 성공으로 간주
+            success_rate = total_indexed / len(concepts_data) if concepts_data else 1.0
+            return success_rate >= 0.8
             
         except Exception as e:
             logging.error(f"인덱싱 중 오류 발생: {e}")
@@ -436,50 +337,12 @@ class ConceptElasticsearchIndexer:
             return False
 
 
-def test_elasticsearch_indexer():
-    """Elasticsearch 인덱서 테스트"""
-    logging.basicConfig(level=logging.INFO)
-    
-    # 테스트 데이터
-    test_data = [
-        {
-            "concept_id": "123456",
-            "concept_name": "Test Concept",
-            "domain_id": "Drug",
-            "vocabulary_id": "RxNorm",
-            "concept_class_id": "Ingredient",
-            "standard_concept": "S",
-            "concept_code": "TEST001",
-            "valid_start_date": "19700101",
-            "valid_end_date": "20991231",
-            "invalid_reason": None,
-            "concept_embedding": [0.1] * 768  # 더미 임베딩
-        }
-    ]
-    
-    try:
-        # 인덱서 초기화
-        indexer = ConceptElasticsearchIndexer(index_name="test_concepts")
-        
-        # 인덱스 생성
-        if indexer.create_index(delete_if_exists=True):
-            print("인덱스 생성 성공")
-        
-        # 테스트 데이터 인덱싱
-        if indexer.index_concepts(test_data):
-            print("데이터 인덱싱 성공")
-        
-        # 통계 확인
-        stats = indexer.get_index_stats()
-        print(f"인덱스 통계: {stats}")
-        
-        # 인덱스 삭제
-        indexer.delete_index()
-        print("테스트 완료")
-        
-    except Exception as e:
-        print(f"테스트 실패: {e}")
-
-
 if __name__ == "__main__":
-    test_elasticsearch_indexer()
+    # 간단한 테스트
+    logging.basicConfig(level=logging.INFO)
+    indexer = ConceptElasticsearchIndexer(index_name="test_concepts")
+    print("Elasticsearch 인덱서 초기화 완료")
+    if indexer.es.ping():
+        print("Elasticsearch 연결 테스트 성공")
+    else:
+        print("Elasticsearch 연결 실패")

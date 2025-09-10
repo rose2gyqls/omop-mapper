@@ -1,9 +1,4 @@
-"""
-엔티티 매핑 API 모듈
-Input: 엔티티 정보
-Output: OMOP CDM에 매핑된 엔티티 정보
-"""
-
+from pickle import NONE
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import time
@@ -12,15 +7,20 @@ from enum import Enum
 
 from .elasticsearch_client import ElasticsearchClient
 
+try:
+    import torch
+    import numpy as np
+    from transformers import AutoTokenizer, AutoModel
+    from sklearn.metrics.pairwise import cosine_similarity
+    HAS_SAPBERT = True
+except ImportError:
+    HAS_SAPBERT = False
+
 logger = logging.getLogger(__name__)
 
 
-class EntityTypeAPI(Enum):
-    """API용 엔티티 타입"""
-    DIAGNOSTIC = "diagnostic"
-    TEST = "test"
-    SURGERY = "surgery"
-    ##
+class DomainID(Enum):
+    """도메인 ID"""
     PROCEDURE = "procedure"
     CONDITION = "condition"
     DRUG = "drug"
@@ -32,13 +32,11 @@ class EntityTypeAPI(Enum):
     PROVIDER = "provider"
 
 
-
 @dataclass
 class EntityInput:
-    """API 입력용 엔티티 데이터"""
+    """입력용 엔티티 데이터"""
     entity_name: str
-    entity_type: EntityTypeAPI
-    domain_id: Optional[str] = None
+    domain_id: DomainID
     vocabulary_id: Optional[str] = None
     confidence: float = 1.0
 
@@ -54,11 +52,15 @@ class MappingResult:
     concept_class_id: str
     standard_concept: str
     concept_code: str
-    mapping_score: float
-    mapping_confidence: str
-    mapping_method: str
-    alternative_concepts: List[Dict[str, Any]]
-
+    valid_start_date: Optional[str] = None
+    valid_end_date: Optional[str] = None
+    invalid_reason: Optional[str] = None
+    concept_embedding: List[float]
+    mapping_score: float = 0.0
+    mapping_confidence: str = "low"
+    mapping_method: str = "unknown"
+    alternative_concepts: List[Dict[str, Any]] = None
+    
 
 def get_es_index(domain_id: str) -> str:
     """도메인 ID에 따른 Elasticsearch 인덱스 반환"""
@@ -93,8 +95,6 @@ class EntityMappingAPI:
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
-        
-        logger.info("✅ EntityMappingAPI 초기화 완료")
     
     def _preprocess_entity_name(self, entity_name: str) -> str:
         """
@@ -136,15 +136,20 @@ class EntityMappingAPI:
             MappingResult: 매핑 결과 또는 None (매핑 실패시)
         """
         try:
-            # 엔티티 이름 전처리
-            preprocessed_entity_name = self._preprocess_entity_name(entity_input.entity_name)
+            # # 엔티티 이름 전처리
+            # preprocessed_entity_name = self._preprocess_entity_name(entity_input.entity_name)
             
-            # 전처리된 엔티티 이름으로 입력 업데이트
-            entity_input.entity_name = preprocessed_entity_name
+            # # 전처리된 엔티티 이름으로 입력 업데이트
+            # entity_input.entity_name = preprocessed_entity_name
             
             # 엔티티 타입별 사전 매핑 정보 세팅
-            entities_to_map = self._prepare_entity_for_mapping(entity_input)
-            
+            entities_to_map = []
+            entities_to_map.append({
+                "entity_name": entity_input.entity_name,
+                "domain_id": entity_input.domain_id or None,
+                "vocabulary_id": entity_input.vocabulary_id or None
+            })
+
             if not entities_to_map:
                 logger.warning(f"엔티티 매핑 준비 실패: {entity_input.entity_name}")
                 return None
@@ -163,83 +168,101 @@ class EntityMappingAPI:
                 logger.warning(f"⚠️ 매핑 실패 - 검색 결과 없음: {entity_name}")
                 return None
             
-            # 2단계: Standard/Non-standard 분류 및 처리
-            # Standard 후보들과 Non-standard → Standard 후보들을 분리하여 처리
-            standard_candidates = []
-            non_standard_to_standard_mappings = []
+            # 2단계: Standard/Non-standard 분류 및 모든 Standard 후보군 수집
+            all_standard_candidates = []
             
             for candidate in candidates:
                 source = candidate['_source']
                 if source.get('standard_concept') == 'S':
-                    # Standard 엔티티: 임시 저장 (나중에 Python 유사도 재계산)
-                    standard_candidates.append({
-                        'candidate': candidate,
-                        'source': source
+                    # Standard 엔티티: 직접 추가
+                    all_standard_candidates.append({
+                        'concept': source,
+                        'is_original_standard': True,
+                        'original_candidate': candidate,
+                        'elasticsearch_score': candidate['_score']
                     })
                 else:
-                    # Non-standard 엔티티: Standard 후보들 조회 후 임시 저장
+                    # Non-standard 엔티티: Standard 후보들 조회 후 추가
                     concept_id = str(source.get('concept_id', ''))
                     standard_candidates_from_non = self._get_standard_candidates(concept_id, domain_id)
                     
-                    if standard_candidates_from_non:
-                        non_standard_to_standard_mappings.append({
-                            'non_standard_source': source,
-                            'non_standard_candidate': candidate,
-                            'standard_candidates': standard_candidates_from_non
+                    for std_candidate in standard_candidates_from_non:
+                        all_standard_candidates.append({
+                            'concept': std_candidate,
+                            'is_original_standard': False,
+                            'original_non_standard': source,
+                            'original_candidate': candidate,
+                            'elasticsearch_score': 0.0  # Non-standard → Standard의 경우 Elasticsearch 점수 없음
                         })
             
-            # 3단계: 모든 후보군에 대해 Python 유사도 재계산 → Re-ranking
-            all_standard_candidates = []
-            
-            # 3-1. Standard 후보들에 대해 Python 유사도 재계산
-            for candidate_info in standard_candidates:
-                source = candidate_info['source']
-                candidate = candidate_info['candidate']
-                
-                # Python 유사도 재계산
-                python_similarity = self._calculate_similarity(
-                    entity_input.entity_name, 
-                    source.get('concept_name', '')
-                )
-                
-                all_standard_candidates.append({
-                    'concept': source,
-                    'final_score': python_similarity,  # Python 유사도 사용
-                    'is_original_standard': True,
-                    'original_candidate': candidate,
-                    'elasticsearch_score': candidate['_score'],
-                    'python_similarity': python_similarity
-                })
-            
-            # 3-2. Non-standard → Standard 후보들에 대해 Python 유사도 재계산
-            for mapping in non_standard_to_standard_mappings:
-                non_standard_source = mapping['non_standard_source']
-                non_standard_candidate = mapping['non_standard_candidate']
-                standard_candidates_list = mapping['standard_candidates']
-                
-                for std_candidate in standard_candidates_list:
-                    # Python 유사도 재계산
-                    python_similarity = self._calculate_similarity(
-                        entity_input.entity_name, 
-                        std_candidate.get('concept_name', '')
-                    )
-                    
-                    all_standard_candidates.append({
-                        'concept': std_candidate,
-                        'final_score': python_similarity,  # Python 유사도 사용
-                        'is_original_standard': False,
-                        'original_non_standard': non_standard_source,
-                        'original_candidate': non_standard_candidate,
-                        'python_similarity': python_similarity
-                    })
-            
-            # 4단계: Python 유사도 기준으로 정렬하여 최고 점수 선택
             if not all_standard_candidates:
                 logger.warning(f"⚠️ 매핑 실패 - 처리된 후보 없음: {entity_name}")
                 return None
             
-            # Python 유사도 기준으로 정렬
-            sorted_candidates = sorted(all_standard_candidates, key=lambda x: x['final_score'], reverse=True)
+            # 중복 제거 (동일한 concept_id와 concept_name인 경우 최고 Elasticsearch 점수만 유지)
+            unique_candidates = {}
+            for candidate in all_standard_candidates:
+                concept = candidate['concept']
+                concept_key = (concept.get('concept_id', ''), concept.get('concept_name', ''))
+                
+                # 동일한 컨셉이 이미 있는 경우 더 높은 Elasticsearch 점수만 유지
+                if concept_key not in unique_candidates or candidate['elasticsearch_score'] > unique_candidates[concept_key]['elasticsearch_score']:
+                    unique_candidates[concept_key] = candidate
+            
+            # 중복 제거된 후보들을 리스트로 변환
+            deduplicated_candidates = list(unique_candidates.values())
+            
+            logger.info(f"중복 제거: {len(all_standard_candidates)}개 → {len(deduplicated_candidates)}개 후보")
+            
+            # 3단계: 모든 후보군에 대해 하이브리드 점수 계산 및 Re-ranking
+            final_candidates = []
+            
+            for candidate in deduplicated_candidates:
+                concept = candidate['concept']
+                elasticsearch_score = candidate['elasticsearch_score']
+                
+                # 하이브리드 점수 계산 (텍스트 + 의미적 유사도)
+                hybrid_score, text_sim, semantic_sim = self._calculate_hybrid_score(
+                    entity_input.entity_name, 
+                    concept.get('concept_name', ''),
+                    elasticsearch_score,
+                    concept
+                )
+                
+                final_candidates.append({
+                    'concept': concept,
+                    'final_score': hybrid_score,
+                    'is_original_standard': candidate['is_original_standard'],
+                    'original_candidate': candidate['original_candidate'],
+                    'elasticsearch_score': elasticsearch_score,
+                    'hybrid_score': hybrid_score,
+                    'text_similarity': text_sim,
+                    'semantic_similarity': semantic_sim
+                })
+
+            # 디버깅용: 마지막 리랭킹 후보 저장 및 간략 로깅
+            self._last_rerank_candidates = [
+                {
+                    'concept_id': str(c['concept'].get('concept_id', '')),
+                    'concept_name': c['concept'].get('concept_name', ''),
+                    'vocabulary_id': c['concept'].get('vocabulary_id', ''),
+                    'elasticsearch_score': c.get('elasticsearch_score', 0.0),
+                    'text_similarity': c.get('text_similarity', 0.0),
+                    'semantic_similarity': c.get('semantic_similarity', 0.0),
+                    'final_score': c.get('final_score', 0.0)
+                }
+                for c in final_candidates
+            ]
+            logger.debug(
+                "리랭킹 후보 요약: " + 
+                ", ".join([
+                    f"{rc['concept_id']}|{rc['final_score']:.3f}(t:{rc['text_similarity']:.3f}, s:{rc['semantic_similarity']:.3f})"
+                    for rc in (self._last_rerank_candidates or [])
+                ])
+            )
+            
+            # 4단계: 하이브리드 점수 기준으로 정렬하여 최고 점수 선택
+            sorted_candidates = sorted(final_candidates, key=lambda x: x['final_score'], reverse=True)
             best_candidate = sorted_candidates[0]
             
             # 5단계: 매핑 결과 생성
@@ -275,7 +298,7 @@ class EntityMappingAPI:
             else:
                 failed_mappings.append({
                     'entity_name': entity_input.entity_name,
-                    'entity_type': entity_input.entity_type.value,
+                    'domain_id': entity_input.domain_id.value if entity_input.domain_id else 'unknown',
                     'reason': 'Low confidence score' if mapping_result else 'No mapping found',
                     'mapping_score': mapping_result.mapping_score if mapping_result else 0.0
                 })
@@ -287,7 +310,7 @@ class EntityMappingAPI:
                 {
                     'source_entity': {
                         'entity_name': mapping.source_entity.entity_name,
-                        'entity_type': mapping.source_entity.entity_type.value,
+                        'domain_id': mapping.source_entity.domain_id.value if mapping.source_entity.domain_id else 'unknown',
                         'confidence': mapping.source_entity.confidence
                     },
                     'mapped_concept': {
@@ -319,84 +342,84 @@ class EntityMappingAPI:
         logger.info(f"✅ 일괄 매핑 완료: {len(successful_mappings)}/{len(entity_inputs)} 성공")
         return result
     
-    def _prepare_entity_for_mapping(self, entity_input: EntityInput) -> List[Dict[str, Any]]:
-        """엔티티 타입별 사전 매핑 정보 세팅"""
-        entities_to_map = []
+    # def _prepare_entity_for_mapping(self, entity_input: EntityInput) -> List[Dict[str, Any]]:
+    #     """엔티티 타입별 사전 매핑 정보 세팅"""
+    #     entities_to_map = []
         
-        # 4개 분류별 사전 매핑 정보 세팅
-        if entity_input.entity_type == EntityTypeAPI.DIAGNOSTIC:
-            entities_to_map.append({
-                "entity_type": "diagnostic",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Condition",
-                "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
-            })
+    #     # 4개 분류별 사전 매핑 정보 세팅
+    #     if entity_input.entity_type == EntityTypeAPI.DIAGNOSTIC:
+    #         entities_to_map.append({
+    #             "entity_type": "diagnostic",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Condition",
+    #             "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.TEST:
-            entities_to_map.append({
-                "entity_type": "test",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Measurement",
-                "vocabulary_id": entity_input.vocabulary_id or "LOINC"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.TEST:
+    #         entities_to_map.append({
+    #             "entity_type": "test",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Measurement",
+    #             "vocabulary_id": entity_input.vocabulary_id or "LOINC"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.SURGERY:
-            entities_to_map.append({
-                "entity_type": "surgery",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Procedure",
-                "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.SURGERY:
+    #         entities_to_map.append({
+    #             "entity_type": "surgery",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Procedure",
+    #             "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.PROCEDURE:
-            entities_to_map.append({
-                "entity_type": "procedure",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Procedure",
-                "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.PROCEDURE:
+    #         entities_to_map.append({
+    #             "entity_type": "procedure",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Procedure",
+    #             "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.CONDITION:
-            entities_to_map.append({
-                "entity_type": "condition",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Condition",
-                "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.CONDITION:
+    #         entities_to_map.append({
+    #             "entity_type": "condition",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Condition",
+    #             "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
+    #         })
 
-        elif entity_input.entity_type == EntityTypeAPI.DRUG:
-            entities_to_map.append({
-                "entity_type": "drug",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Drug",
-                "vocabulary_id": entity_input.vocabulary_id or "RxNorm"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.DRUG:
+    #         entities_to_map.append({
+    #             "entity_type": "drug",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Drug",
+    #             "vocabulary_id": entity_input.vocabulary_id or "RxNorm"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.OBSERVATION:
-            entities_to_map.append({
-                "entity_type": "observation",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Observation",
-                "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.OBSERVATION:
+    #         entities_to_map.append({
+    #             "entity_type": "observation",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Observation",
+    #             "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.MEASUREMENT:
-            entities_to_map.append({
-                "entity_type": "measurement",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Measurement",
-                "vocabulary_id": entity_input.vocabulary_id or "LOINC"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.MEASUREMENT:
+    #         entities_to_map.append({
+    #             "entity_type": "measurement",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Measurement",
+    #             "vocabulary_id": entity_input.vocabulary_id or "LOINC"
+    #         })
         
-        elif entity_input.entity_type == EntityTypeAPI.PROVIDER:
-            entities_to_map.append({
-                "entity_type": "provider",
-                "entity_name": entity_input.entity_name,
-                "domain_id": entity_input.domain_id or "Provider",
-                "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
-            })
+    #     elif entity_input.entity_type == EntityTypeAPI.PROVIDER:
+    #         entities_to_map.append({
+    #             "entity_type": "provider",
+    #             "entity_name": entity_input.entity_name,
+    #             "domain_id": entity_input.domain_id or "Provider",
+    #             "vocabulary_id": entity_input.vocabulary_id or "SNOMED"
+    #         })
         
-        return entities_to_map
+    #     return entities_to_map
     
     def _normalize_score(self, raw_score: float) -> float:
         """
@@ -464,22 +487,23 @@ class EntityMappingAPI:
         entity_name = entity_info["entity_name"]
         domain_id = entity_info["domain_id"]
         
-        # 도메인에 맞는 인덱스 선택
-        es_index = get_es_index(domain_id)
+        # 통합된 concept 인덱스 사용
+        es_index = "concept"
         logger.info(f"검색할 인덱스: {es_index}, 엔티티: {entity_name}")
-        
-        # Standard 필터 제거한 Elasticsearch 쿼리 구성
+
+        # 정확 일치(문장 단위) 가중치 부여
         should_queries = [
             {
-                "term": {
+                "match_phrase": {
                     "concept_name": {
                         "query": entity_name,
-                        "boost": 1000
+                        "boost": 3.0
                     }
                 }
             }
         ]
 
+        # 토큰 매칭과 문장 매칭을 별도 must 절로 분리
         must_queries = [
             {
                 "match": {
@@ -493,27 +517,9 @@ class EntityMappingAPI:
 
         query = {
             "query": {
-                "function_score": {
-                    "query": {
-                        "bool": {
-                            "must": must_queries
-                            # "should": should_queries
-                        }
-                    },
-                    "functions": [
-                        {
-                            "gauss": {
-                                "concept_name_length": {
-                                    "origin": len(entity_name),
-                                    "scale": "1",
-                                    "decay": 0.9
-                                }
-                            },
-                            "weight": 10
-                        }
-                    ],
-                    "boost_mode": "sum",
-                    "score_mode": "sum"
+                "bool": {
+                    "must": must_queries,
+                    "should": should_queries
                 }
             },
             "size": top_k
@@ -556,8 +562,6 @@ class EntityMappingAPI:
             
         except Exception as e:
             logger.error(f"Standard 후보 조회 오류: {str(e)}")
-            # Fallback: 동일 도메인의 표준 컨셉들 조회
-            return self._get_fallback_standard_candidates(domain_id)
     
     def _get_maps_to_relationships(self, concept_id_1: str) -> List[str]:
         """
@@ -579,7 +583,7 @@ class EntityMappingAPI:
                         ]
                     }
                 },
-                "size": 50
+                "size": 10
             }
             
             relationship_response = self.es_client.es_client.search(
@@ -593,7 +597,11 @@ class EntityMappingAPI:
                 if concept_id_2:
                     standard_concept_ids.append(str(concept_id_2))
             
+            # 디버깅 로그 추가
             logger.info(f"concept-relationship 인덱스에서 {concept_id_1}에 대한 {len(standard_concept_ids)}개 Maps to 관계 발견")
+            if standard_concept_ids:
+                logger.info(f"Maps to 관계로 찾은 concept_ids: {standard_concept_ids}")
+            
             return standard_concept_ids
             
         except Exception as e:
@@ -611,19 +619,6 @@ class EntityMappingAPI:
         Returns:
             List[찾은 컨셉들]
         """
-        # 도메인에 맞는 인덱스만 선택
-        domain_to_index = {
-            "Condition": "concept-condition",
-            "Drug": "concept-drug", 
-            "Measurement": "concept-measurement",
-            "Procedure": "concept-procedure",
-            "Observation": "concept-observation",
-            "Device": "concept-device"
-        }
-        
-        target_index = domain_to_index.get(domain_id, "concept-condition")
-        logger.info(f"도메인 {domain_id}에 대해 {target_index} 인덱스에서 검색")
-        
         all_candidates = []
         
         try:
@@ -632,7 +627,7 @@ class EntityMappingAPI:
                     "bool": {
                         "must": [
                             {"terms": {"concept_id": concept_ids}},
-                            {"term": {"standard_concept.keyword": "S"}}
+                            {"term": {"standard_concept": "S"}}
                         ]
                     }
                 },
@@ -640,62 +635,23 @@ class EntityMappingAPI:
             }
             
             concepts_response = self.es_client.es_client.search(
-                index=target_index,
+                index="concept",
                 body=concepts_query
             )
+            
+            # 디버깅 로그 추가
+            logger.info(f"검색 결과: {concepts_response['hits']['total']['value']}개 문서 발견")
             
             for hit in concepts_response['hits']['hits']:
                 all_candidates.append(hit['_source'])
                 
             if concepts_response['hits']['total']['value'] > 0:
-                logger.info(f"{target_index}에서 {concepts_response['hits']['total']['value']}개 standard concept 발견")
+                logger.info(f"{concepts_response['hits']['total']['value']}개 standard concept 발견")
             
         except Exception as e:
-            logger.warning(f"{target_index} 검색 실패: {str(e)}")
+            logger.warning(f"검색 실패: {str(e)}")
         
         return all_candidates
-    
-    def _get_fallback_standard_candidates(self, domain_id: str) -> List[Dict[str, Any]]:
-        """
-        concept_relationship 조회 실패 시 Fallback: 동일 도메인의 standard 컨셉들 조회
-        
-        Args:
-            domain_id: 도메인 ID
-            
-        Returns:
-            List[Standard 컨셉 후보들]
-        """
-        try:
-            es_index = get_es_index(domain_id)
-            
-            # 동일 도메인의 standard 컨셉들 조회
-            query = {
-                "query": {
-                    "bool": {
-                        "must": [
-                            {"term": {"standard_concept.keyword": "S"}},
-                            {"term": {"domain_id.keyword": domain_id}}
-                        ]
-                    }
-                },
-                "size": 20  # 제한된 수의 후보 조회
-            }
-            
-            response = self.es_client.es_client.search(
-                index=es_index,
-                body=query
-            )
-            
-            standard_candidates = []
-            for hit in response['hits']['hits']:
-                standard_candidates.append(hit['_source'])
-            
-            logger.info(f"Fallback: 도메인 {domain_id}에서 {len(standard_candidates)}개 standard 후보 조회")
-            return standard_candidates
-            
-        except Exception as e:
-            logger.error(f"Fallback standard 후보 조회 오류: {str(e)}")
-            return []
     
     def _find_best_standard_candidate(self, entity_input: EntityInput, standard_candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
@@ -747,8 +703,8 @@ class EntityMappingAPI:
             return 0.0
         
         # 대소문자 정규화 및 단어 분할
-        entity_words = set(entity_name.lower().split())
-        concept_words = set(concept_name.lower().split())
+        entity_words = set(entity_name.split())
+        concept_words = set(concept_name.split())
         
         if not entity_words or not concept_words:
             return 0.0
@@ -817,11 +773,141 @@ class EntityMappingAPI:
             concept_class_id=concept.get('concept_class_id', ''),
             standard_concept=concept.get('standard_concept', ''),
             concept_code=concept.get('concept_code', ''),
+            valid_start_date=concept.get('valid_start_date'),
+            valid_end_date=concept.get('valid_end_date'),
+            invalid_reason=concept.get('invalid_reason'),
+            concept_embedding=concept.get('concept_embedding'),
             mapping_score=normalized_score,
             mapping_confidence=mapping_confidence,
             mapping_method=mapping_method,
             alternative_concepts=alternative_concepts
         )
+    
+    def _calculate_hybrid_score(self, entity_name: str, concept_name: str, 
+                              elasticsearch_score: float, concept_source: Dict[str, Any], 
+                              text_weight: float = 0.4, semantic_weight: float = 0.6) -> tuple:
+        """
+        텍스트 유사도와 의미적 유사도를 결합한 하이브리드 점수 계산
+        
+        Args:
+            entity_name: 엔티티 이름
+            concept_name: 컨셉 이름
+            elasticsearch_score: Elasticsearch 점수
+            concept_source: 컨셉 소스 데이터
+            text_weight: 텍스트 유사도 가중치 (기본값: 0.4)
+            semantic_weight: 의미적 유사도 가중치 (기본값: 0.6)
+            
+        Returns:
+            tuple: (하이브리드_점수, 텍스트_유사도, 의미적_유사도)
+        """
+        try:
+            # 1. 텍스트 유사도 계산 (모든 경우에 Python 유사도 사용으로 통일)
+            text_similarity = self._calculate_similarity(entity_name, concept_name)
+            
+            # 2. 의미적 유사도 계산 (SapBERT 임베딩 코사인 유사도)
+            concept_embedding = concept_source.get('concept_embedding')
+            if concept_embedding and len(concept_embedding) == 768:
+                # SapBERT 임베딩이 있는 경우 코사인 유사도 계산
+                try:
+                    # 엔티티 임베딩 생성 (SapBERT 사용)
+                    entity_embedding = self._get_simple_embedding(entity_name) if HAS_SAPBERT else None
+                    
+                    if entity_embedding is not None:
+                        concept_emb_array = np.array(concept_embedding).reshape(1, -1)
+                        entity_emb_array = entity_embedding.reshape(1, -1)
+                        semantic_similarity = cosine_similarity(entity_emb_array, concept_emb_array)[0][0]
+                        # 코사인 유사도는 -1~1 범위이므로 0~1로 정규화
+                        semantic_similarity = (semantic_similarity + 1.0) / 2.0
+                        logger.debug(f"의미적 유사도 계산 성공: {semantic_similarity:.4f} for {concept_source.get('concept_name', 'N/A')}")
+                    else:
+                        # 임베딩 생성 실패시 0.0으로 설정
+                        semantic_similarity = 0.0
+                        logger.debug(f"엔티티 임베딩 생성 실패 - 의미적 유사도 0.0 사용: {concept_source.get('concept_name', 'N/A')}")
+                        
+                except Exception as e:
+                    logger.warning(f"의미적 유사도 계산 실패: {e}")
+                    semantic_similarity = 0.0
+            else:
+                # 임베딩이 없는 경우 0.0으로 설정 (텍스트 유사도와 구분)
+                semantic_similarity = 0.0
+                logger.debug(f"컨셉 임베딩 없음 - 의미적 유사도 0.0 사용: {concept_source.get('concept_name', 'N/A')}")
+            
+            # 3. 하이브리드 점수 계산
+            hybrid_score = (text_weight * text_similarity) + (semantic_weight * semantic_similarity)
+            
+            # 점수를 0-1 범위로 제한
+            hybrid_score = max(0.0, min(1.0, hybrid_score))
+            text_similarity = max(0.0, min(1.0, text_similarity))
+            semantic_similarity = max(0.0, min(1.0, semantic_similarity))
+            
+            return hybrid_score, text_similarity, semantic_similarity
+            
+        except Exception as e:
+            logger.error(f"하이브리드 점수 계산 실패: {e}")
+            # 오류 발생시 기본 Python 유사도 사용
+            fallback_similarity = self._calculate_similarity(entity_name, concept_name)
+            return fallback_similarity, fallback_similarity, fallback_similarity
+    
+    def _get_simple_embedding(self, text: str):
+        """
+        SapBERT를 사용하여 텍스트의 임베딩 생성
+        """
+        try:
+            # SapBERT 모델이 초기화되어 있는지 확인
+            if not hasattr(self, '_sapbert_model') or self._sapbert_model is None:
+                self._initialize_sapbert_model()
+            
+            if self._sapbert_model is None:
+                return None
+            
+            # 토크나이징
+            inputs = self._sapbert_tokenizer(
+                text, 
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True, 
+                max_length=25
+            )
+            inputs = {k: v.to(self._sapbert_device) for k, v in inputs.items()}
+            
+            # 임베딩 생성
+            with torch.no_grad():
+                outputs = self._sapbert_model(**inputs)
+                # CLS 토큰의 임베딩 사용
+                embedding = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+                
+            return embedding.flatten()
+            
+        except Exception as e:
+            logger.warning(f"SapBERT 임베딩 생성 실패: {e}")
+            return None
+    
+    def _initialize_sapbert_model(self):
+        """SapBERT 모델 초기화 (지연 로딩)"""
+        try:
+            if not HAS_SAPBERT:
+                logger.warning("SapBERT 관련 패키지가 설치되지 않음")
+                self._sapbert_model = None
+                self._sapbert_tokenizer = None
+                self._sapbert_device = None
+                return
+            
+            model_name = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
+            logger.info(f"🤖 SapBERT 모델 로딩 중: {model_name}")
+            
+            self._sapbert_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self._sapbert_model = AutoModel.from_pretrained(model_name)
+            self._sapbert_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self._sapbert_model.to(self._sapbert_device)
+            self._sapbert_model.eval()
+            
+            logger.info(f"✅ SapBERT 모델 로딩 완료 (Device: {self._sapbert_device})")
+            
+        except Exception as e:
+            logger.error(f"❌ SapBERT 모델 로딩 실패: {e}")
+            self._sapbert_model = None
+            self._sapbert_tokenizer = None
+            self._sapbert_device = None
     
     def health_check(self) -> Dict[str, Any]:
         """API 상태 확인"""
@@ -830,7 +916,6 @@ class EntityMappingAPI:
         return {
             "api_status": "healthy",
             "elasticsearch_status": es_health,
-            "supported_entity_types": [et.value for et in EntityTypeAPI],
             "confidence_threshold": self.confidence_threshold
         }
 
@@ -839,7 +924,7 @@ class EntityMappingAPI:
 def map_single_entity(
     entity_name: str,
     entity_type: str,
-    domain_id: Optional[str] = None,
+    domain_id: Optional[DomainID] = None,
     vocabulary_id: Optional[str] = None,
     confidence: float = 1.0
 ) -> Optional[MappingResult]:
@@ -857,16 +942,12 @@ def map_single_entity(
         MappingResult: 매핑 결과 또는 None
     """
     try:
-        entity_type_enum = EntityTypeAPI(entity_type)
-        
-        # 엔티티 이름 전처리
         api = EntityMappingAPI()
-        preprocessed_entity_name = api._preprocess_entity_name(entity_name)
+        # preprocessed_entity_name = api._preprocess_entity_name(entity_name)
         
         entity_input = EntityInput(
-            entity_name=preprocessed_entity_name,
-            entity_type=entity_type_enum,
-            domain_id=domain_id,
+            entity_name=entity_name,
+            domain_id=domain_id if isinstance(domain_id, DomainID) else (DomainID(domain_id) if domain_id else None),
             vocabulary_id=vocabulary_id,
             confidence=confidence
         )
@@ -878,82 +959,82 @@ def map_single_entity(
         return None
 
 
-def map_entities_from_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    LLM 분석 결과에서 엔티티 매핑
+# def map_entities_from_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
+#     """
+#     LLM 분석 결과에서 엔티티 매핑
     
-    Args:
-        analysis: LLM 분석 결과 딕셔너리
+#     Args:
+#         analysis: LLM 분석 결과 딕셔너리
         
-    Returns:
-        Dict: 매핑 결과
-    """
-    api = EntityMappingAPI()
-    entity_inputs = []
+#     Returns:
+#         Dict: 매핑 결과
+#     """
+#     api = EntityMappingAPI()
+#     entity_inputs = []
     
-    # 진단 관련 엔티티 추출
-    if "diagnostic" in analysis and analysis["diagnostic"]:
-        diagnostic = analysis["diagnostic"]
-        # 엔티티 이름 전처리
-        preprocessed_name = api._preprocess_entity_name(diagnostic["concept_name"])
-        entity_inputs.append(EntityInput(
-            entity_name=preprocessed_name,
-            entity_type=EntityTypeAPI.DIAGNOSTIC,
-            domain_id=diagnostic.get("domain_id", "Condition"),
-            vocabulary_id=diagnostic.get("vocabulary_id", "SNOMED"),
-            confidence=diagnostic.get("confidence", 1.0)
-        ))
+#     # 진단 관련 엔티티 추출
+#     if "diagnostic" in analysis and analysis["diagnostic"]:
+#         diagnostic = analysis["diagnostic"]
+#         # 엔티티 이름 전처리
+#         preprocessed_name = api._preprocess_entity_name(diagnostic["concept_name"])
+#         entity_inputs.append(EntityInput(
+#             entity_name=preprocessed_name,
+#             entity_type=EntityTypeAPI.DIAGNOSTIC,
+#             domain_id=diagnostic.get("domain_id", "Condition"),
+#             vocabulary_id=diagnostic.get("vocabulary_id", "SNOMED"),
+#             confidence=diagnostic.get("confidence", 1.0)
+#         ))
     
-    # 약물 관련 엔티티 추출
-    if "drug" in analysis and analysis["drug"]:
-        drug = analysis["drug"]
-        # 엔티티 이름 전처리
-        preprocessed_name = api._preprocess_entity_name(drug["concept_name"])
-        entity_inputs.append(EntityInput(
-            entity_name=preprocessed_name,
-            entity_type=EntityTypeAPI.DRUG,
-            domain_id=drug.get("domain_id", "Drug"),
-            vocabulary_id=drug.get("vocabulary_id", "RxNorm"),
-            confidence=drug.get("confidence", 1.0)
-        ))
+#     # 약물 관련 엔티티 추출
+#     if "drug" in analysis and analysis["drug"]:
+#         drug = analysis["drug"]
+#         # 엔티티 이름 전처리
+#         preprocessed_name = api._preprocess_entity_name(drug["concept_name"])
+#         entity_inputs.append(EntityInput(
+#             entity_name=preprocessed_name,
+#             entity_type=EntityTypeAPI.DRUG,
+#             domain_id=drug.get("domain_id", "Drug"),
+#             vocabulary_id=drug.get("vocabulary_id", "RxNorm"),
+#             confidence=drug.get("confidence", 1.0)
+#         ))
     
-    # 검사 관련 엔티티 추출
-    if "test" in analysis and analysis["test"]:
-        test = analysis["test"]
-        # 엔티티 이름 전처리
-        preprocessed_name = api._preprocess_entity_name(test["concept_name"])
-        entity_inputs.append(EntityInput(
-            entity_name=preprocessed_name,
-        entity_type=EntityTypeAPI.TEST,
-        domain_id=test.get("domain_id", "Measurement"),
-        vocabulary_id=test.get("vocabulary_id", "LOINC"),
-        confidence=test.get("confidence", 1.0)
-    ))
+#     # 검사 관련 엔티티 추출
+#     if "test" in analysis and analysis["test"]:
+#         test = analysis["test"]
+#         # 엔티티 이름 전처리
+#         preprocessed_name = api._preprocess_entity_name(test["concept_name"])
+#         entity_inputs.append(EntityInput(
+#             entity_name=preprocessed_name,
+#         entity_type=EntityTypeAPI.TEST,
+#         domain_id=test.get("domain_id", "Measurement"),
+#         vocabulary_id=test.get("vocabulary_id", "LOINC"),
+#         confidence=test.get("confidence", 1.0)
+#     ))
     
-    # 수술 관련 엔티티 추출
-    if "surgery" in analysis and analysis["surgery"]:
-        surgery = analysis["surgery"]
-        # 엔티티 이름 전처리
-        preprocessed_name = api._preprocess_entity_name(surgery["concept_name"])
-        entity_inputs.append(EntityInput(
-            entity_name=preprocessed_name,
-            entity_type=EntityTypeAPI.SURGERY,
-            domain_id=surgery.get("domain_id", "Procedure"),
-            vocabulary_id=surgery.get("vocabulary_id", "SNOMED"),
-            confidence=surgery.get("confidence", 1.0)
-        ))
+#     # 수술 관련 엔티티 추출
+#     if "surgery" in analysis and analysis["surgery"]:
+#         surgery = analysis["surgery"]
+#         # 엔티티 이름 전처리
+#         preprocessed_name = api._preprocess_entity_name(surgery["concept_name"])
+#         entity_inputs.append(EntityInput(
+#             entity_name=preprocessed_name,
+#             entity_type=EntityTypeAPI.SURGERY,
+#             domain_id=surgery.get("domain_id", "Procedure"),
+#             vocabulary_id=surgery.get("vocabulary_id", "SNOMED"),
+#             confidence=surgery.get("confidence", 1.0)
+#         ))
     
-    if not entity_inputs:
-        return {
-            'successful_mappings': [],
-            'failed_mappings': [],
-            'statistics': {
-                'total_entities': 0,
-                'successful_mappings': 0,
-                'failed_mappings': 0,
-                'success_rate': 0.0,
-                'processing_time': 0.0
-            }
-        }
+#     if not entity_inputs:
+#         return {
+#             'successful_mappings': [],
+#             'failed_mappings': [],
+#             'statistics': {
+#                 'total_entities': 0,
+#                 'successful_mappings': 0,
+#                 'failed_mappings': 0,
+#                 'success_rate': 0.0,
+#                 'processing_time': 0.0
+#             }
+#         }
     
-    return api.map_entities_batch(entity_inputs)
+#     return api.map_entities_batch(entity_inputs)

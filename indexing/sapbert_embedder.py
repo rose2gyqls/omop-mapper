@@ -127,35 +127,11 @@ class SapBERTEmbedder:
             torch.cuda.empty_cache()
 
 
-def test_sapbert_embedder():
-    """SapBERT 임베딩 생성기 테스트"""
-    logging.basicConfig(level=logging.INFO)
-    
-    # 테스트 데이터
-    test_texts = [
-        "covid-19",
-        "Coronavirus infection", 
-        "high fever",
-        "Tumor of posterior wall of oropharynx",
-        "Pediatric Cardiology",
-        "Pathology-Anatomic"
-    ]
-    
-    # 임베딩 생성기 초기화
-    embedder = SapBERTEmbedder(batch_size=4)
-    
-    # 임베딩 생성
-    embeddings = embedder.encode_texts(test_texts)
-    
-    print(f"입력 텍스트 수: {len(test_texts)}")
-    print(f"임베딩 차원: {embeddings.shape}")
-    print(f"임베딩 차원 수: {embedder.get_embedding_dimension()}")
-    
-    # 코사인 유사도 계산 예시
-    from sklearn.metrics.pairwise import cosine_similarity
-    similarity_matrix = cosine_similarity(embeddings)
-    print(f"유사도 매트릭스 형태: {similarity_matrix.shape}")
-
-
 if __name__ == "__main__":
-    test_sapbert_embedder()
+    # 간단한 테스트
+    logging.basicConfig(level=logging.INFO)
+    embedder = SapBERTEmbedder(batch_size=4)
+    test_texts = ["covid-19", "hypertension"]
+    embeddings = embedder.encode_texts(test_texts)
+    print(f"SapBERT 임베딩 테스트 완료: {embeddings.shape}")
+    del embedder

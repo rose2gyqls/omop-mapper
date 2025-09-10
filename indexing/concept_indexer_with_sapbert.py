@@ -30,11 +30,12 @@ class ConceptIndexerWithSapBERT:
         es_port: int = 9200,
         es_username: str = "elastic",
         es_password: str = "snomed",
-        index_name: str = "concepts",
+        index_name: str = "concept",
         model_name: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
         gpu_device: int = 0,
         batch_size: int = 128,
-        chunk_size: int = 1000
+        chunk_size: int = 1000,
+        lowercase_concept_name: bool = False
     ):
         """
         인덱서 초기화
@@ -45,16 +46,18 @@ class ConceptIndexerWithSapBERT:
             es_port: Elasticsearch 포트
             es_username: Elasticsearch 사용자명
             es_password: Elasticsearch 비밀번호
-            index_name: 인덱스명
+            index_name: 인덱스명 (예: "concepts" 또는 "concepts-small")
             model_name: SapBERT 모델명
             gpu_device: 사용할 GPU 디바이스 번호
             batch_size: 임베딩 배치 크기
             chunk_size: 데이터 처리 청크 크기
+            lowercase_concept_name: concept_name을 소문자로 변환할지 여부
         """
         self.csv_file_path = csv_file_path
         self.index_name = index_name
         self.batch_size = batch_size
         self.chunk_size = chunk_size
+        self.lowercase_concept_name = lowercase_concept_name
         
         # GPU 디바이스 설정
         device = f"cuda:{gpu_device}" if gpu_device >= 0 else "cpu"
@@ -143,6 +146,11 @@ class ConceptIndexerWithSapBERT:
                     if len(chunk_df) == 0:
                         continue
                     
+                    # concept_name을 소문자로 변환 (옵션)
+                    if self.lowercase_concept_name:
+                        chunk_df = chunk_df.copy()
+                        chunk_df['concept_name'] = chunk_df['concept_name'].str.lower()
+                    
                     # concept_name 추출 (임베딩용)
                     concept_names = chunk_df['concept_name'].fillna('').tolist()
                     
@@ -157,27 +165,26 @@ class ConceptIndexerWithSapBERT:
                         include_embeddings=True
                     )
                     
-                    # Elasticsearch에 인덱싱
+                    # Elasticsearch에 인덱싱 (소문자 변환은 이미 완료되었으므로 False)
                     logging.info(f"청크 {len(documents)}개 문서 인덱싱 중...")
-                    if self.es_indexer.index_concepts(documents, show_progress=False):
+                    if self.es_indexer.index_concepts(
+                        documents, 
+                        show_progress=False,
+                        lowercase_concept_name=False  # 이미 변환 완료
+                    ):
                         total_indexed += len(documents)
                     
                     total_processed += len(chunk_df)
                     pbar.update(len(chunk_df))
                     
-                    # 진행 상황 로깅
-                    elapsed_time = time.time() - start_time
-                    rate = total_processed / elapsed_time if elapsed_time > 0 else 0
-                    
-                    if total_processed > 0:
-                        remaining_concepts = actual_max - total_processed
-                        estimated_time_remaining = remaining_concepts / rate if rate > 0 else 0
-                        
+                    # 간단한 진행 상황 로깅
+                    if total_processed % (self.chunk_size * 10) == 0:  # 10청크마다 로깅
+                        elapsed_time = time.time() - start_time
+                        rate = total_processed / elapsed_time if elapsed_time > 0 else 0
                         logging.info(
                             f"진행: {total_processed:,}/{actual_max:,} "
                             f"({total_processed/actual_max*100:.1f}%) | "
-                            f"처리속도: {rate:.1f} concepts/sec | "
-                            f"예상 남은 시간: {estimated_time_remaining/60:.1f}분"
+                            f"처리속도: {rate:.1f} concepts/sec"
                         )
             
             # 4. 결과 확인
@@ -220,8 +227,11 @@ class ConceptIndexerWithSapBERT:
         for query in test_queries:
             logging.info(f"\n검색 쿼리: '{query}'")
             
+            # 소문자 변환 인덱스인 경우 쿼리도 소문자로 변환
+            search_query = query.lower() if self.lowercase_concept_name else query
+            
             # 쿼리 임베딩 생성
-            query_embedding = self.embedder.encode_texts([query], show_progress=False)[0]
+            query_embedding = self.embedder.encode_texts([search_query], show_progress=False)[0]
             
             # 유사도 검색
             results = self.es_indexer.search_by_embedding(
@@ -249,15 +259,28 @@ class ConceptIndexerWithSapBERT:
             torch.cuda.empty_cache()
 
 
-def main():
+def main(create_small_index: bool = False, gpu_device: int = 0, resume: bool = False):
     """메인 실행 함수"""
     
+    # 인덱스 타입에 따른 설정
+    if create_small_index:
+        index_name = "concept-small"
+        lowercase_concept_name = True
+        log_prefix = "concept_small"
+        print(f"=== concepts-small 인덱스 생성 (소문자 변환, GPU {gpu_device}) ===")
+    else:
+        index_name = "concept"
+        lowercase_concept_name = False
+        log_prefix = "concept"
+        print(f"=== concepts 인덱스 생성 (원본 유지, GPU {gpu_device}) ===")
+    
     # 로깅 설정
+    log_filename = f'{log_prefix}_indexing_gpu{gpu_device}_{time.strftime("%Y%m%d_%H%M%S")}.log'
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(f'concept_indexing_{time.strftime("%Y%m%d_%H%M%S")}.log'),
+            logging.FileHandler(log_filename),
             logging.StreamHandler()
         ]
     )
@@ -268,15 +291,43 @@ def main():
     ES_PORT = 9200
     ES_USERNAME = "elastic"
     ES_PASSWORD = "snomed"
-    INDEX_NAME = "concepts"
     MODEL_NAME = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
-    GPU_DEVICE = 0  # GPU 0번 사용
     BATCH_SIZE = 128  # 임베딩 배치 크기
     CHUNK_SIZE = 1000  # 데이터 처리 청크 크기
     
     # 테스트용 설정 (실제 운영시에는 None으로 설정)
     MAX_CONCEPTS = None  # None이면 전체 데이터 처리
     SKIP_CONCEPTS = 0    # 건너뛸 concept 수
+    
+    # Resume 기능: 기존 인덱스에서 현재 처리된 문서 수 확인
+    if resume:
+        try:
+            # Elasticsearch 인덱서 임시 생성하여 현재 문서 수 확인
+            from elasticsearch_indexer import ConceptElasticsearchIndexer
+            temp_indexer = ConceptElasticsearchIndexer(
+                es_host=ES_HOST,
+                es_port=ES_PORT,
+                username=ES_USERNAME,
+                password=ES_PASSWORD,
+                index_name=index_name
+            )
+            
+            # 현재 인덱스의 문서 수 확인
+            stats = temp_indexer.get_index_stats()
+            if stats and 'document_count' in stats:
+                current_count = stats['document_count']
+                SKIP_CONCEPTS = current_count
+                logging.info(f"🔄 Resume 모드: 현재 {current_count:,}개 문서가 인덱싱되어 있습니다.")
+                logging.info(f"🔄 {current_count:,}개 문서를 건너뛰고 이후부터 처리를 시작합니다.")
+            else:
+                logging.warning("⚠️ Resume 모드이지만 기존 인덱스 정보를 가져올 수 없습니다. 처음부터 시작합니다.")
+                logging.warning(f"⚠️ 받은 통계 정보: {stats}")
+                SKIP_CONCEPTS = 0
+                
+        except Exception as e:
+            logging.error(f"❌ Resume 모드 설정 중 오류 발생: {e}")
+            logging.warning("⚠️ 처음부터 시작합니다.")
+            SKIP_CONCEPTS = 0
     
     try:
         # 인덱서 초기화
@@ -286,27 +337,28 @@ def main():
             es_port=ES_PORT,
             es_username=ES_USERNAME,
             es_password=ES_PASSWORD,
-            index_name=INDEX_NAME,
+            index_name=index_name,  # 동적으로 설정
             model_name=MODEL_NAME,
-            gpu_device=GPU_DEVICE,
+            gpu_device=gpu_device,
             batch_size=BATCH_SIZE,
-            chunk_size=CHUNK_SIZE
+            chunk_size=CHUNK_SIZE,
+            lowercase_concept_name=lowercase_concept_name  # 동적으로 설정
         )
         
         # 전체 인덱싱 실행
         success = indexer.run_full_indexing(
-            delete_existing_index=True,
+            delete_existing_index=not resume,  # resume 모드일 때는 기존 인덱스 삭제하지 않음
             max_concepts=MAX_CONCEPTS,
             skip_concepts=SKIP_CONCEPTS
         )
         
         if success:
-            logging.info("인덱싱이 성공적으로 완료되었습니다!")
+            logging.info(f"{index_name} 인덱싱이 성공적으로 완료되었습니다!")
             
             # 검색 테스트 실행
             indexer.test_search()
         else:
-            logging.error("인덱싱에 실패했습니다.")
+            logging.error(f"{index_name} 인덱싱에 실패했습니다.")
             
     except Exception as e:
         logging.error(f"실행 중 오류 발생: {e}")
@@ -318,4 +370,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    import argparse
+    
+    # 명령행 인수 파싱
+    parser = argparse.ArgumentParser(description='CONCEPT 데이터 인덱싱')
+    parser.add_argument('--small', action='store_true', help='concepts-small 인덱스 생성 (소문자 변환)')
+    parser.add_argument('--gpu', type=int, default=0, help='사용할 GPU 번호 (기본값: 0)')
+    
+    args = parser.parse_args()
+    
+    # 메인 함수 실행
+    main(create_small_index=args.small, gpu_device=args.gpu)
