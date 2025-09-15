@@ -578,7 +578,7 @@ class ElasticsearchClient:
         password: Optional[str] = None,
         use_ssl: bool = False,
         timeout: int = 30,
-        use_grpc: bool = False  # 기본값을 False로 변경
+        use_grpc: bool = False
     ):
         """
         Elasticsearch 클라이언트 초기화
@@ -619,9 +619,9 @@ class ElasticsearchClient:
             self.es_client = None
         
         # OMOP CDM 인덱스 이름들
-        self.concept_index = "concept-drug"  # 실제 인덱스명으로 변경
-        self.concept_synonym_index = "concept-drug"
-        self.concept_relationship_index = "concept-drug"
+        self.concept_index = "concept"  # 실제 인덱스명으로 변경
+        self.concept_synonym_index = "concept"
+        self.concept_relationship_index = "concept-relationship"
         
         if use_grpc:
             if HAS_GRPC:
@@ -812,7 +812,6 @@ class ElasticsearchClient:
             try:
                 # 방법 1: URL 직접 전달 (최신 버전)
                 client = Elasticsearch(url, **es_config)
-                print(f"✅ URL 방식으로 Elasticsearch 클라이언트 생성 성공")
             except Exception as e1:
                 print(f"⚠️ URL 방식 연결 실패: {str(e1)}")
                 try:

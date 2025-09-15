@@ -52,10 +52,10 @@ class MappingResult:
     concept_class_id: str
     standard_concept: str
     concept_code: str
+    concept_embedding: List[float]
     valid_start_date: Optional[str] = None
     valid_end_date: Optional[str] = None
     invalid_reason: Optional[str] = None
-    concept_embedding: List[float]
     mapping_score: float = 0.0
     mapping_confidence: str = "low"
     mapping_method: str = "unknown"
@@ -157,7 +157,7 @@ class EntityMappingAPI:
             entity_info = entities_to_map[0]
             entity_name = entity_info["entity_name"]
             domain_id = entity_info["domain_id"]
-            vocabulary_id = entity_info["vocabulary_id"]
+            # vocabulary_id = entity_info["vocabulary_id"]
             
             logger.info(f"매핑 시작: {entity_name} (도메인: {domain_id})")
             
@@ -170,11 +170,14 @@ class EntityMappingAPI:
             
             # 2단계: Standard/Non-standard 분류 및 모든 Standard 후보군 수집
             all_standard_candidates = []
+            standard_count = 0
+            non_standard_count = 0
             
             for candidate in candidates:
                 source = candidate['_source']
                 if source.get('standard_concept') == 'S':
                     # Standard 엔티티: 직접 추가
+                    standard_count += 1
                     all_standard_candidates.append({
                         'concept': source,
                         'is_original_standard': True,
@@ -183,6 +186,7 @@ class EntityMappingAPI:
                     })
                 else:
                     # Non-standard 엔티티: Standard 후보들 조회 후 추가
+                    non_standard_count += 1
                     concept_id = str(source.get('concept_id', ''))
                     standard_candidates_from_non = self._get_standard_candidates(concept_id, domain_id)
                     
@@ -194,6 +198,10 @@ class EntityMappingAPI:
                             'original_candidate': candidate,
                             'elasticsearch_score': 0.0  # Non-standard → Standard의 경우 Elasticsearch 점수 없음
                         })
+                        logger.info(f"      - {std_candidate.get('concept_name', 'N/A')} (concept_id: {std_candidate.get('concept_id', 'N/A')})")
+            
+            logger.info(f"📊 2단계 결과: Standard {standard_count}개, Non-standard {non_standard_count}개")
+            logger.info(f"📊 총 Standard 후보: {len(all_standard_candidates)}개")
             
             if not all_standard_candidates:
                 logger.warning(f"⚠️ 매핑 실패 - 처리된 후보 없음: {entity_name}")
@@ -214,12 +222,19 @@ class EntityMappingAPI:
             
             logger.info(f"중복 제거: {len(all_standard_candidates)}개 → {len(deduplicated_candidates)}개 후보")
             
-            # 3단계: 모든 후보군에 대해 하이브리드 점수 계산 및 Re-ranking
+            # ===== 3단계: 모든 후보군에 대해 하이브리드 점수 계산 및 Re-ranking =====
+            logger.info("=" * 60)
+            logger.info("3단계: 모든 후보군에 대해 하이브리드 점수 계산 및 Re-ranking")
+            logger.info("=" * 60)
+            
             final_candidates = []
             
-            for candidate in deduplicated_candidates:
+            for i, candidate in enumerate(deduplicated_candidates, 1):
                 concept = candidate['concept']
                 elasticsearch_score = candidate['elasticsearch_score']
+                
+                logger.info(f"  {i}. {concept.get('concept_name', 'N/A')} (concept_id: {concept.get('concept_id', 'N/A')})")
+                logger.info(f"     Elasticsearch 점수: {elasticsearch_score:.4f}")
                 
                 # 하이브리드 점수 계산 (텍스트 + 의미적 유사도)
                 hybrid_score, text_sim, semantic_sim = self._calculate_hybrid_score(
@@ -228,6 +243,10 @@ class EntityMappingAPI:
                     elasticsearch_score,
                     concept
                 )
+                
+                logger.info(f"     텍스트 유사도: {text_sim:.4f}")
+                logger.info(f"     의미적 유사도: {semantic_sim:.4f}")
+                logger.info(f"     하이브리드 점수: {hybrid_score:.4f}")
                 
                 final_candidates.append({
                     'concept': concept,
@@ -261,15 +280,29 @@ class EntityMappingAPI:
                 ])
             )
             
-            # 4단계: 하이브리드 점수 기준으로 정렬하여 최고 점수 선택
+            # ===== 4단계: 하이브리드 점수 기준으로 정렬하여 최고 점수 선택 =====
+            logger.info("=" * 60)
+            logger.info("4단계: 하이브리드 점수 기준으로 정렬하여 최고 점수 선택")
+            logger.info("=" * 60)
+            
             sorted_candidates = sorted(final_candidates, key=lambda x: x['final_score'], reverse=True)
             best_candidate = sorted_candidates[0]
+            
+            logger.info("📊 최종 순위:")
+            for i, candidate in enumerate(sorted_candidates, 1):
+                concept = candidate['concept']
+                logger.info(f"  {i}. {concept.get('concept_name', 'N/A')} "
+                          f"(concept_id: {concept.get('concept_id', 'N/A')}) "
+                          f"- 점수: {candidate['final_score']:.4f} "
+                          f"(텍스트: {candidate['text_similarity']:.4f}, "
+                          f"의미적: {candidate['semantic_similarity']:.4f})")
             
             # 5단계: 매핑 결과 생성
             mapping_result = self._create_mapping_result(entity_input, best_candidate, sorted_candidates[1:4])
             
             mapping_type = "direct_standard" if best_candidate['is_original_standard'] else "non_standard_to_standard"
             logger.info(f"✅ 매핑 성공 ({mapping_type}): {entity_name} -> {mapping_result.mapped_concept_name}")
+            logger.info(f"📊 최종 매핑 점수: {mapping_result.mapping_score:.4f} (신뢰도: {mapping_result.mapping_confidence})")
             return mapping_result
                 
         except Exception as e:
@@ -897,7 +930,8 @@ class EntityMappingAPI:
             
             self._sapbert_tokenizer = AutoTokenizer.from_pretrained(model_name)
             self._sapbert_model = AutoModel.from_pretrained(model_name)
-            self._sapbert_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            # GPU가 다른 작업으로 점유된 경우 CPU 사용
+            self._sapbert_device = torch.device('cpu')  # 임시로 CPU 강제 사용
             self._sapbert_model.to(self._sapbert_device)
             self._sapbert_model.eval()
             

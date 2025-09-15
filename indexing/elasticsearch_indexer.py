@@ -22,7 +22,8 @@ class ConceptElasticsearchIndexer:
         es_scheme: str = "http",
         username: Optional[str] = None,
         password: Optional[str] = None,
-        index_name: str = "concepts"
+        index_name: str = "concepts",
+        include_embeddings: bool = True
     ):
         """
         Elasticsearch 인덱서 초기화
@@ -36,6 +37,7 @@ class ConceptElasticsearchIndexer:
             index_name: 인덱스명
         """
         self.index_name = index_name
+        self.include_embeddings = include_embeddings
         
         # Elasticsearch 클라이언트 설정
         try:
@@ -110,13 +112,7 @@ class ConceptElasticsearchIndexer:
                         "concept_code": {"type": "keyword"},
                         "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
                         "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
-                        "invalid_reason": {"type": "keyword"},
-                        "concept_embedding": {
-                            "type": "dense_vector",
-                            "dims": 768,
-                            "index": True,
-                            "similarity": "cosine"
-                        }
+                        "invalid_reason": {"type": "keyword"}
                     }
                 },
                 "settings": {
@@ -127,6 +123,15 @@ class ConceptElasticsearchIndexer:
                     "index.max_result_window": 50000
                 }
             }
+
+            # 임베딩을 포함하는 경우에만 매핑 추가
+            if self.include_embeddings:
+                index_mapping["mappings"]["properties"]["concept_embedding"] = {
+                    "type": "dense_vector",
+                    "dims": 768,
+                    "index": True,
+                    "similarity": "cosine"
+                }
             
             # 인덱스 생성
             self.es.indices.create(index=self.index_name, body=index_mapping)
@@ -188,6 +193,10 @@ class ConceptElasticsearchIndexer:
                     if lowercase_concept_name and "concept_name" in doc and doc["concept_name"]:
                         doc = doc.copy()  # 원본 데이터 보존
                         doc["concept_name"] = doc["concept_name"].lower()
+                    # 임베딩 비활성화 시 필드 제거
+                    if not self.include_embeddings and "concept_embedding" in doc:
+                        doc = doc.copy()
+                        doc.pop("concept_embedding", None)
                     
                     action = {
                         "_index": self.index_name,
@@ -201,11 +210,11 @@ class ConceptElasticsearchIndexer:
                     "client": self.es,
                     "actions": actions,
                     "index": self.index_name,
-                    "chunk_size": min(batch_size, 100),
-                    "request_timeout": 120,
+                    "chunk_size": min(batch_size, 50),  # 임베딩 포함 시 배치 크기 축소
+                    "request_timeout": 300,             # 타임아웃 증가
                     "raise_on_error": False,
                     "raise_on_exception": False,
-                    "max_retries": 2
+                    "max_retries": 3                    # 재시도 횟수 증가
                 }
                 
                 # Ingest Pipeline이 지정된 경우 추가
@@ -275,6 +284,9 @@ class ConceptElasticsearchIndexer:
             검색 결과 리스트
         """
         try:
+            if not hasattr(self, "include_embeddings") or not self.include_embeddings:
+                logging.warning("임베딩 비활성화 상태이므로 임베딩 검색을 건너뜁니다.")
+                return []
             search_body = {
                 "query": {
                     "script_score": {

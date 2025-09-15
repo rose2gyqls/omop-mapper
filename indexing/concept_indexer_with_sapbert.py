@@ -35,7 +35,8 @@ class ConceptIndexerWithSapBERT:
         gpu_device: int = 0,
         batch_size: int = 128,
         chunk_size: int = 1000,
-        lowercase_concept_name: bool = False
+        lowercase_concept_name: bool = False,
+        include_embeddings: bool = True
     ):
         """
         인덱서 초기화
@@ -58,6 +59,7 @@ class ConceptIndexerWithSapBERT:
         self.batch_size = batch_size
         self.chunk_size = chunk_size
         self.lowercase_concept_name = lowercase_concept_name
+        self.include_embeddings = include_embeddings
         
         # GPU 디바이스 설정
         device = f"cuda:{gpu_device}" if gpu_device >= 0 else "cpu"
@@ -69,13 +71,16 @@ class ConceptIndexerWithSapBERT:
         logging.info("1. 데이터 처리기 초기화...")
         self.data_processor = ConceptDataProcessor(csv_file_path)
         
-        # 2. SapBERT 임베딩 생성기 초기화
-        logging.info("2. SapBERT 모델 로딩...")
-        self.embedder = SapBERTEmbedder(
-            model_name=model_name,
-            device=device,
-            batch_size=batch_size
-        )
+        # 2. SapBERT 임베딩 생성기 초기화 (옵션)
+        if self.include_embeddings:
+            logging.info("2. SapBERT 모델 로딩...")
+            self.embedder = SapBERTEmbedder(
+                model_name=model_name,
+                device=device,
+                batch_size=batch_size
+            )
+        else:
+            logging.info("2. 임베딩 비활성화 모드: SapBERT 모델 로딩 건너뜀")
         
         # 3. Elasticsearch 인덱서 초기화
         logging.info("3. Elasticsearch 인덱서 초기화...")
@@ -84,7 +89,8 @@ class ConceptIndexerWithSapBERT:
             es_port=es_port,
             username=es_username,
             password=es_password,
-            index_name=index_name
+            index_name=index_name,
+            include_embeddings=self.include_embeddings
         )
         
         logging.info("=== 초기화 완료 ===")
@@ -154,15 +160,17 @@ class ConceptIndexerWithSapBERT:
                     # concept_name 추출 (임베딩용)
                     concept_names = chunk_df['concept_name'].fillna('').tolist()
                     
-                    # SapBERT 임베딩 생성
-                    logging.info(f"청크 {len(chunk_df)}개 concept 임베딩 생성 중...")
-                    embeddings = self.embedder.encode_texts(concept_names, show_progress=False)
+                    # SapBERT 임베딩 생성 (옵션)
+                    embeddings = None
+                    if self.include_embeddings:
+                        logging.info(f"청크 {len(chunk_df)}개 concept 임베딩 생성 중...")
+                        embeddings = self.embedder.encode_texts(concept_names, show_progress=False)
                     
                     # Elasticsearch 문서 형식으로 변환
                     documents = self.data_processor.convert_to_elasticsearch_format(
                         chunk_df, 
                         embeddings=embeddings,
-                        include_embeddings=True
+                        include_embeddings=self.include_embeddings
                     )
                     
                     # Elasticsearch에 인덱싱 (소문자 변환은 이미 완료되었으므로 False)
@@ -230,10 +238,12 @@ class ConceptIndexerWithSapBERT:
             # 소문자 변환 인덱스인 경우 쿼리도 소문자로 변환
             search_query = query.lower() if self.lowercase_concept_name else query
             
-            # 쿼리 임베딩 생성
+            # 임베딩 비활성화 시 검색 스킵
+            if not self.include_embeddings:
+                logging.info("임베딩 비활성화 상태이므로 검색 테스트를 건너뜁니다.")
+                continue
+            # 쿼리 임베딩 생성 및 검색
             query_embedding = self.embedder.encode_texts([search_query], show_progress=False)[0]
-            
-            # 유사도 검색
             results = self.es_indexer.search_by_embedding(
                 query_embedding.tolist(),
                 size=5,
@@ -259,7 +269,7 @@ class ConceptIndexerWithSapBERT:
             torch.cuda.empty_cache()
 
 
-def main(create_small_index: bool = False, gpu_device: int = 0, resume: bool = False):
+def main(create_small_index: bool = False, gpu_device: int = 0, resume: bool = False, include_embeddings: bool = True):
     """메인 실행 함수"""
     
     # 인덱스 타입에 따른 설정
@@ -293,7 +303,7 @@ def main(create_small_index: bool = False, gpu_device: int = 0, resume: bool = F
     ES_PASSWORD = "snomed"
     MODEL_NAME = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
     BATCH_SIZE = 128  # 임베딩 배치 크기
-    CHUNK_SIZE = 1000  # 데이터 처리 청크 크기
+    CHUNK_SIZE = 1000   # 데이터 처리 청크 크기 (임베딩 포함 시 축소)
     
     # 테스트용 설정 (실제 운영시에는 None으로 설정)
     MAX_CONCEPTS = None  # None이면 전체 데이터 처리
@@ -342,7 +352,8 @@ def main(create_small_index: bool = False, gpu_device: int = 0, resume: bool = F
             gpu_device=gpu_device,
             batch_size=BATCH_SIZE,
             chunk_size=CHUNK_SIZE,
-            lowercase_concept_name=lowercase_concept_name  # 동적으로 설정
+            lowercase_concept_name=lowercase_concept_name,  # 동적으로 설정
+            include_embeddings=include_embeddings
         )
         
         # 전체 인덱싱 실행
@@ -377,8 +388,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='CONCEPT 데이터 인덱싱')
     parser.add_argument('--small', action='store_true', help='concepts-small 인덱스 생성 (소문자 변환)')
     parser.add_argument('--gpu', type=int, default=0, help='사용할 GPU 번호 (기본값: 0)')
+    parser.add_argument('--no-embedding', action='store_true', help='임베딩 생성 및 인덱싱 비활성화')
     
     args = parser.parse_args()
     
     # 메인 함수 실행
-    main(create_small_index=args.small, gpu_device=args.gpu)
+    main(create_small_index=args.small, gpu_device=args.gpu, include_embeddings=(not args.no_embedding))

@@ -242,7 +242,7 @@ class ConceptDataProcessor:
         """
         documents = []
         
-        for idx, row in df.iterrows():
+        for i, (idx, row) in enumerate(df.iterrows()):
             doc = {}
             
             # 기본 필드 매핑
@@ -256,8 +256,9 @@ class ConceptDataProcessor:
                         doc[col] = str(value) if value is not None else None
             
             # 임베딩 추가 (Ingest Pipeline을 사용하지 않는 경우에만)
-            if include_embeddings and embeddings is not None and idx < len(embeddings):
-                doc['concept_embedding'] = embeddings[idx].tolist()
+            # i를 사용하여 embeddings 배열과 올바르게 매칭
+            if include_embeddings and embeddings is not None and i < len(embeddings):
+                doc['concept_embedding'] = embeddings[i].tolist()
             
             documents.append(doc)
         

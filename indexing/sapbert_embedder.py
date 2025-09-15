@@ -5,6 +5,7 @@ SapBERT 임베딩 생성기 모듈
 """
 
 import logging
+import os
 import numpy as np
 import torch
 from tqdm.auto import tqdm
@@ -20,7 +21,8 @@ class SapBERTEmbedder:
         model_name: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
         device: Optional[str] = None,
         max_length: int = 25,
-        batch_size: int = 128
+        batch_size: int = 128,
+        enabled: Optional[bool] = None
     ):
         """
         SapBERT 임베딩 생성기 초기화
@@ -35,12 +37,23 @@ class SapBERTEmbedder:
         self.max_length = max_length
         self.batch_size = batch_size
         
+        # 임베딩 사용 여부 결정 (우선순위: 인자 > 환경변수 > 기본 False)
+        if enabled is None:
+            env_val = os.getenv("OMOP_ENABLE_EMBEDDING", "0").strip()
+            self.enabled = env_val in ("1", "true", "True", "YES", "yes")
+        else:
+            self.enabled = bool(enabled)
+        
         # 디바이스 설정
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
             
+        if not self.enabled:
+            logging.info("SapBERT 임베딩 비활성화됨 (enabled=False). 모델 로딩을 건너뜁니다.")
+            return
+        
         logging.info(f"SapBERT 모델 로딩 중: {model_name}")
         logging.info(f"사용 디바이스: {self.device}")
         
@@ -63,6 +76,10 @@ class SapBERTEmbedder:
         Returns:
             임베딩 배열 (shape: [len(texts), embedding_dim])
         """
+        if not self.enabled:
+            logging.info("SapBERT 임베딩이 비활성화되어 빈 배열을 반환합니다.")
+            return np.array([])
+        
         if not texts:
             return np.array([])
             
@@ -117,6 +134,8 @@ class SapBERTEmbedder:
     
     def get_embedding_dimension(self) -> int:
         """임베딩 차원 수 반환"""
+        if not self.enabled:
+            return 0
         return self.model.config.hidden_size
     
     def __del__(self):
@@ -130,7 +149,8 @@ class SapBERTEmbedder:
 if __name__ == "__main__":
     # 간단한 테스트
     logging.basicConfig(level=logging.INFO)
-    embedder = SapBERTEmbedder(batch_size=4)
+    # 테스트 시 임베딩을 강제로 켭니다. 실제 인덱싱 기본값은 비활성화입니다.
+    embedder = SapBERTEmbedder(batch_size=4, enabled=True)
     test_texts = ["covid-19", "hypertension"]
     embeddings = embedder.encode_texts(test_texts)
     print(f"SapBERT 임베딩 테스트 완료: {embeddings.shape}")
