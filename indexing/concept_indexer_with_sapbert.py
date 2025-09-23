@@ -393,4 +393,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # 메인 함수 실행
-    main(create_small_index=args.small, gpu_device=args.gpu, include_embeddings=(not args.no_embedding))
+    main(create_small_index=args.small, gpu_device=args.gpu, include_embeddings=True)
