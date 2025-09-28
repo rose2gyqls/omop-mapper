@@ -75,6 +75,9 @@ class EntityMappingTester:
         """테스트 데이터 로드"""
         self.logger.info(f"테스트 데이터 로드: {excel_path}")
         
+        # 제외할 도메인 목록
+        excluded_domains = ['Period', 'Threshold', 'Demographics']
+        
         all_data = []
         
         for sheet in ['10', '11', '12']:
@@ -83,7 +86,14 @@ class EntityMappingTester:
             # NaN이 아닌 entity_plain_name만 필터링
             valid_entities = df.dropna(subset=['entity_plain_name'])
             
-            self.logger.info(f"시트 {sheet}: 총 {len(df)}행, 유효한 엔티티 {len(valid_entities)}개")
+            # 제외할 도메인 필터링
+            before_filter = len(valid_entities)
+            valid_entities = valid_entities[~valid_entities['entity_domain'].isin(excluded_domains)]
+            after_filter = len(valid_entities)
+            
+            excluded_count = before_filter - after_filter
+            
+            self.logger.info(f"시트 {sheet}: 총 {len(df)}행, 유효한 엔티티 {before_filter}개, 제외된 엔티티 {excluded_count}개 (Period/Threshold/Demographics), 최종 {after_filter}개")
             
             # 시트 정보 추가
             valid_entities = valid_entities.copy()
@@ -92,7 +102,12 @@ class EntityMappingTester:
             all_data.append(valid_entities)
         
         combined_data = pd.concat(all_data, ignore_index=True)
-        self.logger.info(f"전체 테스트 데이터: {len(combined_data)}개 엔티티")
+        
+        # 전체 제외 통계
+        total_excluded = sum([len(df.dropna(subset=['entity_plain_name'])) for df in [pd.read_excel(excel_path, sheet_name=sheet) for sheet in ['10', '11', '12']]]) - len(combined_data)
+        
+        self.logger.info(f"전체 테스트 데이터: {len(combined_data)}개 엔티티 (제외된 도메인: {excluded_domains})")
+        self.logger.info(f"총 제외된 엔티티: {total_excluded}개")
         
         return combined_data
     
