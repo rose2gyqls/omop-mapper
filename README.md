@@ -4,14 +4,16 @@
 
 ## Description
 
-This project provides an intelligent entity mapping API for OMOP Common Data Model (CDM) concepts using hybrid search combining textual similarity and semantic similarity. The system leverages Elasticsearch for efficient concept retrieval and SapBERT embeddings for semantic understanding.
+This project provides an intelligent entity mapping API for OMOP Common Data Model (CDM) concepts using a **3-stage hybrid search** pipeline that combines textual similarity and semantic similarity. The system leverages Elasticsearch for efficient concept retrieval and SapBERT embeddings for semantic understanding.
 
 **Key Features:**
-* **Hybrid Search**: Combines textual string matching with semantic similarity using SapBERT embeddings
+* **3-Stage Mapping Pipeline**: 
+  1. Elasticsearch query for top 5 candidates
+  2. Standard/Non-standard classification and candidate collection
+  3. Hybrid scoring with concept embeddings
+* **Semantic Understanding**: SapBERT embeddings for medical concept semantic similarity
 * **OMOP CDM Compliant**: Full support for OMOP CDM concept mapping with standard/non-standard concept handling
 * **Elasticsearch Integration**: High-performance search with concept embeddings stored in Elasticsearch
-* **Multi-domain Support**: Handles various medical domains (Drug, Condition, Procedure, Measurement, etc.)
-* **Real-time API**: Fast entity mapping with confidence scoring and relationship mapping
 
 ## Requirements
 
@@ -57,6 +59,7 @@ ELASTICSEARCH_USERNAME=elastic
 ELASTICSEARCH_PASSWORD=your-password
 
 # SapBERT Model Configuration
+OMOP_ENABLE_EMBEDDING=1
 SAPBERT_MODEL=cambridgeltl/SapBERT-from-PubMedBERT-fulltext
 GPU_DEVICE=0
 ```
@@ -80,53 +83,27 @@ omop-mapper/
 Index OMOP concepts with SapBERT embeddings:
 
 ```bash
-python test/run_concept_indexing.py \
+python run_indexing.py \
     --csv-path "./data/CONCEPT.csv" \
     --es-host "your-elasticsearch-host" \
     --es-port 9200 \
     --es-username "elastic" \
     --es-password "your-password" \
-    --index-name "concepts" \
+    --index-name "concept" \
     --model-name "cambridgeltl/SapBERT-from-PubMedBERT-fulltext" \
     --batch-size 128 \
     --chunk-size 1000
 ```
-
-**Arguments:**
-* `--csv-path`: Path to the CONCEPT.csv file
-* `--es-host`: Elasticsearch host address
-* `--es-port`: Elasticsearch port (default: 9200)
-* `--es-username`: Elasticsearch username
-* `--es-password`: Elasticsearch password
-* `--index-name`: Target index name (default: "concepts")
-* `--model-name`: SapBERT model identifier
-* `--batch-size`: Embedding generation batch size (default: 128)
-* `--chunk-size`: Data processing chunk size (default: 1000)
-* `--max-concepts`: Maximum number of concepts to process (optional)
-* `--skip-concepts`: Number of concepts to skip (default: 0)
-* `--gpu-device`: GPU device number (default: 0)
 
 ### 2. Test Indexing
 
 For testing with a smaller dataset:
 
 ```bash
-python test/run_concept_indexing.py \
-    --test \
+python run_indexing.py \
+    --csv-path "./data/CONCEPT.csv" \
     --max-concepts 10000 \
     --batch-size 64
-```
-
-### 3. Domain-Specific Indexing
-
-Index specific domains only:
-
-```bash
-python test/run_concept_indexing.py \
-    --csv-path "./data/CONCEPT.csv" \
-    --index-name "concepts-drug" \
-    --domain-filter "Drug" \
-    --max-concepts 50000
 ```
 
 ## Usage
@@ -134,7 +111,7 @@ python test/run_concept_indexing.py \
 ### 1. Entity Mapping API
 
 ```python
-from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, EntityTypeAPI
+from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 
 # Initialize the API
 api = EntityMappingAPI()
@@ -145,46 +122,87 @@ print(health)
 
 # Map a single entity
 entity = EntityInput(
-    entity_name="diabetes",
-    entity_type=EntityTypeAPI.CONDITION,
-    confidence=1.0
+    entity_name="myocardial ischemia",
+    domain_id=DomainID.CONDITION,
+    vocabulary_id="SNOMED"  # Optional
 )
 
-results = api.map_entities([entity])
-print(results)
+result = api.map_entity(entity)
+
+if result:
+    print(f"Mapped: {result.mapped_concept_name} (ID: {result.mapped_concept_id})")
+    print(f"Score: {result.mapping_score:.4f}")
+    print(f"Confidence: {result.mapping_confidence}")
+    print(f"Method: {result.mapping_method}")
+    
+    # Alternative concepts
+    for alt in result.alternative_concepts:
+        print(f"Alternative: {alt['concept_name']} (Score: {alt['score']:.4f})")
 ```
 
-### 2. Hybrid Search Testing
+### 2. 3-Stage Mapping Testing
 
-Test the hybrid search functionality:
+Test the complete 3-stage mapping pipeline:
 
 ```bash
-python test/test_2_entity.py
+# Test with sample data
+python test_entity_mapping_with_logging.py
 ```
 
-### 3. Direct Elasticsearch Search
+**Test Output:**
+```
+📊 3단계 후보군 상세 정보:
+   1. Myocardial ischemia (ID: 4186397)
+      - 텍스트 유사도: 1.0000
+      - 의미적 유사도: 1.0000
+      - 최종 점수: 1.0000
+      - Vocabulary: SNOMED
+
+✅ 매핑 성공!
+   - 매핑된 컨셉: Myocardial ischemia (ID: 4186397)
+   - 매핑 점수: 1.0000
+   - 매핑 신뢰도: very_high
+   - 매핑 방법: direct_standard
+   - Vocabulary: SNOMED
+```
+
+## 3-Stage Mapping Pipeline
+
+### Stage 1: Elasticsearch Query
+- Searches top 5 candidates using text-based queries
+- Combines exact phrase matching with token-based matching
+- Returns candidates regardless of standard/non-standard status
+
+### Stage 2: Standard Candidate Collection
+- **Standard Concepts (S/C)**: Added directly to candidate pool
+- **Non-standard Concepts**: Maps to standard concepts via "Maps to" relationships
+- **Deduplication**: Removes duplicate concepts based on concept_id and concept_name
+- **Relationship Resolution**: Uses concept_relationship index for mapping chains
+
+### Stage 3: Hybrid Scoring
+- **Text Similarity**: N-gram 3 based Jaccard similarity (40% weight)
+- **Semantic Similarity**: SapBERT embedding cosine similarity (60% weight)
+- **Final Ranking**: Sorts by combined hybrid score
+- **Confidence Levels**: very_high (≥0.95), high (≥0.85), medium (≥0.70), low (≥0.50), very_low (<0.50)
+
+### Mapping Result Structure
 
 ```python
-from omop_mapper.elasticsearch_client import ElasticsearchClient
-
-# Initialize client
-es_client = ElasticsearchClient(
-    host="your-elasticsearch-host",
-    port=9200,
-    username="elastic",
-    password="your-password"
-)
-
-# Search concepts
-results = es_client.search_concepts(
-    query="myocardial infarction",
-    domain_ids=["Condition"],
-    standard_concept_only=True,
-    limit=10
-)
-
-for result in results:
-    print(f"{result['concept_name']} (ID: {result['concept_id']})")
+@dataclass
+class MappingResult:
+    source_entity: EntityInput
+    mapped_concept_id: str
+    mapped_concept_name: str
+    domain_id: str
+    vocabulary_id: str
+    concept_class_id: str
+    standard_concept: str
+    concept_code: str
+    concept_embedding: List[float]
+    mapping_score: float
+    mapping_confidence: str  # very_high, high, medium, low, very_low
+    mapping_method: str  # direct_standard, non_standard_to_standard
+    alternative_concepts: List[Dict[str, Any]]
 ```
 
 ## Configuration

@@ -36,13 +36,14 @@ class SapBERTEmbedder:
         self.model_name = model_name
         self.max_length = max_length
         self.batch_size = batch_size
+        self.enabled = True
         
-        # 임베딩 사용 여부 결정 (우선순위: 인자 > 환경변수 > 기본 False)
-        if enabled is None:
-            env_val = os.getenv("OMOP_ENABLE_EMBEDDING", "0").strip()
-            self.enabled = env_val in ("1", "true", "True", "YES", "yes")
-        else:
-            self.enabled = bool(enabled)
+        # # 임베딩 사용 여부 결정 (우선순위: 인자 > 환경변수 > 기본 False)
+        # if enabled is None:
+        #     env_val = os.getenv("OMOP_ENABLE_EMBEDDING", "0").strip()
+        #     self.enabled = env_val in ("1", "true", "True", "YES", "yes")
+        # else:
+        #     self.enabled = bool(enabled)
         
         # 디바이스 설정
         if device is None:
@@ -50,9 +51,9 @@ class SapBERTEmbedder:
         else:
             self.device = device
             
-        if not self.enabled:
-            logging.info("SapBERT 임베딩 비활성화됨 (enabled=False). 모델 로딩을 건너뜁니다.")
-            return
+        # if not self.enabled:
+        #     logging.info("SapBERT 임베딩 비활성화됨 (enabled=False). 모델 로딩을 건너뜁니다.")
+        #     return
         
         logging.info(f"SapBERT 모델 로딩 중: {model_name}")
         logging.info(f"사용 디바이스: {self.device}")
