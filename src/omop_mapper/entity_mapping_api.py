@@ -130,39 +130,102 @@ class EntityMappingAPI:
     def _stage1_elasticsearch_search(self, entity_input: EntityInput) -> List[Dict[str, Any]]:
         """
         1단계: Elasticsearch 쿼리로 top 5개 후보군 추출
+        디버깅용으로 벡터 검색, 텍스트 검색, 하이브리드 검색을 각각 수행하여 결과 비교
         
         Args:
             entity_input: 엔티티 입력 정보
             
         Returns:
-            List[매칭된 컨셉 후보들]
+            List[매칭된 컨셉 후보들] - 하이브리드 검색 결과
         """
         logger.info("=" * 60)
-        logger.info("1단계: Elasticsearch 쿼리로 top 5개 후보군 추출")
+        logger.info("1단계: Elasticsearch 쿼리로 top 5개 후보군 추출 (디버깅 모드)")
         logger.info("=" * 60)
         
         entity_name = entity_input.entity_name
         domain_id = entity_input.domain_id
+        es_index = "concept"
+        top_k = 5
         
-        # 엔티티 정보 준비
-        entity_info = {
-            "entity_name": entity_name,
-            "domain_id": domain_id,
-            "vocabulary_id": entity_input.vocabulary_id
-        }
+        logger.info(f"🔍 엔티티: {entity_name}, 도메인: {domain_id}")
         
-        # Elasticsearch 검색 수행
-        candidates = self._search_similar_concepts(entity_input, entity_info, top_k=5)
+        # 엔티티 임베딩 생성
+        entity_embedding = None
+        if HAS_SAPBERT:
+            entity_embedding = self._get_simple_embedding(entity_name)
+            if entity_embedding is not None:
+                logger.info("✅ 엔티티 임베딩 생성 성공")
+            else:
+                logger.warning("⚠️ 엔티티 임베딩 생성 실패")
+        else:
+            logger.warning("⚠️ SapBERT 미설치")
         
-        logger.info(f"📊 1단계 결과: {len(candidates)}개 후보 검색 완료")
-        for i, candidate in enumerate(candidates, 1):
-            source = candidate['_source']
-            standard_status = "Standard" if source.get('standard_concept') in ['S', 'C'] else "Non-standard"
+        # 1. 벡터 검색만 수행 (디버깅용)
+        logger.info("\n" + "=" * 40)
+        logger.info("🧠 1-1. 벡터 검색 결과")
+        logger.info("=" * 40)
+        vector_results = []
+        if entity_embedding is not None:
+            vector_results = self._perform_vector_search_silent(entity_embedding, es_index, top_k)
+            logger.info(f"벡터 검색 결과: {len(vector_results)}개")
+            for i, hit in enumerate(vector_results, 1):
+                source = hit['_source']
+                logger.info(f"  {i}. {source.get('concept_name', 'N/A')} "
+                          f"(ID: {source.get('concept_id', 'N/A')}) "
+                          f"- 벡터 점수: {hit['_score']:.4f}")
+        else:
+            logger.info("벡터 검색 건너뜀 (임베딩 없음)")
+        
+        # 2. 텍스트 검색만 수행 (디버깅용)
+        logger.info("\n" + "=" * 40)
+        logger.info("📝 1-2. 텍스트 검색 결과")
+        logger.info("=" * 40)
+        text_results = self._perform_text_only_search_silent(entity_name, es_index, top_k)
+        logger.info(f"텍스트 검색 결과: {len(text_results)}개")
+        for i, hit in enumerate(text_results, 1):
+            source = hit['_source']
             logger.info(f"  {i}. {source.get('concept_name', 'N/A')} "
-                      f"(concept_id: {source.get('concept_id', 'N/A')}) "
-                      f"- {standard_status}, ES점수: {candidate['_score']:.4f}")
+                      f"(ID: {source.get('concept_id', 'N/A')}) "
+                      f"- 텍스트 점수: {hit['_score']:.4f}")
         
-        return candidates
+        # 3. 하이브리드 검색 수행 (최종 결과용)
+        logger.info("\n" + "=" * 40)
+        logger.info("🔄 1-3. 하이브리드 검색 결과 (최종)")
+        logger.info("=" * 40)
+        
+        if entity_embedding is not None:
+            # 벡터+텍스트 하이브리드 쿼리 수행
+            hybrid_results = self._perform_native_hybrid_search(entity_name, entity_embedding, es_index, top_k)
+        else:
+            # 텍스트만 사용
+            hybrid_results = text_results
+        
+        logger.info(f"하이브리드 검색 결과: {len(hybrid_results)}개")
+        for i, hit in enumerate(hybrid_results, 1):
+            source = hit['_source']
+            standard_status = "Standard" if source.get('standard_concept') in ['S', 'C'] else "Non-standard"
+            concept_name = source.get('concept_name', 'N/A')
+            concept_length = len(concept_name) if concept_name != 'N/A' else 0
+            length_diff = abs(len(entity_name.strip()) - concept_length)
+            logger.info(f"  {i}. {concept_name} "
+                      f"(ID: {source.get('concept_id', 'N/A')}) "
+                      f"- {standard_status}, 하이브리드 점수: {hit['_score']:.4f}")
+        
+        logger.info(f"\n📊 1단계 최종 결과: {len(hybrid_results)}개 후보 (하이브리드 검색)")
+        
+        # 디버깅용: stage1 후보군 저장
+        self._last_stage1_candidates = [
+            {
+                'concept_id': str(hit['_source'].get('concept_id', '')),
+                'concept_name': hit['_source'].get('concept_name', ''),
+                'vocabulary_id': hit['_source'].get('vocabulary_id', ''),
+                'standard_concept': hit['_source'].get('standard_concept', ''),
+                'elasticsearch_score': hit['_score']
+            }
+            for hit in hybrid_results
+        ]
+        
+        return hybrid_results
     
     def _stage2_collect_standard_candidates(self, stage1_candidates: List[Dict[str, Any]], domain_id: str) -> List[Dict[str, Any]]:
         """
@@ -292,12 +355,13 @@ class EntityMappingAPI:
                       f"(텍스트: {candidate['text_similarity']:.4f}, "
                       f"의미적: {candidate['semantic_similarity']:.4f})")
         
-        # 디버깅용: 마지막 리랭킹 후보 저장
+        # 디버깅용: 마지막 리랭킹 후보 저장 (stage3)
         self._last_rerank_candidates = [
             {
                 'concept_id': str(c['concept'].get('concept_id', '')),
                 'concept_name': c['concept'].get('concept_name', ''),
                 'vocabulary_id': c['concept'].get('vocabulary_id', ''),
+                'standard_concept': c['concept'].get('standard_concept', ''),
                 'elasticsearch_score': c.get('elasticsearch_score', 0.0),
                 'text_similarity': c.get('text_similarity', 0.0),
                 'semantic_similarity': c.get('semantic_similarity', 0.0),
@@ -329,66 +393,411 @@ class EntityMappingAPI:
         
         return mapping_result
     
-    def _search_similar_concepts(self, entity_input: EntityInput, entity_info: Dict[str, Any], top_k: int = 5) -> List[Dict[str, Any]]:
+    
+    
+    def _perform_vector_search(self, entity_embedding: np.ndarray, es_index: str, top_k: int) -> List[Dict[str, Any]]:
         """
-        Standard 여부와 상관없이 유사도 기반 검색
+        벡터 검색 수행 (knn 쿼리만 사용)
         
         Args:
-            entity_input: 엔티티 입력 정보
-            entity_info: 준비된 엔티티 정보
-            top_k: 상위 K개 결과 반환
+            entity_embedding: 엔티티 임베딩 벡터
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 결과 수
             
         Returns:
-            List[매칭된 컨셉 후보들]
+            List[벡터 검색 결과들]
         """
-        entity_name = entity_info["entity_name"]
-        domain_id = entity_info["domain_id"]
+        logger.info(f"🧠 벡터 검색 수행")
         
-        # 통합된 concept 인덱스 사용
-        es_index = "concept"
-        logger.info(f"검색할 인덱스: {es_index}, 엔티티: {entity_name}")
-
-        # 정확 일치(문장 단위) 가중치 부여
-        should_queries = [
-            {
-                "match_phrase": {
-                    "concept_name": {
-                        "query": entity_name,
-                        "boost": 3.0
-                    }
-                }
-            }
-        ]
-
-        # 토큰 매칭과 문장 매칭을 별도 must 절로 분리
-        must_queries = [
-            {
-                "match": {
-                    "concept_name": {
-                        "query": entity_name,
-                        "boost": 3.0
-                    }
-                }
-            }
-        ]
-
-        query = {
-            "query": {
-                "bool": {
-                    "must": must_queries,
-                    "should": should_queries
-                }
+        # 임베딩을 리스트로 변환
+        embedding_list = entity_embedding.tolist()
+        
+        # knn 쿼리만 사용
+        vector_query = {
+            "knn": {
+                "field": "concept_embedding",
+                "query_vector": embedding_list,
+                "k": top_k,
+                "num_candidates": top_k * 3
             },
-            "size": top_k
+            "size": top_k,
+            "_source": True
         }
         
-        # Elasticsearch 검색 수행
-        response = self.es_client.es_client.search(
-            index=es_index,
-            body=query
-        )
+        try:
+            response = self.es_client.es_client.search(
+                index=es_index,
+                body=vector_query
+            )
+            
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            logger.info(f"✅ 벡터 검색 완료: {len(hits)}개 결과")
+            
+            # 모든 결과 로깅
+            for i, hit in enumerate(hits, 1):
+                source = hit['_source']
+                logger.info(f"  {i}. {source.get('concept_name', 'N/A')} "
+                          f"(ID: {source.get('concept_id', 'N/A')}) "
+                          f"- 벡터 점수: {hit['_score']:.4f}")
+            
+            return hits
+            
+        except Exception as e:
+            logger.error(f"벡터 검색 실패: {e}")
+            return []
+    
+    def _perform_vector_search_silent(self, entity_embedding: np.ndarray, es_index: str, top_k: int) -> List[Dict[str, Any]]:
+        """
+        벡터 검색 수행 (로깅 없는 버전)
         
-        return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+        Args:
+            entity_embedding: 엔티티 임베딩 벡터
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 결과 수
+            
+        Returns:
+            List[벡터 검색 결과들]
+        """
+        # 임베딩을 리스트로 변환
+        embedding_list = entity_embedding.tolist()
+        
+        # knn 쿼리만 사용
+        vector_query = {
+            "knn": {
+                "field": "concept_embedding",
+                "query_vector": embedding_list,
+                "k": top_k,
+                "num_candidates": top_k * 3
+            },
+            "size": top_k,
+            "_source": True
+        }
+        
+        try:
+            response = self.es_client.es_client.search(
+                index=es_index,
+                body=vector_query
+            )
+            
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            return hits
+            
+        except Exception as e:
+            logger.error(f"벡터 검색 실패: {e}")
+            return []
+    
+    
+    def _perform_text_only_search(self, entity_name: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
+        """
+        간단한 텍스트 검색 (runtime error 방지를 위해 단순화)
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 결과 수
+            
+        Returns:
+            List[텍스트 검색 결과들]
+        """
+        logger.info(f"📝 텍스트 검색 수행: {entity_name}")
+        
+        # 단순한 텍스트 검색 쿼리 (runtime error 방지)
+        body = {
+            "size": top_k,
+            "query": {
+                "bool": {
+                    "should": [
+                        # 1) 완전 일치
+                        {
+                            "term": {
+                                "concept_name.keyword": {
+                                    "value": entity_name,
+                                    "boost": 3.0
+                                }
+                            }
+                        },
+                        # 2) 부분 일치
+                        {
+                            "match": {
+                                "concept_name": {
+                                    "query": entity_name,
+                                    "boost": 2.0
+                                }
+                            }
+                        },
+                        # 3) 구문 일치
+                        {
+                            "match_phrase": {
+                                "concept_name": {
+                                    "query": entity_name,
+                                    "boost": 2.5
+                                }
+                            }
+                        }
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
+        }
+        
+        try:
+            response = self.es_client.es_client.search(
+                index=es_index,
+                body=body
+            )
+            
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            
+            logger.info(f"✅ 텍스트 검색 완료: {len(hits)}개 결과")
+            
+            return hits
+            
+        except Exception as e:
+            logger.error(f"텍스트 검색 실패: {e}")
+            return []
+    
+    def _perform_text_only_search_silent(self, entity_name: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
+        """
+        간단한 텍스트 검색 (로깅 없는 버전)
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 결과 수
+            
+        Returns:
+            List[텍스트 검색 결과들]
+        """
+        # 단순한 텍스트 검색 쿼리 (runtime error 방지)
+        body = {
+            "size": top_k,
+            "query": {
+                "bool": {
+                    "should": [
+                        # 1) 완전 일치
+                        {
+                            "term": {
+                                "concept_name.keyword": {
+                                    "value": entity_name,
+                                    "boost": 3.0
+                                }
+                            }
+                        },
+                        # 2) 부분 일치
+                        {
+                            "match": {
+                                "concept_name": {
+                                    "query": entity_name,
+                                    "boost": 2.0
+                                }
+                            }
+                        },
+                        # 3) 구문 일치
+                        {
+                            "match_phrase": {
+                                "concept_name": {
+                                    "query": entity_name,
+                                    "boost": 2.5
+                                }
+                            }
+                        }
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
+        }
+        
+        try:
+            response = self.es_client.es_client.search(
+                index=es_index,
+                body=body
+            )
+            
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            return hits
+            
+        except Exception as e:
+            logger.error(f"텍스트 검색 실패: {e}")
+            return []
+    
+    def _perform_native_hybrid_search(self, entity_name: str, entity_embedding: np.ndarray, es_index: str, top_k: int) -> List[Dict[str, Any]]:
+        """
+        네이티브 하이브리드 검색 (벡터 + 텍스트를 하나의 쿼리로 결합)
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            entity_embedding: 엔티티 임베딩 벡터
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 결과 수
+            
+        Returns:
+            List[하이브리드 검색 결과들]
+        """
+        logger.info(f"🔄 네이티브 하이브리드 검색 수행 (글자수 유사도 포함): {entity_name}")
+        
+        # 임베딩을 리스트로 변환
+        embedding_list = entity_embedding.tolist()
+        
+        # 엔티티 이름 길이 계산
+        entity_length = len(entity_name.strip())
+        scale_len = max(8.0, entity_length * 0.8)
+        
+        # 하이브리드 쿼리 (knn + function_score로 글자수 유사도 추가)
+        body = {
+            "size": top_k,
+            "knn": {
+                "field": "concept_embedding",
+                "query_vector": embedding_list,
+                "k": top_k * 2,
+                "num_candidates": top_k * 5,
+                "boost": 0.5  # 벡터 검색 가중치 (글자수 고려로 조정)
+            },
+            "query": {
+                "function_score": {
+                    "query": {
+                        "bool": {
+                            "should": [
+                                # 완전 일치
+                                {
+                                    "term": {
+                                        "concept_name.keyword": {
+                                            "value": entity_name,
+                                            "boost": 3.0
+                                        }
+                                    }
+                                },
+                                # 구문 일치
+                                {
+                                    "match": {
+                                        "concept_name": {
+                                            "query": entity_name,
+                                            "boost": 2.5
+                                        }
+                                    }
+                                }
+                            ],
+                            "minimum_should_match": 1
+                        }
+                    },
+                    # 글자수 유사도 함수
+                    "functions": [
+                        {
+                            "script_score": {
+                                "script": {
+                                    "params": {
+                                        "origin_len": float(entity_length),
+                                        "scale_len": float(scale_len)
+                                    },
+                                    "source": """
+                                        double origin = params.origin_len;
+                                        double scale = params.scale_len;
+                                        double len = 0.0;
+                                        
+                                        if (!doc['concept_name.keyword'].isEmpty()) {
+                                            len = doc['concept_name.keyword'].value.length();
+                                        } else if (!doc['concept_name'].isEmpty()) {
+                                            len = doc['concept_name'].value.length();
+                                        }
+                                        
+                                        // 가우시안 감쇠: exp(-0.5 * ((len-origin)/scale)^2)
+                                        double x = (len - origin) / scale;
+                                        double decay = Math.exp(-0.5 * x * x);
+                                        
+                                        // 길이 유사도 보너스 (1.0 ~ 2.0)
+                                        return 1.0 + decay;
+                                    """
+                                }
+                            }
+                        }
+                    ],
+                    "score_mode": "multiply",  # 기본 점수와 길이 유사도 곱셈
+                    "boost_mode": "multiply",
+                    "boost": 0.3  # 텍스트 검색 가중치 (글자수 고려로 조정)
+                }
+            }
+        }
+        
+        try:
+            response = self.es_client.es_client.search(
+                index=es_index,
+                body=body
+            )
+            
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            
+            logger.info(f"✅ 네이티브 하이브리드 검색 완료: {len(hits)}개 결과")
+            return hits
+            
+        except Exception as e:
+            logger.error(f"네이티브 하이브리드 검색 실패: {e}")
+            # 실패시 텍스트 검색만 수행
+            logger.info("하이브리드 검색 실패 - 텍스트 검색으로 대체")
+            return self._perform_text_only_search(entity_name, es_index, top_k)
+    
+    # def _apply_length_similarity_scoring(self, entity_name: str, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    #     """
+    #     글자 길이 유사도를 고려한 점수 재조정
+        
+    #     Args:
+    #         entity_name: 원본 엔티티 이름
+    #         hits: 검색 결과들
+            
+    #     Returns:
+    #         List[길이 유사도가 적용된 검색 결과들]
+    #     """
+    #     if not hits:
+    #         return hits
+        
+    #     entity_length = len(entity_name.lower().strip())
+    #     enhanced_hits = []
+        
+    #     for hit in hits:
+    #         concept_name = hit['_source'].get('concept_name', '')
+    #         concept_length = len(concept_name.lower().strip())
+            
+    #         # 길이 차이 계산
+    #         length_diff = abs(entity_length - concept_length)
+    #         max_length = max(entity_length, concept_length)
+            
+    #         # 길이 유사도 계산 (0.0 ~ 1.0)
+    #         if max_length == 0:
+    #             length_similarity = 1.0
+    #         else:
+    #             length_similarity = 1.0 - (length_diff / max_length)
+            
+    #         # 길이 유사도 가중치 적용
+    #         # 길이가 비슷할수록 더 높은 점수
+    #         length_weight = 0.15  # 15% 가중치
+    #         original_score = hit['_score']
+            
+    #         # 길이 유사도 보너스/페널티 적용
+    #         if length_similarity >= 0.9:  # 매우 유사한 길이
+    #             length_bonus = 1.2
+    #         elif length_similarity >= 0.8:  # 유사한 길이
+    #             length_bonus = 1.1
+    #         elif length_similarity >= 0.6:  # 보통 길이
+    #             length_bonus = 1.0
+    #         elif length_similarity >= 0.4:  # 다소 다른 길이
+    #             length_bonus = 0.9
+    #         else:  # 매우 다른 길이
+    #             length_bonus = 0.8
+            
+    #         # 최종 점수 계산
+    #         adjusted_score = original_score * (1 + length_weight * (length_bonus - 1))
+            
+    #         # 새로운 hit 객체 생성
+    #         enhanced_hit = hit.copy()
+    #         enhanced_hit['_score'] = adjusted_score
+    #         enhanced_hit['_original_score'] = original_score
+    #         enhanced_hit['length_similarity'] = length_similarity
+    #         enhanced_hit['length_bonus'] = length_bonus
+            
+    #         enhanced_hits.append(enhanced_hit)
+        
+    #     # 조정된 점수로 재정렬
+    #     enhanced_hits.sort(key=lambda x: x['_score'], reverse=True)
+        
+    #     return enhanced_hits
     
     def _get_standard_candidates(self, non_standard_concept_id: str, domain_id: str) -> List[Dict[str, Any]]:
         """
@@ -705,6 +1114,9 @@ class EntityMappingAPI:
             
             if self._sapbert_model is None:
                 return None
+            
+            # 텍스트를 소문자로 변환
+            text = text.lower().strip()
             
             # 토크나이징
             inputs = self._sapbert_tokenizer(

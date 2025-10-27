@@ -4,11 +4,15 @@ import os
 from datetime import datetime
 from pathlib import Path
 import sys
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 # 프로젝트 루트 추가
 sys.path.append('/home/work/skku/hyo/omop-mapper/src')
 
 from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
+from omop_mapper.elasticsearch_client import ElasticsearchClient
 
 class EntityMappingTester:
     def __init__(self, log_dir: str = "test_logs"):
@@ -19,8 +23,13 @@ class EntityMappingTester:
         # 로그 설정
         self.setup_logging()
         
+        # Elasticsearch 클라이언트 초기화 (concept-small 인덱스 사용)
+        self.es_client = ElasticsearchClient()
+        self.es_client.concept_index = "concept-small"
+        self.es_client.concept_synonym_index = "concept-small"
+        
         # API 초기화
-        self.api = EntityMappingAPI()
+        self.api = EntityMappingAPI(es_client=self.es_client)
         
         # 도메인 매핑
         self.domain_mapping = {
@@ -71,45 +80,35 @@ class EntityMappingTester:
         
         self.logger.info(f"로그 파일: {log_file}")
     
-    def load_test_data(self, excel_path: str) -> pd.DataFrame:
-        """테스트 데이터 로드"""
-        self.logger.info(f"테스트 데이터 로드: {excel_path}")
+    def load_test_data_from_list(self, entity_list: list) -> pd.DataFrame:
+        """리스트에서 테스트 데이터 생성"""
+        self.logger.info(f"테스트 데이터 생성: {len(entity_list)}개 엔티티")
         
-        # 제외할 도메인 목록
-        excluded_domains = ['Period', 'Threshold', 'Demographics']
+        # 엔티티별 도메인 추정 (기본적으로 Condition으로 설정)
+        domain_mapping = {
+            'Acute Coronary Syndromes': 'Condition',
+            'myocardial ischemia': 'Condition', 
+            'chronic coronary disease': 'Condition',
+            'non–ST-segment elevation myocardial infarction': 'Condition',
+            'breast cancer': 'Condition',
+            'type 2 diabetes': 'Condition',
+            'hypertension': 'Condition'
+        }
         
-        all_data = []
+        test_data = []
+        for i, entity_name in enumerate(entity_list):
+            domain = domain_mapping.get(entity_name, 'Condition')
+            test_data.append({
+                'entity_plain_name': entity_name,
+                'entity_domain': domain,
+                'sheet': 'manual'  # 수동 입력 표시
+            })
+            self.logger.info(f"  {i+1}. {entity_name} (도메인: {domain})")
         
-        for sheet in ['10', '11', '12']:
-            df = pd.read_excel(excel_path, sheet_name=sheet)
-            
-            # NaN이 아닌 entity_plain_name만 필터링
-            valid_entities = df.dropna(subset=['entity_plain_name'])
-            
-            # 제외할 도메인 필터링
-            before_filter = len(valid_entities)
-            valid_entities = valid_entities[~valid_entities['entity_domain'].isin(excluded_domains)]
-            after_filter = len(valid_entities)
-            
-            excluded_count = before_filter - after_filter
-            
-            self.logger.info(f"시트 {sheet}: 총 {len(df)}행, 유효한 엔티티 {before_filter}개, 제외된 엔티티 {excluded_count}개 (Period/Threshold/Demographics), 최종 {after_filter}개")
-            
-            # 시트 정보 추가
-            valid_entities = valid_entities.copy()
-            valid_entities['sheet'] = sheet
-            
-            all_data.append(valid_entities)
+        df = pd.DataFrame(test_data)
+        self.logger.info(f"전체 테스트 데이터: {len(df)}개 엔티티")
         
-        combined_data = pd.concat(all_data, ignore_index=True)
-        
-        # 전체 제외 통계
-        total_excluded = sum([len(df.dropna(subset=['entity_plain_name'])) for df in [pd.read_excel(excel_path, sheet_name=sheet) for sheet in ['10', '11', '12']]]) - len(combined_data)
-        
-        self.logger.info(f"전체 테스트 데이터: {len(combined_data)}개 엔티티 (제외된 도메인: {excluded_domains})")
-        self.logger.info(f"총 제외된 엔티티: {total_excluded}개")
-        
-        return combined_data
+        return df
     
     def create_entity_input(self, row) -> EntityInput:
         """DataFrame 행에서 EntityInput 생성"""
@@ -139,9 +138,22 @@ class EntityMappingTester:
             result = self.api.map_entity(entity_input)
             
             # 단계별 상세 정보 로깅
+            stage1_candidates = []
+            stage3_candidates = []
+            
+            if hasattr(self.api, '_last_stage1_candidates') and self.api._last_stage1_candidates:
+                stage1_candidates = self.api._last_stage1_candidates
+                self.logger.info("📊 1단계 후보군 상세 정보:")
+                for i, candidate in enumerate(stage1_candidates[:5], 1):  # 상위 5개만
+                    self.logger.info(f"   {i}. {candidate['concept_name']} (ID: {candidate['concept_id']})")
+                    self.logger.info(f"      - Elasticsearch 점수: {candidate['elasticsearch_score']:.4f}")
+                    self.logger.info(f"      - Standard: {candidate['standard_concept']}")
+                    self.logger.info(f"      - Vocabulary: {candidate['vocabulary_id']}")
+            
             if hasattr(self.api, '_last_rerank_candidates') and self.api._last_rerank_candidates:
+                stage3_candidates = self.api._last_rerank_candidates
                 self.logger.info("📊 3단계 후보군 상세 정보:")
-                for i, candidate in enumerate(self.api._last_rerank_candidates[:5], 1):  # 상위 5개만
+                for i, candidate in enumerate(stage3_candidates[:5], 1):  # 상위 5개만
                     self.logger.info(f"   {i}. {candidate['concept_name']} (ID: {candidate['concept_id']})")
                     self.logger.info(f"      - 텍스트 유사도: {candidate['text_similarity']:.4f}")
                     self.logger.info(f"      - 의미적 유사도: {candidate['semantic_similarity']:.4f}")
@@ -160,7 +172,9 @@ class EntityMappingTester:
                 'mapping_score': result.mapping_score if result else 0.0,
                 'mapping_confidence': result.mapping_confidence if result else None,
                 'mapping_method': result.mapping_method if result else None,
-                'alternative_concepts_count': len(result.alternative_concepts) if result and result.alternative_concepts else 0
+                'alternative_concepts_count': len(result.alternative_concepts) if result and result.alternative_concepts else 0,
+                'stage1_candidates': stage1_candidates,
+                'stage3_candidates': stage3_candidates
             }
             
             if result:
@@ -193,16 +207,18 @@ class EntityMappingTester:
                 'mapping_score': 0.0,
                 'mapping_confidence': None,
                 'mapping_method': None,
-                'alternative_concepts_count': 0
+                'alternative_concepts_count': 0,
+                'stage1_candidates': [],
+                'stage3_candidates': []
             }
     
-    def run_test(self, excel_path: str, max_entities: int = None):
-        """전체 테스트 실행"""
+    def run_test_with_entities(self, entity_list: list, max_entities: int = None):
+        """엔티티 리스트로 테스트 실행"""
         self.logger.info("🚀 Entity Mapping API 테스트 시작")
-        self.logger.info(f"테스트 파일: {excel_path}")
+        self.logger.info(f"테스트 엔티티 리스트: {len(entity_list)}개")
         
-        # 데이터 로드
-        test_data = self.load_test_data(excel_path)
+        # 데이터 생성
+        test_data = self.load_test_data_from_list(entity_list)
         
         if max_entities:
             test_data = test_data.head(max_entities)
@@ -237,16 +253,16 @@ class EntityMappingTester:
         self.logger.info(f"실패: {total_tests - successful_tests}개")
         self.logger.info(f"성공률: {success_rate:.2f}%")
         
-        # 시트별 요약
-        for sheet in ['10', '11', '12']:
-            sheet_results = [r for r in test_results if r['sheet'] == sheet]
-            sheet_success = len([r for r in sheet_results if r['success']])
-            sheet_total = len(sheet_results)
-            sheet_rate = (sheet_success / sheet_total * 100) if sheet_total > 0 else 0
-            self.logger.info(f"시트 {sheet}: {sheet_success}/{sheet_total} ({sheet_rate:.2f}%)")
+        # 엔티티별 요약
+        for i, result in enumerate(test_results, 1):
+            status = "✅ 성공" if result['success'] else "❌ 실패"
+            self.logger.info(f"  {i}. {result['entity_name']}: {status}")
+            if result['success']:
+                self.logger.info(f"     -> {result['mapped_concept_name']} (점수: {result['mapping_score']:.4f})")
         
-        # 결과를 CSV로 저장
+        # 결과를 CSV와 XLSX로 저장
         self.save_results_to_csv(test_results)
+        self.save_results_to_xlsx(test_results)
         
         return test_results
     
@@ -255,16 +271,239 @@ class EntityMappingTester:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_file = self.log_dir / f"test_results_{timestamp}.csv"
         
-        df_results = pd.DataFrame(test_results)
+        # CSV용 데이터 정리 (복잡한 객체 제거)
+        csv_results = []
+        for result in test_results:
+            csv_result = {k: v for k, v in result.items() 
+                         if k not in ['stage1_candidates', 'stage3_candidates']}
+            csv_results.append(csv_result)
+        
+        df_results = pd.DataFrame(csv_results)
         df_results.to_csv(csv_file, index=False, encoding='utf-8')
         
         self.logger.info(f"📄 테스트 결과 CSV 저장: {csv_file}")
+    
+    def save_results_to_xlsx(self, test_results: list):
+        """테스트 결과를 XLSX 파일로 저장 (stage1, stage3 후보군을 열로 분리)"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        xlsx_file = self.log_dir / f"test_results_detailed_{timestamp}.xlsx"
+        
+        # 엑셀 워크북 생성
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Detailed Results"
+        
+        # 통합 상세 시트 생성
+        self._create_integrated_detail_sheet(ws, test_results)
+        
+        # 파일 저장
+        wb.save(xlsx_file)
+        self.logger.info(f"📊 테스트 결과 XLSX 저장: {xlsx_file}")
+    
+    def _create_integrated_detail_sheet(self, ws, test_results):
+        """통합 상세 시트 생성 (모든 엔티티를 하나의 시트에)"""
+        
+        # 헤더 설정
+        headers = [
+            "Test Index", "Entity Name", "Domain", "Success", 
+            "Mapped Concept ID", "Mapped Concept Name", 
+            "Mapping Score", "Mapping Confidence", "Mapping Method",
+            "Stage1 Candidates", "Stage3 Candidates"
+        ]
+        
+        # 헤더 스타일
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        # 헤더 작성
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+        
+        # 데이터 작성
+        for row, result in enumerate(test_results, 2):
+            ws.cell(row=row, column=1, value=result['test_index'])
+            ws.cell(row=row, column=2, value=result['entity_name'])
+            ws.cell(row=row, column=3, value=result['domain_id'])
+            ws.cell(row=row, column=4, value="성공" if result['success'] else "실패")
+            ws.cell(row=row, column=5, value=result['mapped_concept_id'])
+            ws.cell(row=row, column=6, value=result['mapped_concept_name'])
+            ws.cell(row=row, column=7, value=result['mapping_score'])
+            ws.cell(row=row, column=8, value=result['mapping_confidence'])
+            ws.cell(row=row, column=9, value=result['mapping_method'])
+            
+            # Stage1 후보군 정보를 문자열로 변환
+            stage1_text = self._format_candidates_for_cell(result.get('stage1_candidates', []), 'stage1')
+            ws.cell(row=row, column=10, value=stage1_text)
+            
+            # Stage3 후보군 정보를 문자열로 변환
+            stage3_text = self._format_candidates_for_cell(result.get('stage3_candidates', []), 'stage3')
+            ws.cell(row=row, column=11, value=stage3_text)
+            
+            # 셀 스타일 설정 (텍스트 줄바꿈 허용)
+            for col in range(10, 12):  # Stage1, Stage3 열
+                cell = ws.cell(row=row, column=col)
+                cell.alignment = Alignment(wrap_text=True, vertical='top')
+        
+        # 열 너비 설정
+        column_widths = {
+            'A': 10,  # Test Index
+            'B': 30,  # Entity Name
+            'C': 15,  # Domain
+            'D': 10,  # Success
+            'E': 15,  # Mapped Concept ID
+            'F': 40,  # Mapped Concept Name
+            'G': 15,  # Mapping Score
+            'H': 15,  # Mapping Confidence
+            'I': 20,  # Mapping Method
+            'J': 60,  # Stage1 Candidates
+            'K': 80   # Stage3 Candidates
+        }
+        
+        for col_letter, width in column_widths.items():
+            ws.column_dimensions[col_letter].width = width
+        
+        # 행 높이 자동 조정 (후보군 정보가 많은 경우)
+        for row_num in range(2, len(test_results) + 2):
+            ws.row_dimensions[row_num].height = 120  # 충분한 높이 설정
+    
+    def _format_candidates_for_cell(self, candidates, stage_type):
+        """후보군 정보를 엑셀 셀용 텍스트로 포맷팅"""
+        if not candidates:
+            return "후보 없음"
+        
+        lines = []
+        for i, candidate in enumerate(candidates[:5], 1):  # 상위 5개만 표시
+            if stage_type == 'stage1':
+                line = f"{i}. {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
+                line += f"   ES점수: {candidate.get('elasticsearch_score', 0):.4f}, "
+                line += f"Standard: {candidate.get('standard_concept', 'N/A')}, "
+                line += f"Vocab: {candidate.get('vocabulary_id', 'N/A')}"
+            else:  # stage3
+                line = f"{i}. {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
+                line += f"   텍스트: {candidate.get('text_similarity', 0):.4f}, "
+                line += f"의미적: {candidate.get('semantic_similarity', 0):.4f}, "
+                line += f"최종: {candidate.get('final_score', 0):.4f}\n"
+                line += f"   Standard: {candidate.get('standard_concept', 'N/A')}, "
+                line += f"Vocab: {candidate.get('vocabulary_id', 'N/A')}"
+            
+            lines.append(line)
+        
+        return "\n\n".join(lines)
 
 def main():
     """메인 함수"""
     tester = EntityMappingTester()
-    excel_path = "/home/work/skku/hyo/omop-mapper/data/entity_sample.xlsx"
-    results = tester.run_test(excel_path)
+    
+    # 테스트할 엔티티 리스트
+    test_entities = test_entities = [
+        'MI with nonobstructive coronary artery disease',
+        'ST-segment elevation myocardial infarction',
+        'US Food and Drug Administration',
+        'acute coronary syndromes',
+        'acute myocardial infarction',
+        'adrenal incidentaloma',
+        'adrenal vein sampling',
+        'aldosterone-producing adenoma',
+        'aldosterone-to-renin ratio',
+        'angiotensin receptor blocker',
+        'angiotensin-converting enzyme inhibitor',
+        'atherosclerotic cardiovascular disease',
+        'atrial fibrillation',
+        'blood pressure',
+        'cardiac intensive care unit',
+        'cardiac rehabilitation',
+        'cardiac troponin',
+        'cardiovascular',
+        'cardiovascular disease',
+        'chronic coronary disease',
+        'clinical decision pathway',
+        'computed tomography',
+        'confidence interval',
+        'coronary artery bypass grafting',
+        'coronary artery disease',
+        'diastolic blood pressure',
+        'direct oral anticoagulant',
+        'dual antiplatelet therapy',
+        'electrocardiogram',
+        'first medical contact',
+        'fractional flow reserve',
+        'glucagon-like peptide-1',
+        'glucocorticoid-remediable aldosteronism',
+        'hazard ratio',
+        'heart failure',
+        'high-sensitivity cardiac troponin',
+        'hypertension',
+        'idiopathic hyperaldosteronism',
+        'implantable cardioverter-defibrillator',
+        'intra-aortic balloon pump',
+        'intravascular ultrasound',
+        'left ventricular',
+        'left ventricular ejection fraction',
+        'left ventricular hypertrophy',
+        'low-density lipoprotein',
+        'low-density lipoprotein cholesterol',
+        'major adverse cardiovascular event',
+        'mechanical circulatory support',
+        'mineralocorticoid receptor',
+        'mineralocorticoid receptor antagonist',
+        'multivessel disease',
+        'non–ST-segment elevation ACS',
+        'non–ST-segment elevation myocardial infarction',
+        'odds ratio',
+        'optical coherence tomography',
+        'percutaneous coronary intervention',
+        'plasma aldosterone concentration',
+        'plasma renin activity',
+        'primary aldosteronism',
+        'proprotein convertase subtilisin/kexin type 9',
+        'primary percutaneous coronary intervention',
+        'proton pump inhibitor',
+        'quality of life',
+        'randomized controlled trial',
+        'relative risk',
+        'renin-angiotensin system',
+        'return of spontaneous circulation',
+        'sodium-glucose cotransporter-2',
+        'subclinical hypercortisolism',
+        'systolic blood pressure',
+        'unfractionated heparin',
+        'venoarterial extracorporeal membrane oxygenation',
+        'myocardial ischemia',
+        'breast cancer',
+        'type 2 diabetes',
+        # --- 추가 (여기서부터 확장) ---
+        'chronic kidney disease',
+        'glomerular filtration rate',
+        'end-stage renal disease',
+        'atrial flutter',
+        'ventricular tachycardia',
+        'ventricular fibrillation',
+        'sudden cardiac death',
+        'ischemic stroke',
+        'hemorrhagic stroke',
+        'pulmonary embolism',
+        'deep vein thrombosis',
+        'chronic obstructive pulmonary disease',
+        'obstructive sleep apnea',
+        'acute respiratory distress syndrome',
+        'body mass index',
+        'fasting plasma glucose',
+        'oral glucose tolerance test',
+        'glycated hemoglobin',
+        'insulin resistance',
+        'metabolic syndrome',
+        'nonalcoholic fatty liver disease',
+        'nonalcoholic steatohepatitis',
+        'hepatocellular carcinoma',
+        'prostate cancer',
+        'colorectal cancer'
+    ]
+    
+    results = tester.run_test_with_entities(test_entities)
     
     print(f"\n✅ 테스트 완료! 로그는 {tester.log_dir} 디렉토리에 저장되었습니다.")
 

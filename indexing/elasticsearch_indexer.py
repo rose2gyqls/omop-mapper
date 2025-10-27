@@ -92,46 +92,123 @@ class ConceptElasticsearchIndexer:
                     logging.info(f"인덱스가 이미 존재합니다: {self.index_name}")
                     return True
             
-            # 인덱스 매핑 설정
-            index_mapping = {
-                "mappings": {
-                    "properties": {
-                        "concept_id": {"type": "keyword"},
-                        "concept_name": {
-                            "type": "text",
-                            "fields": {
-                                "keyword": {
-                                    "type": "keyword"
+            # 인덱스 매핑 설정 (인덱스 이름에 따라 다른 매핑 적용)
+            if "synonym" in self.index_name.lower():
+                # CONCEPT_SYNONYM 인덱스 매핑
+                index_mapping = {
+                    "mappings": {
+                        "properties": {
+                            "concept_id": {"type": "keyword"},
+                            "concept_synonym_name": {
+                                "type": "text",
+                                "fields": {
+                                    "keyword": {
+                                        "type": "keyword"
+                                    },
+                                    "trigram": {
+                                        "type": "text",
+                                        "analyzer": "trigram_analyzer"
+                                    }
+                                }
+                            },
+                            "language_concept_id": {"type": "keyword"}
+                        }
+                    },
+                    "settings": {
+                        "number_of_shards": 3,
+                        "number_of_replicas": 5,
+                        "refresh_interval": "30s",
+                        "index.write.wait_for_active_shards": "1",
+                        "index.max_result_window": 50000,
+                        "analysis": {
+                            "analyzer": {
+                                "trigram_analyzer": {
+                                    "type": "custom",
+                                    "tokenizer": "standard",
+                                    "filter": ["lowercase", "trigram_filter"]
+                                }
+                            },
+                            "filter": {
+                                "trigram_filter": {
+                                    "type": "ngram",
+                                    "min_gram": 4,
+                                    "max_gram": 5
                                 }
                             }
-                        },
-                        "domain_id": {"type": "keyword"},
-                        "vocabulary_id": {"type": "keyword"},
-                        "concept_class_id": {"type": "keyword"},
-                        "standard_concept": {"type": "keyword"},
-                        "concept_code": {"type": "keyword"},
-                        "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
-                        "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
-                        "invalid_reason": {"type": "keyword"}
+                        }
                     }
-                },
-                "settings": {
-                    "number_of_shards": 3,
-                    "number_of_replicas": 5,
-                    "refresh_interval": "30s",
-                    "index.write.wait_for_active_shards": "1",
-                    "index.max_result_window": 50000
                 }
-            }
+            else:
+                # CONCEPT 인덱스 매핑
+                index_mapping = {
+                    "mappings": {
+                        "properties": {
+                            "concept_id": {"type": "keyword"},
+                            "concept_name": {
+                                "type": "text",
+                                "fields": {
+                                    "keyword": {
+                                        "type": "keyword"
+                                    },
+                                    "trigram": {
+                                        "type": "text",
+                                        "analyzer": "trigram_analyzer"
+                                    }
+                                }
+                            },
+                            "domain_id": {"type": "keyword"},
+                            "vocabulary_id": {"type": "keyword"},
+                            "concept_class_id": {"type": "keyword"},
+                            "standard_concept": {"type": "keyword"},
+                            "concept_code": {"type": "keyword"},
+                            "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
+                            "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
+                            "invalid_reason": {"type": "keyword"}
+                        }
+                    },
+                    "settings": {
+                        "number_of_shards": 3,
+                        "number_of_replicas": 5,
+                        "refresh_interval": "30s",
+                        "index.write.wait_for_active_shards": "1",
+                        "index.max_result_window": 50000,
+                        "analysis": {
+                            "analyzer": {
+                                "trigram_analyzer": {
+                                    "type": "custom",
+                                    "tokenizer": "standard",
+                                    "filter": ["lowercase", "trigram_filter"]
+                                }
+                            },
+                            "filter": {
+                                "trigram_filter": {
+                                    "type": "ngram",
+                                    "min_gram": 4,
+                                    "max_gram": 5
+                                }
+                            }
+                        }
+                    }
+                }
 
             # 임베딩을 포함하는 경우에만 매핑 추가
             if self.include_embeddings:
-                index_mapping["mappings"]["properties"]["concept_embedding"] = {
-                    "type": "dense_vector",
-                    "dims": 768,
-                    "index": True,
-                    "similarity": "cosine"
-                }
+                if "synonym" in self.index_name.lower():
+                    # CONCEPT_SYNONYM 인덱스의 임베딩 필드
+                    index_mapping["mappings"]["properties"]["concept_synonym_embedding"] = {
+                        "type": "dense_vector",
+                        "dims": 768,
+                        "index": True,
+                        "similarity": "cosine"
+                    }
+                else:
+                    # CONCEPT 인덱스의 임베딩 필드
+                    index_mapping["mappings"]["properties"]["concept_embedding"] = {
+                        "type": "dense_vector",
+                        "dims": 768,
+                        "index": True,
+                        "similarity": "cosine"
+                    }
             
             # 인덱스 생성
             self.es.indices.create(index=self.index_name, body=index_mapping)
@@ -319,6 +396,72 @@ class ConceptElasticsearchIndexer:
             
         except Exception as e:
             logging.error(f"임베딩 검색 중 오류 발생: {e}")
+            return []
+    
+    def search_concepts(
+        self,
+        query: str,
+        size: int = 10,
+        search_type: str = "text",
+        embedder=None
+    ) -> List[Dict[str, Any]]:
+        """
+        개념 검색 (텍스트 또는 벡터 검색)
+        
+        Args:
+            query: 검색 쿼리
+            size: 반환할 결과 수
+            search_type: 검색 타입 ("text" 또는 "vector")
+            embedder: 벡터 검색용 임베더 (search_type="vector"일 때 필요)
+            
+        Returns:
+            검색 결과 리스트
+        """
+        try:
+            if search_type == "vector" and embedder and self.include_embeddings:
+                # 벡터 검색
+                query_embedding = embedder.encode_texts([query])[0].tolist()
+                
+                # 인덱스 타입에 따라 다른 임베딩 필드 사용
+                embedding_field = "concept_synonym_embedding" if "synonym" in self.index_name.lower() else "concept_embedding"
+                
+                search_body = {
+                    "query": {
+                        "script_score": {
+                            "query": {"match_all": {}},
+                            "script": {
+                                "source": f"cosineSimilarity(params.query_vector, '{embedding_field}') + 1.0",
+                                "params": {"query_vector": query_embedding}
+                            }
+                        }
+                    },
+                    "size": size
+                }
+            else:
+                # 텍스트 검색
+                # 인덱스 타입에 따라 다른 검색 필드 사용
+                if "synonym" in self.index_name.lower():
+                    search_fields = ["concept_synonym_name^2", "concept_synonym_name.trigram"]
+                else:
+                    search_fields = ["concept_name^2", "concept_name.trigram"]
+                
+                search_body = {
+                    "query": {
+                        "multi_match": {
+                            "query": query,
+                            "fields": search_fields,
+                            "type": "best_fields",
+                            "fuzziness": "AUTO"
+                        }
+                    },
+                    "size": size
+                }
+            
+            response = self.es.search(index=self.index_name, body=search_body)
+            return response["hits"]["hits"]
+            
+        except Exception as e:
+            logging.error(f"검색 중 오류 발생: {e}")
             return []
     
     def get_index_stats(self) -> Dict[str, Any]:

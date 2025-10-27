@@ -277,12 +277,12 @@ def main(create_small_index: bool = False, gpu_device: int = 0, resume: bool = F
         index_name = "concept-small"
         lowercase_concept_name = True
         log_prefix = "concept_small"
-        print(f"=== concepts-small 인덱스 생성 (소문자 변환, GPU {gpu_device}) ===")
+        print(f"=== concept-small 인덱스 생성 (소문자 변환, GPU {gpu_device}) ===")
     else:
         index_name = "concept"
         lowercase_concept_name = False
         log_prefix = "concept"
-        print(f"=== concepts 인덱스 생성 (원본 유지, GPU {gpu_device}) ===")
+        print(f"=== concept 인덱스 생성 (원본 유지, GPU {gpu_device}) ===")
     
     # 로깅 설정
     log_filename = f'{log_prefix}_indexing_gpu{gpu_device}_{time.strftime("%Y%m%d_%H%M%S")}.log'
