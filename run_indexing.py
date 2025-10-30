@@ -14,6 +14,10 @@ OMOP CDM 인덱스 생성 실행 스크립트
     python run_indexing.py synonym --gpu 1           # concept-synonym 인덱스 생성 (GPU 1)
     python run_indexing.py synonym --resume          # 중단된 지점부터 재시작
     
+    # CONCEPT_RELATIONSHIP 인덱스
+    python run_indexing.py relationship               # concept-relationship 인덱스 생성
+    python run_indexing.py relationship --resume     # 중단된 지점부터 재시작
+    
     # 기존 호환성 (concept 인덱스)
     python run_indexing.py                           # concept 인덱스 생성 (소문자 변환, GPU 0)
     python run_indexing.py --std                     # concept 인덱스 생성 (원본 유지, GPU 0)
@@ -24,8 +28,10 @@ OMOP CDM 인덱스 생성 실행 스크립트
       - --std: 원본 concept_name 그대로 저장
     - synonym: CONCEPT_SYNONYM.csv 데이터 인덱싱
       - concept_synonym_name을 모두 소문자로 변환하여 저장
-    - SapBERT 임베딩 포함
-    - GPU 선택 가능
+    - relationship: CONCEPT_RELATIONSHIP.csv 데이터 인덱싱
+      - 임베딩 없이 관계 데이터만 인덱싱
+    - SapBERT 임베딩 포함 (concept, synonym만)
+    - GPU 선택 가능 (concept, synonym만)
     - Resume 기능: 중단된 지점부터 인덱싱 재시작
 """
 
@@ -45,6 +51,7 @@ sys.path.insert(0, str(indexing_dir))
 try:
     from indexing.concept_indexer_with_sapbert import main as concept_main
     from indexing.concept_synonym_indexer_with_sapbert import main as synonym_main
+    from indexing.concept_relationship_indexer import main as relationship_main
     
     if __name__ == "__main__":
         import argparse
@@ -52,8 +59,8 @@ try:
         # 명령행 인수 파싱
         parser = argparse.ArgumentParser(description='OMOP CDM 인덱스 생성')
         parser.add_argument('index_type', nargs='?', default='concept', 
-                          choices=['concept', 'synonym'], 
-                          help='인덱스 타입 (concept 또는 synonym, 기본값: concept)')
+                          choices=['concept', 'synonym', 'relationship'], 
+                          help='인덱스 타입 (concept, synonym, relationship, 기본값: concept)')
         parser.add_argument('--std', action='store_true', help='concept 인덱스를 원본 유지로 생성 (concept 타입에만 적용)')
         parser.add_argument('--gpu', type=int, default=0, help='사용할 GPU 번호 (기본값: 0)')
         parser.add_argument('--resume', action='store_true', help='중단된 지점부터 인덱싱 재시작')
@@ -99,6 +106,17 @@ try:
                 resume=args.resume,
                 include_embeddings=include_embeddings
             )
+            
+        elif args.index_type == 'relationship':
+            # CONCEPT_RELATIONSHIP 인덱스 생성
+            index_type = f"concept-relationship"
+            
+            print("=" * 60)
+            print(f"{index_type} 인덱스 생성 시작")
+            print("=" * 60)
+            
+            # CONCEPT_RELATIONSHIP 메인 함수 실행
+            relationship_main(resume=args.resume)
         
         print("=" * 60)
         print(f"{index_type} 인덱스 생성 완료")

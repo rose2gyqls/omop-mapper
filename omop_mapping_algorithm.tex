@@ -1,0 +1,59 @@
+\documentclass{article}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amsmath}
+
+\begin{document}
+
+\begin{algorithm}
+\caption{Three-Stage OMOP CDM Entity Mapping}
+\label{alg:omop_mapping}
+
+\begin{algorithmic}[1]
+
+\Procedure{EntityMapping}{$entity, domains$}
+    \State $E \gets \text{SapBERT}(entity)$
+    \For{$d \in domains$}
+        \State $C_1 \gets \text{Stage1}(entity, d, E)$
+        \State $C_2 \gets \text{Stage2}(C_1)$
+        \State $C_3 \gets \text{Stage3}(entity, C_2, E)$
+        \State $results[d] \gets C_3[0]$
+    \EndFor
+    \State \Return $\underset{d}{\arg\max} \; results[d].score$
+\EndProcedure
+
+\State
+
+\Procedure{Stage1}{$entity, domain, E$}
+    \State $C \gets \text{ES.textSearch}(entity, domain, 5)$ \Comment{Lexical}
+    \State $C \gets C \cup \text{ES.knnSearch}(E, domain, 5)$ \Comment{Semantic}
+    \State $C \gets C \cup \text{ES.hybridSearch}(entity, E, domain, 5)$ \Comment{Combined}
+    \State \Return $C$ \Comment{15 candidates}
+\EndProcedure
+
+\State
+
+\Procedure{Stage2}{$C_1$}
+    \State $S \gets \{c \in C_1 \mid c.std \in \{\text{`S'}, \text{`C'}\}\}$
+    \For{$c \in C_1$ where $c.std \notin \{\text{`S'}, \text{`C'}\}$}
+        \State $rels \gets \text{ES.search}(\{id_1: c.id, rel: \text{``Maps to''}\})$
+        \State $S \gets S \cup \{r.target \mid r \in rels, r.target.std \in \{\text{`S'}, \text{`C'}\}\}$
+    \EndFor
+    \State \Return $\text{Deduplicate}(S)$
+\EndProcedure
+
+\State
+
+\Procedure{Stage3}{$entity, C_2, E$}
+    \For{$c \in C_2$}
+        \State $s_{text} \gets \begin{cases} 1.0 & \text{if } c.is\_mapped \\ \frac{|N_3(entity) \cap N_3(c.name)|}{|N_3(entity) \cup N_3(c.name)|} & \text{otherwise} \end{cases}$
+        \State $s_{sem} \gets \frac{(E \cdot c.emb) / (\|E\| \|c.emb\|) + 1}{2}$
+        \State $c.score \gets 0.4 \cdot s_{text} + 0.6 \cdot s_{sem}$
+    \EndFor
+    \State \Return $\text{SortDesc}(C_2)$
+\EndProcedure
+
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

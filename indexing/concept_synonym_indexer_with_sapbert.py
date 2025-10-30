@@ -164,7 +164,7 @@ class ConceptSynonymIndexerWithSapBERT:
                             synonym_names = [name.lower() if name else "" for name in synonym_names]
                         
                         # 임베딩 생성
-                        embeddings = self.embedder.encode_batch(synonym_names)
+                        embeddings = self.embedder.encode_texts(synonym_names, show_progress=False)
                         logging.info(f"임베딩 생성 완료: {len(embeddings)} 개")
                     
                     # Elasticsearch 형식으로 변환

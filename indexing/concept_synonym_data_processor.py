@@ -210,12 +210,6 @@ class ConceptSynonymDataProcessor:
             if include_embeddings and embeddings is not None and i < len(embeddings):
                 doc['concept_synonym_embedding'] = embeddings[i].tolist()
             
-            # 고유 ID 생성 (concept_id + synonym_name의 해시)
-            import hashlib
-            unique_string = f"{doc['concept_id']}_{doc['concept_synonym_name']}"
-            doc_id = hashlib.md5(unique_string.encode()).hexdigest()
-            doc['_id'] = doc_id
-            
             documents.append(doc)
         
         return documents

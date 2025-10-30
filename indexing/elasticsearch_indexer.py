@@ -93,7 +93,28 @@ class ConceptElasticsearchIndexer:
                     return True
             
             # 인덱스 매핑 설정 (인덱스 이름에 따라 다른 매핑 적용)
-            if "synonym" in self.index_name.lower():
+            if "relationship" in self.index_name.lower():
+                # CONCEPT_RELATIONSHIP 인덱스 매핑
+                index_mapping = {
+                    "mappings": {
+                        "properties": {
+                            "concept_id_1": {"type": "keyword"},
+                            "concept_id_2": {"type": "keyword"},
+                            "relationship_id": {"type": "keyword"},
+                            "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
+                            "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
+                            "invalid_reason": {"type": "keyword"}
+                        }
+                    },
+                    "settings": {
+                        "number_of_shards": 3,
+                        "number_of_replicas": 5,
+                        "refresh_interval": "30s",
+                        "index.write.wait_for_active_shards": "1",
+                        "index.max_result_window": 50000
+                    }
+                }
+            elif "synonym" in self.index_name.lower():
                 # CONCEPT_SYNONYM 인덱스 매핑
                 index_mapping = {
                     "mappings": {
@@ -275,9 +296,24 @@ class ConceptElasticsearchIndexer:
                         doc = doc.copy()
                         doc.pop("concept_embedding", None)
                     
+                    # 문서 ID 생성 (인덱스 타입에 따라 다르게)
+                    if "relationship" in self.index_name.lower():
+                        # CONCEPT_RELATIONSHIP의 경우 고유 ID 생성
+                        import hashlib
+                        unique_string = f"{doc.get('concept_id_1', '')}_{doc.get('concept_id_2', '')}_{doc.get('relationship_id', '')}"
+                        doc_id = hashlib.md5(unique_string.encode()).hexdigest()
+                    elif "synonym" in self.index_name.lower():
+                        # CONCEPT_SYNONYM의 경우 고유 ID 생성
+                        import hashlib
+                        unique_string = f"{doc['concept_id']}_{doc.get('concept_synonym_name', '')}"
+                        doc_id = hashlib.md5(unique_string.encode()).hexdigest()
+                    else:
+                        # CONCEPT의 경우 concept_id 사용
+                        doc_id = doc["concept_id"]
+                    
                     action = {
                         "_index": self.index_name,
-                        "_id": doc["concept_id"],  # concept_id를 문서 ID로 사용
+                        "_id": doc_id,
                         "_source": doc
                     }
                     actions.append(action)
