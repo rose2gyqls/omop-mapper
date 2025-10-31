@@ -163,7 +163,8 @@ class EntityMappingAPI:
                     sapbert_tokenizer=self._sapbert_tokenizer,
                     sapbert_device=self._sapbert_device,
                     text_weight=0.4,
-                    semantic_weight=0.6
+                    semantic_weight=0.6,
+                    es_client=self.es_client
                 )
             
             # 엔티티 임베딩 생성
@@ -571,7 +572,6 @@ class EntityMappingAPI:
 # API 편의 함수들
 def map_single_entity(
     entity_name: str,
-    entity_type: str,
     domain_id: Optional[DomainID] = None,
     vocabulary_id: Optional[str] = None,
     confidence: float = 1.0
@@ -601,5 +601,4 @@ def map_single_entity(
         return api.map_entity(entity_input)
         
     except ValueError:
-        logger.error(f"지원하지 않는 엔티티 타입: {entity_type}")
         return None

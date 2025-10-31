@@ -22,6 +22,10 @@ class Stage1CandidateRetrieval:
         """
         self.es_client = es_client
         self.has_sapbert = has_sapbert
+        # Threshold 설정
+        self.lexical_threshold = 5.0
+        self.semantic_threshold = 0.8
+        self.combined_threshold = 5.0
     
     def retrieve_candidates(
         self, 
@@ -54,13 +58,16 @@ class Stage1CandidateRetrieval:
         
         all_candidates = []
         
-        # 1. Lexical Analysis - 텍스트 검색으로 top 5개
+        # 1. Lexical Analysis - 텍스트 검색으로 top 3개
         logger.info("\n" + "=" * 60)
         logger.info("📝 1-1. Lexical Analysis (텍스트 검색)")
+        logger.info(f"   Threshold: {self.lexical_threshold:.2f} 이상")
         logger.info("=" * 60)
-        lexical_results = self._perform_text_only_search(entity_name, domain_id, es_index, 5)
-        logger.info(f"✅ Lexical 후보: {len(lexical_results)}개")
-        for i, hit in enumerate(lexical_results, 1):
+        lexical_results = self._perform_text_only_search(entity_name, domain_id, es_index, 3)
+        # Threshold 필터링
+        lexical_results_filtered = [hit for hit in lexical_results if hit['_score'] >= self.lexical_threshold]
+        logger.info(f"✅ Lexical 후보 (전체): {len(lexical_results)}개 → Threshold 필터링 후: {len(lexical_results_filtered)}개")
+        for i, hit in enumerate(lexical_results_filtered, 1):
             source = hit['_source']
             hit['_search_type'] = 'lexical'
             all_candidates.append(hit)
@@ -69,14 +76,18 @@ class Stage1CandidateRetrieval:
                       f"[Domain: {source.get('domain_id', 'N/A')}] "
                       f"- 점수: {hit['_score']:.4f}")
         
-        # 2. Semantic Analysis - 벡터 검색으로 top 5개
+        # 2. Semantic Analysis - 벡터 검색으로 top 3개
         logger.info("\n" + "=" * 60)
         logger.info("🧠 1-2. Semantic Analysis (벡터 검색)")
+        logger.info(f"   Threshold: {self.semantic_threshold:.2f} 이상")
         logger.info("=" * 60)
+        semantic_results_filtered = []
         if entity_embedding is not None:
-            semantic_results = self._perform_vector_search(entity_embedding, domain_id, es_index, 5)
-            logger.info(f"✅ Semantic 후보: {len(semantic_results)}개")
-            for i, hit in enumerate(semantic_results, 1):
+            semantic_results = self._perform_vector_search(entity_embedding, domain_id, es_index, 3)
+            # Threshold 필터링
+            semantic_results_filtered = [hit for hit in semantic_results if hit['_score'] >= self.semantic_threshold]
+            logger.info(f"✅ Semantic 후보 (전체): {len(semantic_results)}개 → Threshold 필터링 후: {len(semantic_results_filtered)}개")
+            for i, hit in enumerate(semantic_results_filtered, 1):
                 source = hit['_source']
                 hit['_search_type'] = 'semantic'
                 all_candidates.append(hit)
@@ -87,20 +98,26 @@ class Stage1CandidateRetrieval:
         else:
             logger.warning("⚠️ 임베딩 없음 - Semantic 검색 건너뜀")
         
-        # 3. Combined Score - 하이브리드 검색으로 top 5개
+        # 3. Combined Score - 하이브리드 검색으로 top 3개
         logger.info("\n" + "=" * 60)
         logger.info("🔄 1-3. Combined Score (하이브리드 검색)")
+        logger.info(f"   Threshold: {self.combined_threshold:.2f} 이상")
         logger.info("=" * 60)
+        combined_results_filtered = []
+        combined_results = []
         if entity_embedding is not None:
             combined_results = self._perform_native_hybrid_search(
-                entity_name, entity_embedding, domain_id, es_index, 5
+                entity_name, entity_embedding, domain_id, es_index, 3
             )
+            # Threshold 필터링
+            combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
         else:
             # 임베딩이 없으면 텍스트 검색 결과 재사용
-            combined_results = lexical_results[:5]
+            combined_results = lexical_results[:3]
+            combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
         
-        logger.info(f"✅ Combined 후보: {len(combined_results)}개")
-        for i, hit in enumerate(combined_results, 1):
+        logger.info(f"✅ Combined 후보 (전체): {len(combined_results)}개 → Threshold 필터링 후: {len(combined_results_filtered)}개")
+        for i, hit in enumerate(combined_results_filtered, 1):
             source = hit['_source']
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)
@@ -112,13 +129,13 @@ class Stage1CandidateRetrieval:
         # 최종 요약
         logger.info("\n" + "=" * 80)
         logger.info(f"📊 Stage 1 완료: 총 {len(all_candidates)}개 후보 추출")
-        logger.info(f"  - Lexical: {len(lexical_results)}개")
-        logger.info(f"  - Semantic: {len(semantic_results) if entity_embedding is not None else 0}개")
-        logger.info(f"  - Combined: {len(combined_results)}개")
+        logger.info(f"  - Lexical: {len(lexical_results_filtered)}개 (threshold: {self.lexical_threshold:.2f})")
+        logger.info(f"  - Semantic: {len(semantic_results_filtered)}개 (threshold: {self.semantic_threshold:.2f})")
+        logger.info(f"  - Combined: {len(combined_results_filtered)}개 (threshold: {self.combined_threshold:.2f})")
         logger.info("=" * 80)
         
         return all_candidates
-    
+
     def _perform_text_only_search(self, entity_name: str, domain_id: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
         """텍스트 검색 수행 (domain_id 필터 적용)"""
         # Measurement 도메인의 경우 Meas Value도 포함

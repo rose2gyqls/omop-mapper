@@ -619,8 +619,8 @@ class ElasticsearchClient:
             self.es_client = None
         
         # OMOP CDM 인덱스 이름들
-        self.concept_index = "concept"  # 실제 인덱스명으로 변경
-        self.concept_synonym_index = "concept"
+        self.concept_index = "concept-small"  # 실제 인덱스명으로 변경
+        self.concept_synonym_index = "concept-synonym"
         self.concept_relationship_index = "concept-relationship"
         
         if use_grpc:
@@ -958,6 +958,98 @@ class ElasticsearchClient:
         """
         if not self.client:
             return []
+
+    def search_synonyms_bulk(
+        self,
+        concept_ids: List[str]
+    ) -> Dict[str, List[str]]:
+        """
+        여러 concept_id에 대한 동의어를 한 번에 조회
+        
+        Args:
+            concept_ids: OMOP concept ID 리스트
+        
+        Returns:
+            Dict[str, List[str]]: concept_id -> 동의어 리스트 매핑
+        """
+        result: Dict[str, List[str]] = {}
+        if not self.client or not concept_ids:
+            return result
+        try:
+            search_body = {
+                "query": {
+                    "terms": {
+                        "concept_id": [str(cid) for cid in concept_ids]
+                    }
+                },
+                "size": max(100, len(concept_ids) * 10)
+            }
+            response = self.client.search(
+                index=self.concept_synonym_index,
+                body=search_body
+            )
+            for hit in response.get('hits', {}).get('hits', []):
+                src = hit.get('_source', {})
+                cid = str(src.get('concept_id', ''))
+                syn = src.get('concept_synonym_name', '')
+                if cid:
+                    if cid not in result:
+                        result[cid] = []
+                    if syn and syn not in result[cid]:
+                        result[cid].append(syn)
+            return result
+        except Exception as e:
+            print(f"❌ 동의어 일괄 검색 실패: {str(e)}")
+            return {}
+    
+    def search_synonyms_with_embeddings_bulk(
+        self,
+        concept_ids: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        여러 concept_id에 대한 동의어와 임베딩을 한 번에 조회
+        
+        Args:
+            concept_ids: OMOP concept ID 리스트
+        
+        Returns:
+            Dict[str, List[Dict]]: concept_id -> 동의어 리스트(임베딩 포함) 매핑
+            각 동의어는 {'name': str, 'embedding': List[float]} 형태
+        """
+        result: Dict[str, List[Dict[str, Any]]] = {}
+        if not self.client or not concept_ids:
+            return result
+        try:
+            search_body = {
+                "query": {
+                    "terms": {
+                        "concept_id": [str(cid) for cid in concept_ids]
+                    }
+                },
+                "size": max(100, len(concept_ids) * 10)
+            }
+            response = self.client.search(
+                index=self.concept_synonym_index,
+                body=search_body
+            )
+            for hit in response.get('hits', {}).get('hits', []):
+                src = hit.get('_source', {})
+                cid = str(src.get('concept_id', ''))
+                syn_name = src.get('concept_synonym_name', '')
+                syn_embedding = src.get('concept_synonym_embedding')
+                
+                if cid and syn_name:
+                    if cid not in result:
+                        result[cid] = []
+                    # 동의어 이름과 임베딩 저장
+                    synonym_entry = {'name': syn_name}
+                    if syn_embedding and len(syn_embedding) == 768:
+                        synonym_entry['embedding'] = syn_embedding
+                    result[cid].append(synonym_entry)
+            return result
+        except Exception as e:
+            print(f"❌ 동의어 임베딩 일괄 검색 실패: {str(e)}")
+            return {}
         
         try:
             search_body = {
