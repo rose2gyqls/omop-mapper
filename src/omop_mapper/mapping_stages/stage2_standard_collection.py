@@ -28,15 +28,20 @@ class Stage2StandardCollection:
         """
         Stage 1 후보들을 Standard 개념으로 변환하고 중복 제거
         
+        **처리 로직**:
+        1. Standard 개념 (S/C): 그대로 추가
+        2. Non-standard 개념: concept-relationship 인덱스에서 "Maps to" 관계로 Standard 개념 조회
+        3. 중복 제거: 동일한 concept_id와 concept_name인 경우 Elasticsearch 점수가 높은 것만 유지
+        
         Args:
-            stage1_candidates: Stage 1에서 검색된 후보들 (15개)
-            domain_id: 도메인 ID
+            stage1_candidates: Stage 1에서 검색된 후보들 (최대 9개)
+            domain_id: 도메인 ID (디버깅용)
             
         Returns:
             List[Dict]: 중복 제거된 Standard 후보들
         """
         logger.info("=" * 80)
-        logger.info("Stage 2: Non-standard to Standard 변환 및 중복 제거")
+        logger.info("Stage 2: Non-standard → Standard 변환 및 중복 제거")
         logger.info("=" * 80)
         
         all_standard_candidates = []

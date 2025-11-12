@@ -370,7 +370,7 @@ class EntityMappingTester:
             "Test Index", "Entity Name", "Success", "Domain Count",
             "Best Search Domain", "Best Result Domain", "Best Concept ID", "Best Concept Name", 
             "Best Score", "Best Confidence",
-            "All Domains", "Domain Stage Paths", "Stage1 Candidates", "Stage3 Candidates"
+            "All Domains", "Domain Stage Paths", "Stage1 Candidates", "Stage2 Candidates", "Stage3 Candidates"
         ]
         
         # 헤더 스타일
@@ -410,12 +410,16 @@ class EntityMappingTester:
             stage1_text = self._format_candidates_for_cell(result.get('stage1_candidates', []), 'stage1')
             ws.cell(row=row, column=13, value=stage1_text)
             
+            # Stage2 후보군 정보를 문자열로 변환
+            stage2_text = self._format_candidates_for_cell(result.get('stage2_candidates', []), 'stage2')
+            ws.cell(row=row, column=14, value=stage2_text)
+            
             # Stage3 후보군 정보를 문자열로 변환
             stage3_text = self._format_candidates_for_cell(result.get('stage3_candidates', []), 'stage3')
-            ws.cell(row=row, column=14, value=stage3_text)
+            ws.cell(row=row, column=15, value=stage3_text)
             
             # 셀 스타일 설정 (텍스트 줄바꿈 허용)
-            for col in range(11, 15):  # All Domains, Stage Paths, Stage1, Stage3 열
+            for col in range(11, 16):  # All Domains, Stage Paths, Stage1, Stage2, Stage3 열
                 cell = ws.cell(row=row, column=col)
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
         
@@ -434,7 +438,8 @@ class EntityMappingTester:
             'K': 50,  # All Domains
             'L': 45,  # Domain Stage Paths
             'M': 70,  # Stage1 Candidates
-            'N': 85   # Stage3 Candidates
+            'N': 70,  # Stage2 Candidates
+            'O': 85   # Stage3 Candidates
         }
         
         for col_letter, width in column_widths.items():
@@ -489,7 +494,7 @@ class EntityMappingTester:
             return "후보 없음"
         
         lines = []
-        max_candidates = 15 if stage_type == 'stage1' else 10  # Stage1은 15개, Stage3는 10개 표시
+        max_candidates = 15 if stage_type == 'stage1' else (15 if stage_type == 'stage2' else 10)  # Stage1, Stage2는 15개, Stage3는 10개 표시
         
         for i, candidate in enumerate(candidates[:max_candidates], 1):
             if stage_type == 'stage1':
@@ -497,7 +502,17 @@ class EntityMappingTester:
                 line = f"{i}. [{search_type}] {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
                 line += f"   ES점수: {candidate.get('elasticsearch_score', 0):.4f}, "
                 line += f"Standard: {candidate.get('standard_concept', 'N/A')}, "
-                line += f"Vocab: {candidate.get('vocabulary_id', 'N/A')}"
+                line += f"Domain: {candidate.get('domain_id', 'N/A')}"
+            elif stage_type == 'stage2':
+                search_type = candidate.get('search_type', 'unknown')
+                is_std = "✓" if candidate.get('is_original_standard', True) else "→"
+                line = f"{i}. [{search_type}] {is_std} {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
+                line += f"   Standard: {candidate.get('standard_concept', 'N/A')}, "
+                line += f"Domain: {candidate.get('domain_id', 'N/A')}"
+                if not candidate.get('is_original_standard', True):
+                    original_non_std = candidate.get('original_non_standard', {})
+                    if original_non_std:
+                        line += f"\n   원본 Non-std: {original_non_std.get('concept_name', 'N/A')} (ID: {original_non_std.get('concept_id', 'N/A')})"
             else:  # stage3
                 search_type = candidate.get('search_type', 'unknown')
                 line = f"{i}. [{search_type}] {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
@@ -505,7 +520,7 @@ class EntityMappingTester:
                 line += f"의미적: {candidate.get('semantic_similarity', 0):.4f}, "
                 line += f"최종: {candidate.get('final_score', 0):.4f}\n"
                 line += f"   Standard: {candidate.get('standard_concept', 'N/A')}, "
-                line += f"Vocab: {candidate.get('vocabulary_id', 'N/A')}"
+                line += f"Domain: {candidate.get('domain_id', 'N/A')}"
             
             lines.append(line)
         
@@ -529,7 +544,6 @@ def main():
         'atherosclerotic cardiovascular disease',
         'atrial fibrillation',
         'blood pressure',
-        'cardiac intensive care unit',
         'cardiac rehabilitation',
         'cardiac troponin',
         'cardiovascular',
@@ -551,7 +565,6 @@ def main():
         'implantable cardioverter-defibrillator',
         'intra-aortic balloon pump',
         'intravascular ultrasound',
-        'left ventricular',
         'left ventricular ejection fraction',
         'left ventricular hypertrophy',
         'low-density lipoprotein',
@@ -570,13 +583,9 @@ def main():
         'proprotein convertase subtilisin/kexin type 9',
         'primary percutaneous coronary intervention',
         'proton pump inhibitor',
-        'quality of life',
         'randomized controlled trial',
-        'relative risk',
-        'renin-angiotensin system',
         'return of spontaneous circulation',
         'sodium-glucose cotransporter-2',
-        'subclinical hypercortisolism',
         'systolic blood pressure',
         'unfractionated heparin',
         'venoarterial extracorporeal membrane oxygenation',
@@ -608,7 +617,7 @@ def main():
         'nonalcoholic steatohepatitis',
         'hepatocellular carcinoma',
         'prostate cancer',
-        'colorectal cancer'
+        'colorectal cancer',
     ]
     
     results = tester.run_test_with_entities(test_entities)

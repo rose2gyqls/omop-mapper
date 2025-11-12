@@ -9,6 +9,7 @@ from .mapping_stages import (
     Stage2StandardCollection,
     Stage3HybridScoring
 )
+from .mapping_validation import MappingValidator
 
 try:
     import torch
@@ -38,9 +39,16 @@ class DomainID(Enum):
 
 @dataclass
 class EntityInput:
-    """입력용 엔티티 데이터"""
+    """
+    입력용 엔티티 데이터
+    
+    Args:
+        entity_name: 매핑할 엔티티 이름
+        domain_id: 도메인 ID (None이면 모든 도메인 검색, 지정하면 해당 도메인만 검색)
+        vocabulary_id: 어휘체계 ID (선택사항)
+    """
     entity_name: str
-    domain_id: DomainID
+    domain_id: Optional[DomainID] = None
     vocabulary_id: Optional[str] = None
 
 
@@ -100,6 +108,13 @@ class EntityMappingAPI:
         
         self.stage3 = None  # SapBERT 모델 로딩 후 초기화
         
+        # 검증 모듈 초기화
+        self.validator = MappingValidator(
+            es_client=self.es_client,
+            openai_api_key=None,  # .env 파일에서 가져옴
+            openai_model="gpt-4o-mini"
+        )
+        
         # 디버깅용 변수
         self._last_stage1_candidates = []
         self._last_stage2_candidates = []
@@ -109,27 +124,28 @@ class EntityMappingAPI:
         """
         단일 엔티티를 OMOP CDM에 3단계 매핑
         
-        - entity_input.domain_id가 None이면: 6개 도메인 모두에서 검색
-        - entity_input.domain_id가 지정되면: 해당 도메인만 검색
+        **도메인 검색 전략**:
+        - entity_input.domain_id가 None이면: 6개 주요 도메인 모두에서 검색하여 최적 매핑 찾기
+        - entity_input.domain_id가 지정되면: 해당 도메인에서만 검색 (특정 도메인 매핑이 필요한 경우)
         
-        각 도메인별로:
-        Stage 1: Elasticsearch에서 후보군 15개 추출 (Lexical 5 + Semantic 5 + Combined 5)
-        Stage 2: Non-standard to Standard 변환 및 중복 제거
-        Stage 3: 최종 Semantic/Lexical 유사도 계산 및 Hybrid Score 산출
+        **3단계 매핑 파이프라인** (각 도메인별로 수행):
+        - Stage 1: Elasticsearch에서 후보군 9개 추출 (Lexical 3 + Semantic 3 + Combined 3)
+        - Stage 2: Non-standard to Standard 변환 및 중복 제거
+        - Stage 3: LLM 기반 평가 및 최종 랭킹
         
         Args:
             entity_input: 매핑할 엔티티 정보
             
         Returns:
-            List[MappingResult]: 각 도메인별 매핑 결과 리스트
+            List[MappingResult]: 각 도메인별 매핑 결과 리스트 (최고 점수 순으로 정렬)
         """
         try:
             entity_name = entity_input.entity_name
             input_domain = entity_input.domain_id
             
-            # 검색 대상 도메인 결정
+            # ===== 검색 대상 도메인 결정 =====
             if input_domain is None:
-                # 모든 도메인 검색
+                # 케이스 1: 엔티티만 제공된 경우 → 모든 주요 도메인 검색
                 target_domains = [
                     DomainID.DRUG,
                     DomainID.OBSERVATION,
@@ -141,15 +157,17 @@ class EntityMappingAPI:
                 logger.info("=" * 100)
                 logger.info(f"🚀 전체 도메인 3단계 엔티티 매핑 시작")
                 logger.info(f"   엔티티: {entity_name}")
+                logger.info(f"   검색 전략: 모든 도메인 검색 후 최적 매핑 선택")
                 logger.info(f"   대상 도메인: Drug, Observation, Procedure, Condition, Measurement, Device (6개)")
                 logger.info("=" * 100)
             else:
-                # 지정된 도메인만 검색
+                # 케이스 2: 엔티티 + 도메인 제공된 경우 → 해당 도메인만 검색
                 target_domains = [input_domain]
                 logger.info("=" * 100)
                 logger.info(f"🚀 단일 도메인 3단계 엔티티 매핑 시작")
                 logger.info(f"   엔티티: {entity_name}")
-                logger.info(f"   대상 도메인: {input_domain.value}")
+                logger.info(f"   검색 전략: 지정된 도메인에서만 검색")
+                logger.info(f"   대상 도메인: {input_domain.value} (1개)")
                 logger.info("=" * 100)
             
             # SapBERT 모델 초기화 (필요시)
@@ -164,7 +182,9 @@ class EntityMappingAPI:
                     sapbert_device=self._sapbert_device,
                     text_weight=0.4,
                     semantic_weight=0.6,
-                    es_client=self.es_client
+                    es_client=self.es_client,
+                    openai_api_key=None,  # .env 파일에서 가져옴
+                    openai_model="gpt-4o-mini"
                 )
             
             # 엔티티 임베딩 생성
@@ -274,7 +294,7 @@ class EntityMappingAPI:
                 'candidates': {}  # 후보군 정보 저장
             }
             
-            # ===== Stage 1: 후보군 15개 추출 =====
+            # ===== Stage 1: 후보군 9개 추출 =====
             es_index = getattr(self.es_client, 'concept_index', 'concept')
             stage1_candidates = self.stage1.retrieve_candidates(
                 entity_name=entity_name,
@@ -301,14 +321,15 @@ class EntityMappingAPI:
             
             stage_results['stage2_count'] = len(stage2_candidates)
             
-            # ===== Stage 3: Hybrid Score 계산 =====
+            # ===== Stage 3: LLM 기반 평가 =====
             stage3_candidates = self.stage3.calculate_hybrid_scores(
                 entity_name=entity_name,
-                stage2_candidates=stage2_candidates
+                stage2_candidates=stage2_candidates,
+                stage1_candidates=stage1_candidates
             )
             
             if not stage3_candidates:
-                logger.info(f"⚠️ [{domain_str}] Stage 3 - 점수 계산 실패")
+                logger.info(f"⚠️ [{domain_str}] Stage 3 - LLM 평가 실패")
                 return None, {}
             
             stage_results['stage3_count'] = len(stage3_candidates)
@@ -321,16 +342,84 @@ class EntityMappingAPI:
                 vocabulary_id=entity_input.vocabulary_id
             )
             
+            # LLM 방식 결과 사용
             mapping_result = self._create_final_mapping_result(domain_entity_input, stage3_candidates)
+            
+            # ===== 검증 단계 =====
+            logger.info("\n" + "=" * 100)
+            logger.info("🔍 매핑 검증 시작")
+            logger.info("=" * 100)
+            
+            # 최종 매핑 결과 검증
+            is_valid = self.validator.validate_mapping(
+                entity_name=entity_name,
+                concept_id=mapping_result.mapped_concept_id,
+                concept_name=mapping_result.mapped_concept_name,
+                synonyms=None  # Elasticsearch에서 조회
+            )
+            
+            if not is_valid:
+                logger.warning(f"⚠️ [{domain_str}] 최종 매핑 검증 실패: {mapping_result.mapped_concept_name}")
+                logger.info("🔍 후보군 순차 검증 시작...")
+                
+                # 원래 후보 정보 저장
+                original_candidate_id = mapping_result.mapped_concept_id
+                original_candidate_name = mapping_result.mapped_concept_name
+                
+                # 후보군 순차 검증
+                validated_candidate = self.validator.validate_candidates_sequentially(
+                    entity_name=entity_name,
+                    candidates=stage3_candidates,
+                    max_candidates=10
+                )
+                
+                if validated_candidate:
+                    # 검증 통과한 후보로 매핑 결과 재생성
+                    validated_concept_name = validated_candidate['concept'].get('concept_name', '')
+                    logger.info(f"✅ 검증 통과한 후보 발견: {validated_concept_name}")
+                    
+                    # 검증 통과한 후보의 인덱스 찾기
+                    validated_idx = None
+                    for idx, candidate in enumerate(stage3_candidates):
+                        if candidate['concept'].get('concept_id') == validated_candidate['concept'].get('concept_id'):
+                            validated_idx = idx
+                            break
+                    
+                    # 검증 통과한 후보를 맨 앞으로 이동하여 매핑 결과 재생성
+                    if validated_idx is not None and validated_idx > 0:
+                        reordered_candidates = [stage3_candidates[validated_idx]] + [
+                            c for i, c in enumerate(stage3_candidates) if i != validated_idx
+                        ]
+                    else:
+                        reordered_candidates = stage3_candidates
+                    
+                    mapping_result = self._create_final_mapping_result(domain_entity_input, reordered_candidates)
+                    stage_results['validation_status'] = 'validated_alternative'
+                    stage_results['original_candidate'] = {
+                        'concept_id': original_candidate_id,
+                        'concept_name': original_candidate_name
+                    }
+                    stage_results['validated_candidate'] = {
+                        'concept_id': mapping_result.mapped_concept_id,
+                        'concept_name': mapping_result.mapped_concept_name
+                    }
+                else:
+                    logger.error(f"❌ [{domain_str}] 모든 후보 검증 실패 - 매핑 실패")
+                    stage_results['validation_status'] = 'failed'
+                    return None, stage_results
+            else:
+                logger.info(f"✅ [{domain_str}] 최종 매핑 검증 통과: {mapping_result.mapped_concept_name}")
+                stage_results['validation_status'] = 'validated'
             
             # 실제 결과 도메인 저장
             stage_results['result_domain'] = mapping_result.domain_id
             
-            logger.info(f"\n✅ [{domain_str}] 매핑 성공!")
+            logger.info(f"\n✅ [{domain_str}] 매핑 완료!")
             logger.info(f"   검색 도메인: {domain_str} → 결과 도메인: {mapping_result.domain_id}")
             logger.info(f"   개념: {mapping_result.mapped_concept_name} (ID: {mapping_result.mapped_concept_id})")
             logger.info(f"   점수: {mapping_result.mapping_score:.4f} | 신뢰도: {mapping_result.mapping_confidence}")
             logger.info(f"   Stage 경로: {stage_results['stage1_count']}개 → {stage_results['stage2_count']}개 → {stage_results['stage3_count']}개")
+            logger.info(f"   검증 상태: {stage_results.get('validation_status', 'unknown')}")
             
             # 도메인별 후보군 정보를 stage_results에 저장
             stage_results['candidates'] = {
@@ -354,7 +443,8 @@ class EntityMappingAPI:
                         'vocabulary_id': c['concept'].get('vocabulary_id', ''),
                         'standard_concept': c['concept'].get('standard_concept', ''),
                         'is_original_standard': c['is_original_standard'],
-                        'search_type': c.get('search_type', 'unknown')
+                        'search_type': c.get('search_type', 'unknown'),
+                        'original_non_standard': c.get('original_non_standard', None)
                     }
                     for c in stage2_candidates
                 ],
@@ -365,9 +455,9 @@ class EntityMappingAPI:
                         'domain_id': c['concept'].get('domain_id', ''),
                         'vocabulary_id': c['concept'].get('vocabulary_id', ''),
                         'standard_concept': c['concept'].get('standard_concept', ''),
-                        'elasticsearch_score': c.get('elasticsearch_score', 0.0),
-                        'text_similarity': c.get('text_similarity', 0.0),
-                        'semantic_similarity': c.get('semantic_similarity', 0.0),
+                        'llm_score': c.get('llm_score', None),
+                        'llm_rank': c.get('llm_rank', None),
+                        'llm_reasoning': c.get('llm_reasoning', None),
                         'final_score': c.get('final_score', 0.0),
                         'search_type': c.get('search_type', 'unknown')
                     }
@@ -567,38 +657,3 @@ class EntityMappingAPI:
             "elasticsearch_status": es_health,
             "confidence_threshold": self.confidence_threshold
         }
-
-
-# API 편의 함수들
-def map_single_entity(
-    entity_name: str,
-    domain_id: Optional[DomainID] = None,
-    vocabulary_id: Optional[str] = None,
-    confidence: float = 1.0
-) -> Optional[MappingResult]:
-    """
-    단일 엔티티 매핑 편의 함수
-    
-    Args:
-        entity_name: 엔티티 이름
-        entity_type: 엔티티 타입 ('diagnostic', 'drug', 'test', 'surgery')
-        domain_id: OMOP 도메인 ID (선택사항)
-        vocabulary_id: OMOP 어휘체계 ID (선택사항)
-        confidence: 엔티티 신뢰도
-        
-    Returns:
-        MappingResult: 매핑 결과 또는 None
-    """
-    try:
-        api = EntityMappingAPI()
-        
-        entity_input = EntityInput(
-            entity_name=entity_name,
-            domain_id=domain_id if isinstance(domain_id, DomainID) else (DomainID(domain_id) if domain_id else None),
-            vocabulary_id=vocabulary_id
-        )
-        
-        return api.map_entity(entity_input)
-        
-    except ValueError:
-        return None

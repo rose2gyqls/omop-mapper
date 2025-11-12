@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class Stage1CandidateRetrieval:
-    """Stage 1: 후보군 추출 (Lexical 5 + Semantic 5 + Combined 5)"""
+    """Stage 1: 후보군 추출 (Lexical 3 + Semantic 3 + Combined 3)"""
     
     def __init__(self, es_client, has_sapbert: bool = True):
         """
@@ -35,96 +35,82 @@ class Stage1CandidateRetrieval:
         es_index: str = "concept-small"
     ) -> List[Dict[str, Any]]:
         """
-        각 도메인별로 lexical 5개, semantic 5개, combined 5개 후보 추출 (총 15개)
+        각 도메인별로 다양한 검색 전략을 사용하여 후보군 추출
+        
+        **검색 전략**:
+        - Lexical: 텍스트 기반 검색 (최대 3개)
+        - Semantic: 벡터 기반 검색 (최대 3개, 임베딩이 있는 경우)
+        - Combined: 하이브리드 검색 (최대 3개, 임베딩이 있는 경우)
+        
+        **Threshold 필터링**:
+        - Lexical: {self.lexical_threshold} 이상
+        - Semantic: {self.semantic_threshold} 이상
+        - Combined: {self.combined_threshold} 이상
         
         Args:
             entity_name: 엔티티 이름
-            domain_id: 도메인 ID (필터링에 사용)
+            domain_id: 검색할 도메인 ID (해당 도메인만 필터링)
             entity_embedding: 엔티티 임베딩 벡터 (선택사항)
-            es_index: Elasticsearch 인덱스
+            es_index: Elasticsearch 인덱스 이름
             
         Returns:
-            List[Dict]: 15개의 후보 리스트 (각 후보는 검색 타입 정보 포함)
+            List[Dict]: Threshold를 통과한 후보 리스트 (각 후보는 _search_type 필드 포함)
         """
         logger.info("=" * 80)
-        logger.info("Stage 1: 각 도메인별 후보군 15개 추출")
-        logger.info("  - Lexical Analysis: 5개")
-        logger.info("  - Semantic Analysis: 5개")
-        logger.info("  - Combined Score: 5개")
+        logger.info("Stage 1: 후보군 추출 (Lexical + Semantic + Combined)")
+        logger.info(f"  엔티티: {entity_name}")
+        logger.info(f"  도메인: {domain_id}")
         logger.info("=" * 80)
-        
-        logger.info(f"🔍 엔티티: {entity_name}")
-        logger.info(f"🔍 도메인: {domain_id}")
         
         all_candidates = []
         
-        # 1. Lexical Analysis - 텍스트 검색으로 top 3개
-        logger.info("\n" + "=" * 60)
-        logger.info("📝 1-1. Lexical Analysis (텍스트 검색)")
-        logger.info(f"   Threshold: {self.lexical_threshold:.2f} 이상")
-        logger.info("=" * 60)
+        # ===== 1. Lexical Analysis: 텍스트 기반 검색 =====
+        logger.info("\n📝 1-1. Lexical Analysis (텍스트 검색, threshold: {:.2f})".format(self.lexical_threshold))
         lexical_results = self._perform_text_only_search(entity_name, domain_id, es_index, 3)
-        # Threshold 필터링
         lexical_results_filtered = [hit for hit in lexical_results if hit['_score'] >= self.lexical_threshold]
-        logger.info(f"✅ Lexical 후보 (전체): {len(lexical_results)}개 → Threshold 필터링 후: {len(lexical_results_filtered)}개")
-        for i, hit in enumerate(lexical_results_filtered, 1):
-            source = hit['_source']
+        logger.info(f"✅ Lexical: {len(lexical_results)}개 → {len(lexical_results_filtered)}개 (threshold 통과)")
+        
+        for hit in lexical_results_filtered:
             hit['_search_type'] = 'lexical'
             all_candidates.append(hit)
-            logger.info(f"  {i}. {source.get('concept_name', 'N/A')} "
-                      f"(ID: {source.get('concept_id', 'N/A')}) "
-                      f"[Domain: {source.get('domain_id', 'N/A')}] "
-                      f"- 점수: {hit['_score']:.4f}")
+            source = hit['_source']
+            logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
         
-        # 2. Semantic Analysis - 벡터 검색으로 top 3개
-        logger.info("\n" + "=" * 60)
-        logger.info("🧠 1-2. Semantic Analysis (벡터 검색)")
-        logger.info(f"   Threshold: {self.semantic_threshold:.2f} 이상")
-        logger.info("=" * 60)
+        # ===== 2. Semantic Analysis: 벡터 기반 검색 =====
+        logger.info("\n🧠 1-2. Semantic Analysis (벡터 검색, threshold: {:.2f})".format(self.semantic_threshold))
         semantic_results_filtered = []
         if entity_embedding is not None:
             semantic_results = self._perform_vector_search(entity_embedding, domain_id, es_index, 3)
-            # Threshold 필터링
             semantic_results_filtered = [hit for hit in semantic_results if hit['_score'] >= self.semantic_threshold]
-            logger.info(f"✅ Semantic 후보 (전체): {len(semantic_results)}개 → Threshold 필터링 후: {len(semantic_results_filtered)}개")
-            for i, hit in enumerate(semantic_results_filtered, 1):
-                source = hit['_source']
+            logger.info(f"✅ Semantic: {len(semantic_results)}개 → {len(semantic_results_filtered)}개 (threshold 통과)")
+            
+            for hit in semantic_results_filtered:
                 hit['_search_type'] = 'semantic'
                 all_candidates.append(hit)
-                logger.info(f"  {i}. {source.get('concept_name', 'N/A')} "
-                          f"(ID: {source.get('concept_id', 'N/A')}) "
-                          f"[Domain: {source.get('domain_id', 'N/A')}] "
-                          f"- 점수: {hit['_score']:.4f}")
+                source = hit['_source']
+                logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
         else:
             logger.warning("⚠️ 임베딩 없음 - Semantic 검색 건너뜀")
         
-        # 3. Combined Score - 하이브리드 검색으로 top 3개
-        logger.info("\n" + "=" * 60)
-        logger.info("🔄 1-3. Combined Score (하이브리드 검색)")
-        logger.info(f"   Threshold: {self.combined_threshold:.2f} 이상")
-        logger.info("=" * 60)
+        # ===== 3. Combined Score: 하이브리드 검색 =====
+        logger.info("\n🔄 1-3. Combined Score (하이브리드 검색, threshold: {:.2f})".format(self.combined_threshold))
         combined_results_filtered = []
-        combined_results = []
         if entity_embedding is not None:
             combined_results = self._perform_native_hybrid_search(
                 entity_name, entity_embedding, domain_id, es_index, 3
             )
-            # Threshold 필터링
             combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
         else:
             # 임베딩이 없으면 텍스트 검색 결과 재사용
             combined_results = lexical_results[:3]
             combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
         
-        logger.info(f"✅ Combined 후보 (전체): {len(combined_results)}개 → Threshold 필터링 후: {len(combined_results_filtered)}개")
-        for i, hit in enumerate(combined_results_filtered, 1):
-            source = hit['_source']
+        logger.info(f"✅ Combined: {len(combined_results if entity_embedding else lexical_results[:3])}개 → {len(combined_results_filtered)}개 (threshold 통과)")
+        for hit in combined_results_filtered:
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)
-            logger.info(f"  {i}. {source.get('concept_name', 'N/A')} "
-                      f"(ID: {source.get('concept_id', 'N/A')}) "
-                      f"[Domain: {source.get('domain_id', 'N/A')}] "
-                      f"- 점수: {hit['_score']:.4f}")
+            source = hit['_source']
+            logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
         
         # 최종 요약
         logger.info("\n" + "=" * 80)
@@ -137,8 +123,24 @@ class Stage1CandidateRetrieval:
         return all_candidates
 
     def _perform_text_only_search(self, entity_name: str, domain_id: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
-        """텍스트 검색 수행 (domain_id 필터 적용)"""
-        # Measurement 도메인의 경우 Meas Value도 포함
+        """
+        텍스트 기반 검색 수행 (Lexical Search)
+        
+        **검색 전략**:
+        - Exact match: concept_name.keyword로 정확히 일치하는 항목 (boost: 3.0)
+        - Phrase match: concept_name에 구문 일치하는 항목 (boost: 2.5)
+        - Text match: concept_name에 텍스트 일치하는 항목 (boost: 2.0)
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            domain_id: 도메인 필터 (해당 도메인만 검색)
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 최대 결과 수
+            
+        Returns:
+            List[Dict]: 검색 결과 리스트
+        """
+        # Measurement 도메인의 경우 "Meas Value"도 포함 (OMOP CDM 특성)
         if domain_id == "Measurement":
             domain_filter = {
                 "terms": {
@@ -205,10 +207,26 @@ class Stage1CandidateRetrieval:
             return []
     
     def _perform_vector_search(self, entity_embedding: np.ndarray, domain_id: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
-        """벡터 검색 수행 (domain_id 필터 적용)"""
+        """
+        벡터 기반 검색 수행 (Semantic Search)
+        
+        **검색 전략**:
+        - Elasticsearch KNN (k-Nearest Neighbors) 검색 사용
+        - concept_embedding 필드와 입력 임베딩 간의 유사도 계산
+        - 코사인 유사도 기반으로 가장 유사한 개념 검색
+        
+        Args:
+            entity_embedding: 엔티티의 임베딩 벡터 (SapBERT 등)
+            domain_id: 도메인 필터 (해당 도메인만 검색)
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 최대 결과 수
+            
+        Returns:
+            List[Dict]: 검색 결과 리스트
+        """
         embedding_list = entity_embedding.tolist()
         
-        # Measurement 도메인의 경우 Meas Value도 포함
+        # Measurement 도메인의 경우 "Meas Value"도 포함 (OMOP CDM 특성)
         if domain_id == "Measurement":
             domain_filter = {
                 "terms": {
@@ -250,12 +268,33 @@ class Stage1CandidateRetrieval:
         es_index: str, 
         top_k: int
     ) -> List[Dict[str, Any]]:
-        """네이티브 하이브리드 검색 (벡터 + 텍스트 + 글자수 유사도 + domain_id 필터)"""
+        """
+        하이브리드 검색 수행 (텍스트 + 벡터 + 길이 유사도)
+        
+        **검색 전략**:
+        - KNN 벡터 검색 (boost: 0.6)
+        - 텍스트 검색 (exact match boost: 3.0, match boost: 2.5)
+        - 길이 유사도 가중치 (가우시안 decay 함수 사용)
+        
+        **길이 유사도**:
+        - 입력 엔티티와 후보 개념의 글자 수 차이를 고려
+        - 유사한 길이의 개념에 높은 가중치 부여
+        
+        Args:
+            entity_name: 검색할 엔티티 이름
+            entity_embedding: 엔티티 임베딩 벡터
+            domain_id: 도메인 필터
+            es_index: Elasticsearch 인덱스
+            top_k: 반환할 최대 결과 수
+            
+        Returns:
+            List[Dict]: 검색 결과 리스트
+        """
         embedding_list = entity_embedding.tolist()
         entity_length = len(entity_name.strip())
         scale_len = max(8.0, entity_length * 0.8)
         
-        # Measurement 도메인의 경우 Meas Value도 포함
+        # Measurement 도메인의 경우 "Meas Value"도 포함 (OMOP CDM 특성)
         if domain_id == "Measurement":
             domain_filter = {
                 "terms": {
