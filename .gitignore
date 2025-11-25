@@ -142,6 +142,8 @@ Thumbs.db
 # Project specific
 log/
 test_logs/
+test_logs_real_data/
+test_logs_snuh/
 *.log
 temp/
 tmp/

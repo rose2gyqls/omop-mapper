@@ -14,9 +14,9 @@ sys.path.append('/home/work/skku/hyo/omop-mapper/src')
 from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from omop_mapper.elasticsearch_client import ElasticsearchClient
 
-class RealDataEntityMappingTester:
-    def __init__(self, log_dir: str = "test_logs_real_data", scoring_mode: str = "llm"):
-        """실제 데이터 테스터 초기화
+class SNUHEntityMappingTester:
+    def __init__(self, log_dir: str = "test_logs_snuh", scoring_mode: str = "hybrid"):
+        """SNUH 데이터 테스터 초기화
         
         Args:
             log_dir: 로그 디렉토리
@@ -53,9 +53,9 @@ class RealDataEntityMappingTester:
         """로깅 설정"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        log_file = self.log_dir / f"entity_mapping_real_data_{timestamp}.log"
+        log_file = self.log_dir / f"entity_mapping_snuh_{timestamp}.log"
         
-        self.logger = logging.getLogger('entity_mapping_real_data')
+        self.logger = logging.getLogger('entity_mapping_snuh')
         self.logger.setLevel(logging.INFO)
         
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
@@ -93,33 +93,47 @@ class RealDataEntityMappingTester:
         
         self.logger.info(f"로그 파일: {log_file}")
     
-    def load_and_sample_data(self, csv_path: str, sample_size: int = 10000, random_state: int = 42) -> pd.DataFrame:
-        """CSV 파일에서 랜덤 샘플링"""
+    def load_and_sample_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, random_state: int = 42) -> pd.DataFrame:
+        """CSV 파일에서 데이터 로딩 및 샘플링
+        
+        Args:
+            csv_path: CSV 파일 경로
+            sample_size: 샘플 크기
+            use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
+            random_state: 랜덤 시드 (use_random=True일 때만 사용)
+        """
         self.logger.info(f"데이터 로딩 시작: {csv_path}")
         self.logger.info(f"샘플 크기: {sample_size}개")
+        self.logger.info(f"샘플링 방식: {'랜덤' if use_random else '순서대로'}")
         
-        # 청크 단위로 읽어서 샘플링 (메모리 효율)
-        chunk_size = 100000
-        chunks = []
+        # 순서대로 샘플링하는 경우 청크를 사용하지 않고 바로 로드
+        if not use_random:
+            self.logger.info(f"데이터 처음 {sample_size}개 로딩 중...")
+            df_sample = pd.read_csv(csv_path, nrows=sample_size)
+            self.logger.info(f"로딩 완료: {len(df_sample):,}개")
+        else:
+            # 랜덤 샘플링을 위해 전체 데이터 로드
+            chunk_size = 100000
+            chunks = []
+            
+            self.logger.info("청크 단위로 데이터 읽는 중...")
+            for chunk in tqdm(pd.read_csv(csv_path, chunksize=chunk_size), desc="데이터 로딩"):
+                chunks.append(chunk)
+            
+            # 전체 데이터 병합
+            df = pd.concat(chunks, ignore_index=True)
+            self.logger.info(f"전체 데이터 크기: {len(df):,}개")
+            
+            # 랜덤 샘플링
+            df_sample = df.sample(n=min(sample_size, len(df)), random_state=random_state)
+            df_sample = df_sample.reset_index(drop=True)
+            self.logger.info(f"랜덤 샘플링 완료: {len(df_sample):,}개")
         
-        self.logger.info("청크 단위로 데이터 읽는 중...")
-        for chunk in tqdm(pd.read_csv(csv_path, chunksize=chunk_size), desc="데이터 로딩"):
-            chunks.append(chunk)
-        
-        # 전체 데이터 병합
-        df = pd.concat(chunks, ignore_index=True)
-        self.logger.info(f"전체 데이터 크기: {len(df):,}개")
-        
-        # 랜덤 샘플링
-        df_sample = df.sample(n=min(sample_size, len(df)), random_state=random_state)
-        df_sample = df_sample.reset_index(drop=True)
-        
-        self.logger.info(f"샘플링 완료: {len(df_sample):,}개")
         self.logger.info(f"컬럼: {list(df_sample.columns)}")
         
         # 도메인 분포 출력
-        if 'domain_id' in df_sample.columns:
-            domain_dist = df_sample['domain_id'].value_counts()
+        if 'domain' in df_sample.columns:
+            domain_dist = df_sample['domain'].value_counts()
             self.logger.info("\n도메인 분포:")
             for domain, count in domain_dist.items():
                 self.logger.info(f"  {domain}: {count}개 ({count/len(df_sample)*100:.1f}%)")
@@ -128,12 +142,12 @@ class RealDataEntityMappingTester:
     
     def create_entity_input(self, row) -> EntityInput:
         """DataFrame 행에서 EntityInput 생성"""
-        entity_name = str(row['entity_name']).strip()
+        entity_name = str(row['source_name']).strip()
         
-        # 도메인 정보가 있으면 사용, 없으면 None (모든 도메인 검색)
+        # 도메인 정보 사용
         domain_id = None
-        if 'domain_id' in row and pd.notna(row['domain_id']):
-            domain_str = str(row['domain_id']).strip()
+        if 'domain' in row and pd.notna(row['domain']):
+            domain_str = str(row['domain']).strip()
             if domain_str and domain_str in self.domain_mapping:
                 domain_id = self.domain_mapping[domain_str]
         
@@ -143,7 +157,7 @@ class RealDataEntityMappingTester:
             vocabulary_id=None
         )
     
-    def test_single_entity(self, entity_input: EntityInput, test_index: int, ground_truth_concept_id: int) -> dict:
+    def test_single_entity(self, entity_input: EntityInput, test_index: int, ground_truth_concept_id: int, snuh_id: str) -> dict:
         """단일 엔티티 테스트"""
         try:
             # 매핑 수행
@@ -200,7 +214,9 @@ class RealDataEntityMappingTester:
             
             test_result = {
                 'test_index': test_index,
+                'snuh_id': snuh_id,
                 'entity_name': entity_input.entity_name,
+                'input_domain': entity_input.domain_id.value if entity_input.domain_id else 'All',
                 'ground_truth_concept_id': ground_truth_concept_id,
                 'success': results is not None and len(results) > 0,
                 'mapping_correct': mapping_correct,
@@ -224,7 +240,9 @@ class RealDataEntityMappingTester:
             self.logger.error(f"테스트 #{test_index} 오류: {str(e)}")
             return {
                 'test_index': test_index,
+                'snuh_id': snuh_id,
                 'entity_name': entity_input.entity_name,
+                'input_domain': entity_input.domain_id.value if entity_input.domain_id else 'All',
                 'ground_truth_concept_id': ground_truth_concept_id,
                 'success': False,
                 'mapping_correct': False,
@@ -243,16 +261,22 @@ class RealDataEntityMappingTester:
                 'stage3_candidates': []
             }
     
-    def run_test_with_real_data(self, csv_path: str, sample_size: int = 10000):
-        """실제 데이터로 테스트 실행"""
+    def run_test_with_snuh_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False):
+        """SNUH 데이터로 테스트 실행
+        
+        Args:
+            csv_path: CSV 파일 경로
+            sample_size: 샘플 크기
+            use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
+        """
         self.logger.info("=" * 100)
-        self.logger.info("🚀 실제 데이터 Entity Mapping 테스트 시작")
+        self.logger.info("🚀 SNUH 데이터 Entity Mapping 테스트 시작")
         self.logger.info("=" * 100)
         
         start_time = time.time()
         
         # 데이터 로딩 및 샘플링
-        test_data = self.load_and_sample_data(csv_path, sample_size)
+        test_data = self.load_and_sample_data(csv_path, sample_size, use_random=use_random)
         
         # 테스트 결과 저장
         test_results = []
@@ -263,9 +287,10 @@ class RealDataEntityMappingTester:
         for idx, row in tqdm(test_data.iterrows(), total=len(test_data), desc="엔티티 매핑 테스트"):
             try:
                 entity_input = self.create_entity_input(row)
-                ground_truth = int(row['concept_id']) if pd.notna(row['concept_id']) else None
+                ground_truth = int(row['omop_concept_id']) if pd.notna(row['omop_concept_id']) else None
+                snuh_id = str(row['snuh_id']) if pd.notna(row['snuh_id']) else 'N/A'
                 
-                result = self.test_single_entity(entity_input, idx + 1, ground_truth)
+                result = self.test_single_entity(entity_input, idx + 1, ground_truth, snuh_id)
                 test_results.append(result)
                 
                 if result['success']:
@@ -297,44 +322,15 @@ class RealDataEntityMappingTester:
         self.logger.info(f"평균 처리 시간: {elapsed_time/total_tests:.3f}초/엔티티")
         self.logger.info("=" * 100)
         
-        # 결과를 CSV와 XLSX로 저장
-        self.save_results_to_csv(test_results)
+        # 결과를 XLSX로 저장
         self.save_results_to_xlsx(test_results)
         
         return test_results
     
-    def save_results_to_csv(self, test_results: list):
-        """테스트 결과를 CSV 파일로 저장"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_file = self.log_dir / f"real_data_results_{timestamp}.csv"
-        
-        csv_results = []
-        for result in test_results:
-            base_info = {
-                'test_index': result['test_index'],
-                'entity_name': result['entity_name'],
-                'ground_truth_concept_id': result['ground_truth_concept_id'],
-                'success': result['success'],
-                'mapping_correct': result['mapping_correct'],
-                'domain_count': result.get('domain_count', 0),
-                'best_search_domain': result.get('best_search_domain', 'N/A'),
-                'best_result_domain': result.get('best_result_domain', 'N/A'),
-                'best_concept_id': result.get('best_concept_id', 'N/A'),
-                'best_concept_name': result.get('best_concept_name', 'N/A'),
-                'best_score': result.get('best_score', 0.0),
-                'best_confidence': result.get('best_confidence', 'N/A')
-            }
-            csv_results.append(base_info)
-        
-        df_results = pd.DataFrame(csv_results)
-        df_results.to_csv(csv_file, index=False, encoding='utf-8')
-        
-        self.logger.info(f"📄 테스트 결과 CSV 저장: {csv_file}")
-    
     def save_results_to_xlsx(self, test_results: list):
         """테스트 결과를 XLSX 파일로 저장 (stage 후보군 포함)"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        xlsx_file = self.log_dir / f"real_data_results_detailed_{timestamp}.xlsx"
+        xlsx_file = self.log_dir / f"snuh_results_detailed_{timestamp}.xlsx"
         
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -350,8 +346,8 @@ class RealDataEntityMappingTester:
         
         # 헤더 설정
         headers = [
-            "Test Index", "Entity Name", "Ground Truth Concept ID", 
-            "Success", "Mapping Correct", "Domain Count",
+            "Test Index", "SNUH ID", "Entity Name", "Input Domain",
+            "Ground Truth Concept ID", "Success", "Mapping Correct", "Domain Count",
             "Best Search Domain", "Best Result Domain", 
             "Best Concept ID", "Best Concept Name", 
             "Best Score", "Best Confidence",
@@ -374,12 +370,14 @@ class RealDataEntityMappingTester:
         # 데이터 작성
         for row, result in enumerate(test_results, 2):
             ws.cell(row=row, column=1, value=result['test_index'])
-            ws.cell(row=row, column=2, value=result['entity_name'])
-            ws.cell(row=row, column=3, value=result['ground_truth_concept_id'])
-            ws.cell(row=row, column=4, value="성공" if result['success'] else "실패")
+            ws.cell(row=row, column=2, value=result['snuh_id'])
+            ws.cell(row=row, column=3, value=result['entity_name'])
+            ws.cell(row=row, column=4, value=result['input_domain'])
+            ws.cell(row=row, column=5, value=result['ground_truth_concept_id'])
+            ws.cell(row=row, column=6, value="성공" if result['success'] else "실패")
             
             # 매핑 정확도 표시 (색상 적용)
-            correct_cell = ws.cell(row=row, column=5, value="정답" if result['mapping_correct'] else "오답")
+            correct_cell = ws.cell(row=row, column=7, value="정답" if result['mapping_correct'] else "오답")
             if result['mapping_correct']:
                 correct_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                 correct_cell.font = Font(color="006100")
@@ -387,56 +385,58 @@ class RealDataEntityMappingTester:
                 correct_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
                 correct_cell.font = Font(color="9C0006")
             
-            ws.cell(row=row, column=6, value=result.get('domain_count', 0))
-            ws.cell(row=row, column=7, value=result.get('best_search_domain', 'N/A'))
-            ws.cell(row=row, column=8, value=result.get('best_result_domain', 'N/A'))
-            ws.cell(row=row, column=9, value=result.get('best_concept_id', 'N/A'))
-            ws.cell(row=row, column=10, value=result.get('best_concept_name', 'N/A'))
-            ws.cell(row=row, column=11, value=result.get('best_score', 0.0))
-            ws.cell(row=row, column=12, value=result.get('best_confidence', 'N/A'))
+            ws.cell(row=row, column=8, value=result.get('domain_count', 0))
+            ws.cell(row=row, column=9, value=result.get('best_search_domain', 'N/A'))
+            ws.cell(row=row, column=10, value=result.get('best_result_domain', 'N/A'))
+            ws.cell(row=row, column=11, value=result.get('best_concept_id', 'N/A'))
+            ws.cell(row=row, column=12, value=result.get('best_concept_name', 'N/A'))
+            ws.cell(row=row, column=13, value=result.get('best_score', 0.0))
+            ws.cell(row=row, column=14, value=result.get('best_confidence', 'N/A'))
             
             # 도메인 결과
             domain_results_text = self._format_domain_results(result.get('domain_results', []))
-            ws.cell(row=row, column=13, value=domain_results_text)
+            ws.cell(row=row, column=15, value=domain_results_text)
             
             # Stage 경로
             stage_paths_text = self._format_stage_paths(result.get('domain_stage_paths', {}))
-            ws.cell(row=row, column=14, value=stage_paths_text)
+            ws.cell(row=row, column=16, value=stage_paths_text)
             
             # Stage 후보군
             stage1_text = self._format_candidates_for_cell(result.get('stage1_candidates', []), 'stage1')
-            ws.cell(row=row, column=15, value=stage1_text)
+            ws.cell(row=row, column=17, value=stage1_text)
             
             stage2_text = self._format_candidates_for_cell(result.get('stage2_candidates', []), 'stage2')
-            ws.cell(row=row, column=16, value=stage2_text)
+            ws.cell(row=row, column=18, value=stage2_text)
             
             stage3_text = self._format_candidates_for_cell(result.get('stage3_candidates', []), 'stage3')
-            ws.cell(row=row, column=17, value=stage3_text)
+            ws.cell(row=row, column=19, value=stage3_text)
             
             # 셀 스타일 설정
-            for col in range(13, 18):
+            for col in range(15, 20):
                 cell = ws.cell(row=row, column=col)
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
         
         # 열 너비 설정
         column_widths = {
             'A': 10,  # Test Index
-            'B': 40,  # Entity Name
-            'C': 20,  # Ground Truth Concept ID
-            'D': 10,  # Success
-            'E': 12,  # Mapping Correct
-            'F': 12,  # Domain Count
-            'G': 18,  # Best Search Domain
-            'H': 18,  # Best Result Domain
-            'I': 15,  # Best Concept ID
-            'J': 45,  # Best Concept Name
-            'K': 12,  # Best Score
-            'L': 15,  # Best Confidence
-            'M': 50,  # All Domains
-            'N': 45,  # Domain Stage Paths
-            'O': 70,  # Stage1 Candidates
-            'P': 70,  # Stage2 Candidates
-            'Q': 85   # Stage3 Candidates
+            'B': 12,  # SNUH ID
+            'C': 40,  # Entity Name
+            'D': 15,  # Input Domain
+            'E': 20,  # Ground Truth Concept ID
+            'F': 10,  # Success
+            'G': 12,  # Mapping Correct
+            'H': 12,  # Domain Count
+            'I': 18,  # Best Search Domain
+            'J': 18,  # Best Result Domain
+            'K': 15,  # Best Concept ID
+            'L': 45,  # Best Concept Name
+            'M': 12,  # Best Score
+            'N': 15,  # Best Confidence
+            'O': 50,  # All Domains
+            'P': 45,  # Domain Stage Paths
+            'Q': 70,  # Stage1 Candidates
+            'R': 70,  # Stage2 Candidates
+            'S': 85   # Stage3 Candidates
         }
         
         for col_letter, width in column_widths.items():
@@ -527,13 +527,20 @@ def main():
     # scoring_mode 설정: 'llm' 또는 'hybrid'
     SCORING_MODE = "hybrid"  # 'llm' 또는 'hybrid' 선택
     
-    tester = RealDataEntityMappingTester(scoring_mode=SCORING_MODE)
+    tester = SNUHEntityMappingTester(scoring_mode=SCORING_MODE)
     
-    # 실제 데이터 경로
-    csv_path = "/home/work/skku/hyo/omop-mapper/data/mapping_test_snomed_no_note.csv"
+    # SNUH 데이터 경로
+    csv_path = "/home/work/skku/hyo/omop-mapper/data/mapping_test_snuh.csv"
     
-    # 1만건 샘플링 테스트
-    results = tester.run_test_with_real_data(csv_path, sample_size=10)
+    # 샘플링 테스트 설정
+    SAMPLE_SIZE = 100  # 테스트할 샘플 수
+    USE_RANDOM = False  # True: 랜덤 샘플링, False: 순서대로
+    
+    results = tester.run_test_with_snuh_data(
+        csv_path, 
+        sample_size=SAMPLE_SIZE,
+        use_random=USE_RANDOM
+    )
     
     print(f"\n✅ 테스트 완료! 결과는 {tester.log_dir} 디렉토리에 저장되었습니다.")
 

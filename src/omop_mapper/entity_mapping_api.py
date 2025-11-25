@@ -79,7 +79,8 @@ class EntityMappingAPI:
     def __init__(
         self,
         es_client: Optional[ElasticsearchClient] = None,
-        confidence_threshold: float = 0.5
+        confidence_threshold: float = 0.5,
+        scoring_mode: str = "llm"
     ):
         """
         엔티티 매핑 API 초기화
@@ -87,9 +88,11 @@ class EntityMappingAPI:
         Args:
             es_client: Elasticsearch 클라이언트
             confidence_threshold: 매핑 신뢰도 임계치
+            scoring_mode: Stage 3 점수 계산 방식 ('llm' 또는 'hybrid', 기본값: 'llm')
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
+        self.scoring_mode = scoring_mode
         
         # SapBERT 모델 초기화 (지연 로딩)
         self._sapbert_model = None
@@ -184,7 +187,8 @@ class EntityMappingAPI:
                     semantic_weight=0.6,
                     es_client=self.es_client,
                     openai_api_key=None,  # .env 파일에서 가져옴
-                    openai_model="gpt-4o-mini"
+                    openai_model="gpt-4o-mini",
+                    scoring_mode=self.scoring_mode
                 )
             
             # 엔티티 임베딩 생성
@@ -321,11 +325,12 @@ class EntityMappingAPI:
             
             stage_results['stage2_count'] = len(stage2_candidates)
             
-            # ===== Stage 3: LLM 기반 평가 =====
+            # ===== Stage 3: Hybrid 또는 LLM 기반 평가 =====
             stage3_candidates = self.stage3.calculate_hybrid_scores(
                 entity_name=entity_name,
                 stage2_candidates=stage2_candidates,
-                stage1_candidates=stage1_candidates
+                stage1_candidates=stage1_candidates,
+                entity_embedding=entity_embedding
             )
             
             if not stage3_candidates:
@@ -458,6 +463,8 @@ class EntityMappingAPI:
                         'llm_score': c.get('llm_score', None),
                         'llm_rank': c.get('llm_rank', None),
                         'llm_reasoning': c.get('llm_reasoning', None),
+                        'text_similarity': c.get('text_similarity', 0.0),
+                        'semantic_similarity': c.get('semantic_similarity', 0.0),
                         'final_score': c.get('final_score', 0.0),
                         'search_type': c.get('search_type', 'unknown')
                     }
