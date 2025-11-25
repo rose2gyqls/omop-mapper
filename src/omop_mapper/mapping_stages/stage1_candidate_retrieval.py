@@ -105,7 +105,7 @@ class Stage1CandidateRetrieval:
             combined_results = lexical_results[:3]
             combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
         
-        logger.info(f"✅ Combined: {len(combined_results if entity_embedding else lexical_results[:3])}개 → {len(combined_results_filtered)}개 (threshold 통과)")
+        logger.info(f"✅ Combined: {len(combined_results if entity_embedding is not None else lexical_results[:3])}개 → {len(combined_results_filtered)}개 (threshold 통과)")
         for hit in combined_results_filtered:
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)

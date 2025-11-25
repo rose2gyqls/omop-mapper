@@ -468,7 +468,7 @@ class EntityMappingAPI:
             return mapping_result, stage_results
             
         except Exception as e:
-            logger.error(f"⚠️ [{domain_str}] 매핑 오류: {str(e)}")
+            logger.error(f"⚠️ [{domain_str}] 매핑 오류: {str(e)}", exc_info=True)
             return None, {}
     
     def _create_final_mapping_result(

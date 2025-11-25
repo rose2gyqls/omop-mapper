@@ -2,8 +2,7 @@ from .entity_mapping_api import (
     EntityMappingAPI,
     EntityInput,
     DomainID,
-    MappingResult,
-    map_single_entity
+    MappingResult
 )
 
 from .elasticsearch_client import ElasticsearchClient
@@ -18,9 +17,6 @@ __all__ = [
     "EntityInput", 
     "DomainID",
     "MappingResult",
-    
-    # Utility functions
-    "map_single_entity",
     
     # Supporting classes
     "ElasticsearchClient",

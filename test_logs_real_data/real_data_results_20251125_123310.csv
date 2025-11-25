@@ -1,0 +1,11 @@
+test_index,entity_name,ground_truth_concept_id,success,mapping_correct,domain_count,best_search_domain,best_result_domain,best_concept_id,best_concept_name,best_score,best_confidence
+1,constipation,75860,True,False,1,Condition,Condition,75860,constipation,1.0,very_high
+2,Activity Status,4030753,True,False,1,Observation,Observation,3050385,physical activity status community [omaha],0.8,medium
+3,left,37110130,True,False,4,Observation,Observation,35820263,left,1.0,very_high
+4,Died,434489,True,False,1,Observation,Observation,4306655,death,1.0,very_high
+5,MMM,4170952,True,False,1,Condition,Condition,4059379,mitochondrial myopathy,0.8,medium
+6,NEURO,4225119,True,False,1,Procedure,Procedure,4198105,nerve conduction study,0.2,very_low
+7,TotBili,4230543,False,False,0,,,,,0.0,
+8,"headache, tension",376382,True,False,1,Condition,Condition,376382,tension-type headache,1.0,very_high
+9,warm,4010974,True,False,1,Observation,Observation,35825048,warm,1.0,very_high
+10,Delerium,373995,False,False,0,,,,,0.0,
