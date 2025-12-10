@@ -93,12 +93,20 @@ class RealDataEntityMappingTester:
         
         self.logger.info(f"로그 파일: {log_file}")
     
-    def load_and_sample_data(self, csv_path: str, sample_size: int = 10000, random_state: int = 42) -> pd.DataFrame:
-        """CSV 파일에서 랜덤 샘플링"""
-        self.logger.info(f"데이터 로딩 시작: {csv_path}")
-        self.logger.info(f"샘플 크기: {sample_size}개")
+    def load_and_sample_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, random_state: int = 42, filter_domains: list = None, sample_per_domain: dict = None) -> pd.DataFrame:
+        """CSV 파일에서 데이터 로딩 및 샘플링
         
-        # 청크 단위로 읽어서 샘플링 (메모리 효율)
+        Args:
+            csv_path: CSV 파일 경로
+            sample_size: 샘플 크기 (sample_per_domain이 None일 때만 사용)
+            use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
+            random_state: 랜덤 시드 (use_random=True일 때만 사용)
+            filter_domains: 필터링할 도메인 리스트 (예: ['Condition', 'Measurement']) - sample_per_domain이 None일 때만 사용
+            sample_per_domain: 도메인별 샘플 크기 딕셔너리 (예: {'Condition': 500, 'Procedure': 500})
+        """
+        self.logger.info(f"데이터 로딩 시작: {csv_path}")
+        
+        # 청크 단위로 데이터 로드
         chunk_size = 100000
         chunks = []
         
@@ -110,11 +118,64 @@ class RealDataEntityMappingTester:
         df = pd.concat(chunks, ignore_index=True)
         self.logger.info(f"전체 데이터 크기: {len(df):,}개")
         
-        # 랜덤 샘플링
-        df_sample = df.sample(n=min(sample_size, len(df)), random_state=random_state)
-        df_sample = df_sample.reset_index(drop=True)
+        # 도메인별 샘플링 모드
+        if sample_per_domain:
+            self.logger.info(f"도메인별 샘플링 모드")
+            for domain, size in sample_per_domain.items():
+                self.logger.info(f"  {domain}: {size}개")
+            
+            # 도메인별 샘플링
+            sampled_dfs = []
+            for domain, size in sample_per_domain.items():
+                domain_df = df[df['domain_id'] == domain]
+                domain_count = len(domain_df)
+                
+                if domain_count == 0:
+                    self.logger.warning(f"  {domain}: 데이터 없음")
+                    continue
+                
+                # 샘플 크기 조정 (있는 데이터보다 많이 요청하면 전체 사용)
+                actual_sample_size = min(size, domain_count)
+                
+                if use_random:
+                    domain_sample = domain_df.sample(n=actual_sample_size, random_state=random_state)
+                else:
+                    domain_sample = domain_df.head(actual_sample_size)
+                
+                sampled_dfs.append(domain_sample)
+                self.logger.info(f"  {domain}: {actual_sample_size:,}개 샘플링 (전체: {domain_count:,}개)")
+            
+            # 모든 도메인 샘플 병합
+            df_sample = pd.concat(sampled_dfs, ignore_index=True)
+            
+            # 랜덤 샘플링인 경우 전체를 다시 섞음
+            if use_random:
+                df_sample = df_sample.sample(frac=1, random_state=random_state).reset_index(drop=True)
+            
+            self.logger.info(f"총 샘플링 완료: {len(df_sample):,}개")
         
-        self.logger.info(f"샘플링 완료: {len(df_sample):,}개")
+        # 기존 필터링 및 샘플링 모드
+        else:
+            self.logger.info(f"샘플 크기: {sample_size}개")
+            self.logger.info(f"샘플링 방식: {'랜덤' if use_random else '순서대로'}")
+            if filter_domains:
+                self.logger.info(f"도메인 필터링: {filter_domains}")
+                # 도메인 필터링
+                if 'domain_id' in df.columns:
+                    df = df[df['domain_id'].isin(filter_domains)]
+                    self.logger.info(f"필터링 후 데이터 크기: {len(df):,}개")
+            
+            # 샘플링
+            if not use_random:
+                # 순서대로 샘플링
+                df_sample = df.head(min(sample_size, len(df)))
+                self.logger.info(f"순서대로 샘플링 완료: {len(df_sample):,}개")
+            else:
+                # 랜덤 샘플링
+                df_sample = df.sample(n=min(sample_size, len(df)), random_state=random_state)
+                df_sample = df_sample.reset_index(drop=True)
+                self.logger.info(f"랜덤 샘플링 완료: {len(df_sample):,}개")
+        
         self.logger.info(f"컬럼: {list(df_sample.columns)}")
         
         # 도메인 분포 출력
@@ -196,7 +257,18 @@ class RealDataEntityMappingTester:
             # 매핑 성공 여부 판단 (concept_id 일치)
             mapping_correct = False
             if best_result and ground_truth_concept_id:
-                mapping_correct = (best_result.mapped_concept_id == ground_truth_concept_id)
+                # 타입을 int로 통일하여 비교
+                try:
+                    best_concept_id_int = int(best_result.mapped_concept_id)
+                    ground_truth_int = int(ground_truth_concept_id)
+                    mapping_correct = (best_concept_id_int == ground_truth_int)
+                    
+                    # 디버깅 로그 (처음 10개만)
+                    if test_index <= 10:
+                        self.logger.info(f"   🔍 정답 판정: Ground Truth={ground_truth_int}, Best={best_concept_id_int}, Correct={mapping_correct}")
+                except (ValueError, TypeError) as e:
+                    self.logger.warning(f"   ⚠️ Concept ID 비교 오류: {e}")
+                    mapping_correct = False
             
             test_result = {
                 'test_index': test_index,
@@ -243,8 +315,16 @@ class RealDataEntityMappingTester:
                 'stage3_candidates': []
             }
     
-    def run_test_with_real_data(self, csv_path: str, sample_size: int = 10000):
-        """실제 데이터로 테스트 실행"""
+    def run_test_with_real_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, filter_domains: list = None, sample_per_domain: dict = None):
+        """실제 데이터로 테스트 실행
+        
+        Args:
+            csv_path: CSV 파일 경로
+            sample_size: 샘플 크기 (sample_per_domain이 None일 때만 사용)
+            use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
+            filter_domains: 필터링할 도메인 리스트 (예: ['Condition', 'Measurement']) - sample_per_domain이 None일 때만 사용
+            sample_per_domain: 도메인별 샘플 크기 딕셔너리 (예: {'Condition': 500, 'Procedure': 500})
+        """
         self.logger.info("=" * 100)
         self.logger.info("🚀 실제 데이터 Entity Mapping 테스트 시작")
         self.logger.info("=" * 100)
@@ -252,7 +332,7 @@ class RealDataEntityMappingTester:
         start_time = time.time()
         
         # 데이터 로딩 및 샘플링
-        test_data = self.load_and_sample_data(csv_path, sample_size)
+        test_data = self.load_and_sample_data(csv_path, sample_size, use_random=use_random, filter_domains=filter_domains, sample_per_domain=sample_per_domain)
         
         # 테스트 결과 저장
         test_results = []
@@ -272,6 +352,17 @@ class RealDataEntityMappingTester:
                     successful_mappings += 1
                     if result['mapping_correct']:
                         correct_mappings += 1
+                        # 정답인 경우 로그 (처음 10개만)
+                        if idx < 10:
+                            self.logger.info(f"✅ #{idx + 1} 정답! {entity_input.entity_name}: GT={ground_truth} → Best={result.get('best_concept_id')}")
+                    else:
+                        # 오답인 경우 로그 (처음 10개만)
+                        if idx < 10:
+                            self.logger.info(f"❌ #{idx + 1} 오답: {entity_input.entity_name}: GT={ground_truth} → Best={result.get('best_concept_id')}")
+                else:
+                    # 매핑 실패 (처음 10개만)
+                    if idx < 10:
+                        self.logger.info(f"⚠️ #{idx + 1} 매핑 실패: {entity_input.entity_name}")
                         
             except Exception as e:
                 self.logger.error(f"테스트 #{idx + 1} 처리 오류: {str(e)}")
@@ -292,44 +383,33 @@ class RealDataEntityMappingTester:
         self.logger.info(f"총 테스트: {total_tests:,}개")
         self.logger.info(f"매핑 성공: {successful_mappings:,}개 ({success_rate:.2f}%)")
         self.logger.info(f"정답 매칭: {correct_mappings:,}개 ({accuracy:.2f}%)")
+        self.logger.info(f"오답 매칭: {successful_mappings - correct_mappings:,}개")
         self.logger.info(f"매핑 실패: {total_tests - successful_mappings:,}개")
         self.logger.info(f"소요 시간: {elapsed_time:.2f}초 ({elapsed_time/60:.2f}분)")
         self.logger.info(f"평균 처리 시간: {elapsed_time/total_tests:.3f}초/엔티티")
+        
+        # 정답/오답 예시 출력
+        correct_examples = [r for r in test_results if r['mapping_correct']]
+        incorrect_examples = [r for r in test_results if r['success'] and not r['mapping_correct']]
+        
+        if correct_examples:
+            self.logger.info("\n✅ 정답 예시 (최대 5개):")
+            for i, result in enumerate(correct_examples[:5], 1):
+                self.logger.info(f"  {i}. {result['entity_name']}")
+                self.logger.info(f"     GT: {result['ground_truth_concept_id']} → Best: {result['best_concept_id']} ({result['best_concept_name']})")
+        
+        if incorrect_examples:
+            self.logger.info("\n❌ 오답 예시 (최대 5개):")
+            for i, result in enumerate(incorrect_examples[:5], 1):
+                self.logger.info(f"  {i}. {result['entity_name']}")
+                self.logger.info(f"     GT: {result['ground_truth_concept_id']} → Best: {result['best_concept_id']} ({result['best_concept_name']})")
+        
         self.logger.info("=" * 100)
         
-        # 결과를 CSV와 XLSX로 저장
-        self.save_results_to_csv(test_results)
+        # 결과를 XLSX로 저장
         self.save_results_to_xlsx(test_results)
         
         return test_results
-    
-    def save_results_to_csv(self, test_results: list):
-        """테스트 결과를 CSV 파일로 저장"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_file = self.log_dir / f"real_data_results_{timestamp}.csv"
-        
-        csv_results = []
-        for result in test_results:
-            base_info = {
-                'test_index': result['test_index'],
-                'entity_name': result['entity_name'],
-                'ground_truth_concept_id': result['ground_truth_concept_id'],
-                'success': result['success'],
-                'mapping_correct': result['mapping_correct'],
-                'domain_count': result.get('domain_count', 0),
-                'best_search_domain': result.get('best_search_domain', 'N/A'),
-                'best_result_domain': result.get('best_result_domain', 'N/A'),
-                'best_concept_id': result.get('best_concept_id', 'N/A'),
-                'best_concept_name': result.get('best_concept_name', 'N/A'),
-                'best_score': result.get('best_score', 0.0),
-                'best_confidence': result.get('best_confidence', 'N/A')
-            }
-            csv_results.append(base_info)
-        
-        df_results = pd.DataFrame(csv_results)
-        df_results.to_csv(csv_file, index=False, encoding='utf-8')
-        
-        self.logger.info(f"📄 테스트 결과 CSV 저장: {csv_file}")
     
     def save_results_to_xlsx(self, test_results: list):
         """테스트 결과를 XLSX 파일로 저장 (stage 후보군 포함)"""
@@ -525,15 +605,27 @@ class RealDataEntityMappingTester:
 def main():
     """메인 함수"""
     # scoring_mode 설정: 'llm' 또는 'hybrid'
-    SCORING_MODE = "hybrid"  # 'llm' 또는 'hybrid' 선택
+    SCORING_MODE = "llm"  # 'llm' 또는 'hybrid' 선택
     
     tester = RealDataEntityMappingTester(scoring_mode=SCORING_MODE)
     
     # 실제 데이터 경로
     csv_path = "/home/work/skku/hyo/omop-mapper/data/mapping_test_snomed_no_note.csv"
     
-    # 1만건 샘플링 테스트
-    results = tester.run_test_with_real_data(csv_path, sample_size=10)
+    # 도메인별 샘플링 설정 (각 도메인당 500개씩 랜덤 샘플)
+    SAMPLE_PER_DOMAIN = {
+        'Condition': 500,
+        'Procedure': 500,
+        'Measurement': 500,
+        'Observation': 500
+    }
+    USE_RANDOM = True  # 랜덤 샘플링 활성화
+    
+    results = tester.run_test_with_real_data(
+        csv_path, 
+        use_random=USE_RANDOM,
+        sample_per_domain=SAMPLE_PER_DOMAIN
+    )
     
     print(f"\n✅ 테스트 완료! 결과는 {tester.log_dir} 디렉토리에 저장되었습니다.")
 

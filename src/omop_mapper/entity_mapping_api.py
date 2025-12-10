@@ -80,7 +80,8 @@ class EntityMappingAPI:
         self,
         es_client: Optional[ElasticsearchClient] = None,
         confidence_threshold: float = 0.5,
-        scoring_mode: str = "llm"
+        scoring_mode: str = "llm",
+        include_stage1_scores: bool = False
     ):
         """
         엔티티 매핑 API 초기화
@@ -89,10 +90,14 @@ class EntityMappingAPI:
             es_client: Elasticsearch 클라이언트
             confidence_threshold: 매핑 신뢰도 임계치
             scoring_mode: Stage 3 점수 계산 방식 ('llm' 또는 'hybrid', 기본값: 'llm')
+            include_stage1_scores: Stage 3 LLM 프롬프트에 Stage 1의 유사도 점수를 포함할지 여부 (기본값: False)
+                - True: LLM에게 lexical/semantic/combined 검색 점수를 참고 정보로 제공
+                - False: 후보 목록만 제공하고 LLM이 순수하게 의미적 적합성만으로 판단
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
         self.scoring_mode = scoring_mode
+        self.include_stage1_scores = include_stage1_scores
         
         # SapBERT 모델 초기화 (지연 로딩)
         self._sapbert_model = None
@@ -188,7 +193,8 @@ class EntityMappingAPI:
                     es_client=self.es_client,
                     openai_api_key=None,  # .env 파일에서 가져옴
                     openai_model="gpt-4o-mini",
-                    scoring_mode=self.scoring_mode
+                    scoring_mode=self.scoring_mode,
+                    include_stage1_scores=self.include_stage1_scores
                 )
             
             # 엔티티 임베딩 생성

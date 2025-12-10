@@ -93,26 +93,30 @@ class SNUHEntityMappingTester:
         
         self.logger.info(f"로그 파일: {log_file}")
     
-    def load_and_sample_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, random_state: int = 42) -> pd.DataFrame:
+    def load_and_sample_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, random_state: int = 42, sample_per_domain: dict = None, vocabulary_filter: list = None) -> pd.DataFrame:
         """CSV 파일에서 데이터 로딩 및 샘플링
         
         Args:
             csv_path: CSV 파일 경로
-            sample_size: 샘플 크기
+            sample_size: 샘플 크기 (sample_per_domain이 None일 때만 사용)
             use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
             random_state: 랜덤 시드 (use_random=True일 때만 사용)
+            sample_per_domain: 도메인별 샘플 크기 딕셔너리 (예: {'Condition': 500, 'Procedure': 500})
+            vocabulary_filter: 필터링할 vocabulary 리스트 (예: ['SNOMED', 'LOINC'])
         """
         self.logger.info(f"데이터 로딩 시작: {csv_path}")
-        self.logger.info(f"샘플 크기: {sample_size}개")
-        self.logger.info(f"샘플링 방식: {'랜덤' if use_random else '순서대로'}")
         
-        # 순서대로 샘플링하는 경우 청크를 사용하지 않고 바로 로드
-        if not use_random:
-            self.logger.info(f"데이터 처음 {sample_size}개 로딩 중...")
-            df_sample = pd.read_csv(csv_path, nrows=sample_size)
-            self.logger.info(f"로딩 완료: {len(df_sample):,}개")
-        else:
-            # 랜덤 샘플링을 위해 전체 데이터 로드
+        # Vocabulary 필터링 정보 출력
+        if vocabulary_filter:
+            self.logger.info(f"Vocabulary 필터링: {', '.join(vocabulary_filter)}")
+        
+        # 도메인별 샘플링 모드
+        if sample_per_domain:
+            self.logger.info(f"도메인별 샘플링 모드")
+            for domain, size in sample_per_domain.items():
+                self.logger.info(f"  {domain}: {size}개")
+            
+            # 전체 데이터 로드
             chunk_size = 100000
             chunks = []
             
@@ -124,12 +128,107 @@ class SNUHEntityMappingTester:
             df = pd.concat(chunks, ignore_index=True)
             self.logger.info(f"전체 데이터 크기: {len(df):,}개")
             
-            # 랜덤 샘플링
-            df_sample = df.sample(n=min(sample_size, len(df)), random_state=random_state)
-            df_sample = df_sample.reset_index(drop=True)
-            self.logger.info(f"랜덤 샘플링 완료: {len(df_sample):,}개")
+            # Vocabulary 필터링 적용
+            if vocabulary_filter and 'vocabulary' in df.columns:
+                df_before = len(df)
+                df = df[df['vocabulary'].isin(vocabulary_filter)]
+                self.logger.info(f"Vocabulary 필터링 후: {len(df):,}개 (제거: {df_before - len(df):,}개)")
+            
+            # 도메인별 샘플링
+            sampled_dfs = []
+            for domain, size in sample_per_domain.items():
+                domain_df = df[df['domain'] == domain]
+                domain_count = len(domain_df)
+                
+                if domain_count == 0:
+                    self.logger.warning(f"  {domain}: 데이터 없음")
+                    continue
+                
+                # 샘플 크기 조정 (있는 데이터보다 많이 요청하면 전체 사용)
+                actual_sample_size = min(size, domain_count)
+                
+                if use_random:
+                    domain_sample = domain_df.sample(n=actual_sample_size, random_state=random_state)
+                else:
+                    domain_sample = domain_df.head(actual_sample_size)
+                
+                sampled_dfs.append(domain_sample)
+                self.logger.info(f"  {domain}: {actual_sample_size:,}개 샘플링 (전체: {domain_count:,}개)")
+            
+            # 모든 도메인 샘플 병합
+            df_sample = pd.concat(sampled_dfs, ignore_index=True)
+            
+            # 랜덤 샘플링인 경우 전체를 다시 섞음
+            if use_random:
+                df_sample = df_sample.sample(frac=1, random_state=random_state).reset_index(drop=True)
+            
+            self.logger.info(f"총 샘플링 완료: {len(df_sample):,}개")
+        
+        # 기존 샘플링 모드
+        else:
+            self.logger.info(f"샘플 크기: {sample_size}개")
+            self.logger.info(f"샘플링 방식: {'랜덤' if use_random else '순서대로'}")
+            
+            # 순서대로 샘플링하는 경우
+            if not use_random and not vocabulary_filter:
+                # vocabulary 필터링이 없으면 바로 로드
+                self.logger.info(f"데이터 처음 {sample_size}개 로딩 중...")
+                df_sample = pd.read_csv(csv_path, nrows=sample_size)
+                self.logger.info(f"로딩 완료: {len(df_sample):,}개")
+            elif not use_random and vocabulary_filter:
+                # vocabulary 필터링이 있으면 전체 데이터 로드 필요
+                self.logger.info("Vocabulary 필터링을 위해 전체 데이터 로딩 중...")
+                chunk_size = 100000
+                chunks = []
+                
+                for chunk in tqdm(pd.read_csv(csv_path, chunksize=chunk_size), desc="데이터 로딩"):
+                    chunks.append(chunk)
+                
+                df = pd.concat(chunks, ignore_index=True)
+                self.logger.info(f"전체 데이터 크기: {len(df):,}개")
+                
+                # Vocabulary 필터링 적용
+                if 'vocabulary' in df.columns:
+                    df_before = len(df)
+                    df = df[df['vocabulary'].isin(vocabulary_filter)]
+                    self.logger.info(f"Vocabulary 필터링 후: {len(df):,}개 (제거: {df_before - len(df):,}개)")
+                
+                # 순서대로 샘플링
+                df_sample = df.head(min(sample_size, len(df)))
+                df_sample = df_sample.reset_index(drop=True)
+                self.logger.info(f"순서대로 샘플링 완료: {len(df_sample):,}개")
+            else:
+                # 랜덤 샘플링을 위해 전체 데이터 로드
+                chunk_size = 100000
+                chunks = []
+                
+                self.logger.info("청크 단위로 데이터 읽는 중...")
+                for chunk in tqdm(pd.read_csv(csv_path, chunksize=chunk_size), desc="데이터 로딩"):
+                    chunks.append(chunk)
+                
+                # 전체 데이터 병합
+                df = pd.concat(chunks, ignore_index=True)
+                self.logger.info(f"전체 데이터 크기: {len(df):,}개")
+                
+                # Vocabulary 필터링 적용
+                if vocabulary_filter and 'vocabulary' in df.columns:
+                    df_before = len(df)
+                    df = df[df['vocabulary'].isin(vocabulary_filter)]
+                    self.logger.info(f"Vocabulary 필터링 후: {len(df):,}개 (제거: {df_before - len(df):,}개)")
+                
+                # 랜덤 샘플링
+                df_sample = df.sample(n=min(sample_size, len(df)), random_state=random_state)
+                df_sample = df_sample.reset_index(drop=True)
+                self.logger.info(f"랜덤 샘플링 완료: {len(df_sample):,}개")
         
         self.logger.info(f"컬럼: {list(df_sample.columns)}")
+        
+        # Vocabulary 분포 출력
+        if 'vocabulary' in df_sample.columns:
+            vocab_dist = df_sample['vocabulary'].value_counts()
+            self.logger.info("\nVocabulary 분포:")
+            for vocab, count in vocab_dist.items():
+                self.logger.info(f"  {vocab}: {count}개 ({count/len(df_sample)*100:.1f}%)")
         
         # 도메인 분포 출력
         if 'domain' in df_sample.columns:
@@ -210,7 +309,18 @@ class SNUHEntityMappingTester:
             # 매핑 성공 여부 판단 (concept_id 일치)
             mapping_correct = False
             if best_result and ground_truth_concept_id:
-                mapping_correct = (best_result.mapped_concept_id == ground_truth_concept_id)
+                # 타입을 int로 통일하여 비교
+                try:
+                    best_concept_id_int = int(best_result.mapped_concept_id)
+                    ground_truth_int = int(ground_truth_concept_id)
+                    mapping_correct = (best_concept_id_int == ground_truth_int)
+                    
+                    # 디버깅 로그 (처음 10개만)
+                    if test_index <= 10:
+                        self.logger.info(f"   🔍 정답 판정: Ground Truth={ground_truth_int}, Best={best_concept_id_int}, Correct={mapping_correct}")
+                except (ValueError, TypeError) as e:
+                    self.logger.warning(f"   ⚠️ Concept ID 비교 오류: {e}")
+                    mapping_correct = False
             
             test_result = {
                 'test_index': test_index,
@@ -261,13 +371,15 @@ class SNUHEntityMappingTester:
                 'stage3_candidates': []
             }
     
-    def run_test_with_snuh_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False):
+    def run_test_with_snuh_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, sample_per_domain: dict = None, vocabulary_filter: list = None):
         """SNUH 데이터로 테스트 실행
         
         Args:
             csv_path: CSV 파일 경로
-            sample_size: 샘플 크기
+            sample_size: 샘플 크기 (sample_per_domain이 None일 때만 사용)
             use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
+            sample_per_domain: 도메인별 샘플 크기 딕셔너리 (예: {'Condition': 500, 'Procedure': 500})
+            vocabulary_filter: 필터링할 vocabulary 리스트 (예: ['SNOMED', 'LOINC'])
         """
         self.logger.info("=" * 100)
         self.logger.info("🚀 SNUH 데이터 Entity Mapping 테스트 시작")
@@ -276,7 +388,7 @@ class SNUHEntityMappingTester:
         start_time = time.time()
         
         # 데이터 로딩 및 샘플링
-        test_data = self.load_and_sample_data(csv_path, sample_size, use_random=use_random)
+        test_data = self.load_and_sample_data(csv_path, sample_size, use_random=use_random, sample_per_domain=sample_per_domain, vocabulary_filter=vocabulary_filter)
         
         # 테스트 결과 저장
         test_results = []
@@ -297,6 +409,17 @@ class SNUHEntityMappingTester:
                     successful_mappings += 1
                     if result['mapping_correct']:
                         correct_mappings += 1
+                        # 정답인 경우 로그 (처음 10개만)
+                        if idx < 10:
+                            self.logger.info(f"✅ #{idx + 1} 정답! {entity_input.entity_name}: GT={ground_truth} → Best={result.get('best_concept_id')}")
+                    else:
+                        # 오답인 경우 로그 (처음 10개만)
+                        if idx < 10:
+                            self.logger.info(f"❌ #{idx + 1} 오답: {entity_input.entity_name}: GT={ground_truth} → Best={result.get('best_concept_id')}")
+                else:
+                    # 매핑 실패 (처음 10개만)
+                    if idx < 10:
+                        self.logger.info(f"⚠️ #{idx + 1} 매핑 실패: {entity_input.entity_name}")
                         
             except Exception as e:
                 self.logger.error(f"테스트 #{idx + 1} 처리 오류: {str(e)}")
@@ -317,9 +440,27 @@ class SNUHEntityMappingTester:
         self.logger.info(f"총 테스트: {total_tests:,}개")
         self.logger.info(f"매핑 성공: {successful_mappings:,}개 ({success_rate:.2f}%)")
         self.logger.info(f"정답 매칭: {correct_mappings:,}개 ({accuracy:.2f}%)")
+        self.logger.info(f"오답 매칭: {successful_mappings - correct_mappings:,}개")
         self.logger.info(f"매핑 실패: {total_tests - successful_mappings:,}개")
         self.logger.info(f"소요 시간: {elapsed_time:.2f}초 ({elapsed_time/60:.2f}분)")
         self.logger.info(f"평균 처리 시간: {elapsed_time/total_tests:.3f}초/엔티티")
+        
+        # 정답/오답 예시 출력
+        correct_examples = [r for r in test_results if r['mapping_correct']]
+        incorrect_examples = [r for r in test_results if r['success'] and not r['mapping_correct']]
+        
+        if correct_examples:
+            self.logger.info("\n✅ 정답 예시 (최대 5개):")
+            for i, result in enumerate(correct_examples[:5], 1):
+                self.logger.info(f"  {i}. {result['entity_name']}")
+                self.logger.info(f"     GT: {result['ground_truth_concept_id']} → Best: {result['best_concept_id']} ({result['best_concept_name']})")
+        
+        if incorrect_examples:
+            self.logger.info("\n❌ 오답 예시 (최대 5개):")
+            for i, result in enumerate(incorrect_examples[:5], 1):
+                self.logger.info(f"  {i}. {result['entity_name']}")
+                self.logger.info(f"     GT: {result['ground_truth_concept_id']} → Best: {result['best_concept_id']} ({result['best_concept_name']})")
+        
         self.logger.info("=" * 100)
         
         # 결과를 XLSX로 저장
@@ -525,21 +666,32 @@ class SNUHEntityMappingTester:
 def main():
     """메인 함수"""
     # scoring_mode 설정: 'llm' 또는 'hybrid'
-    SCORING_MODE = "hybrid"  # 'llm' 또는 'hybrid' 선택
+    SCORING_MODE = "llm"  # 'llm' 또는 'hybrid' 선택
     
     tester = SNUHEntityMappingTester(scoring_mode=SCORING_MODE)
     
     # SNUH 데이터 경로
     csv_path = "/home/work/skku/hyo/omop-mapper/data/mapping_test_snuh.csv"
     
-    # 샘플링 테스트 설정
-    SAMPLE_SIZE = 100  # 테스트할 샘플 수
-    USE_RANDOM = False  # True: 랜덤 샘플링, False: 순서대로
+    # Vocabulary 필터링 설정 (SNOMED와 LOINC만 테스트)
+    # None으로 설정하면 모든 vocabulary를 테스트
+    VOCABULARY_FILTER = ['SNOMED', 'LOINC']  # 또는 None
+    
+    # 도메인별 샘플링 설정 (각 도메인당 500개씩 랜덤 샘플)
+    SAMPLE_PER_DOMAIN = {
+        'Condition': 500,
+        'Procedure': 500,
+        'Observation': 500,
+        'Measurement': 500,
+        'Device': 500
+    }
+    USE_RANDOM = True  # 랜덤 샘플링 활성화
     
     results = tester.run_test_with_snuh_data(
         csv_path, 
-        sample_size=SAMPLE_SIZE,
-        use_random=USE_RANDOM
+        use_random=USE_RANDOM,
+        sample_per_domain=SAMPLE_PER_DOMAIN,
+        vocabulary_filter=VOCABULARY_FILTER
     )
     
     print(f"\n✅ 테스트 완료! 결과는 {tester.log_dir} 디렉토리에 저장되었습니다.")

@@ -47,7 +47,8 @@ class Stage3HybridScoring:
         es_client=None,
         openai_api_key: Optional[str] = None,
         openai_model: str = "gpt-4o-mini",
-        scoring_mode: str = "llm"
+        scoring_mode: str = "llm",
+        include_stage1_scores: bool = False
     ):
         """
         Args:
@@ -60,9 +61,11 @@ class Stage3HybridScoring:
             openai_api_key: OpenAI API 키 (llm 모드, None이면 .env 파일에서 가져옴)
             openai_model: OpenAI 모델명 (llm 모드, 기본값: gpt-4o-mini)
             scoring_mode: 점수 계산 방식 ('llm' 또는 'hybrid', 기본값: 'llm')
+            include_stage1_scores: LLM 프롬프트에 Stage 1의 유사도 점수를 포함할지 여부 (기본값: False)
         """
         self.es_client = es_client
         self.scoring_mode = scoring_mode.lower()
+        self.include_stage1_scores = include_stage1_scores
         
         # Hybrid 모드 설정
         self.sapbert_model = sapbert_model
@@ -521,7 +524,7 @@ class Stage3HybridScoring:
     
     def _create_llm_prompt(self, entity_name: str, candidates: List[Dict[str, Any]]) -> str:
         """
-        LLM을 위한 프롬프트 생성
+        LLM을 위한 프롬프트 생성 - 후보군 중 가장 적합한 것을 선택하도록 요청
         
         Args:
             entity_name: 엔티티 이름
@@ -533,46 +536,73 @@ class Stage3HybridScoring:
         candidates_info = []
         for i, candidate in enumerate(candidates, 1):
             concept = candidate['concept']
-            candidates_info.append({
+            candidate_info = {
+                'index': i,
                 'concept_id': str(concept.get('concept_id', '')),
                 'concept_name': concept.get('concept_name', ''),
                 'domain_id': concept.get('domain_id', '')
-            })
+            }
+            
+            # include_stage1_scores가 True이면 Stage 1 점수 정보 포함
+            if self.include_stage1_scores:
+                search_type = candidate.get('search_type', 'unknown')
+                elasticsearch_score = candidate.get('elasticsearch_score', 0.0)
+                candidate_info['search_type'] = search_type  # lexical, semantic, combined
+                candidate_info['elasticsearch_score'] = round(elasticsearch_score, 4)
+            
+            candidates_info.append(candidate_info)
         
-        prompt = f"""다음 엔티티에 대해 가장 적합한 OMOP CDM 개념을 선택하고 각 후보에 대해 점수를 부여해주세요.
+        # 점수 포함 여부에 따른 안내 문구
+        if self.include_stage1_scores:
+            score_guidance = """
+**검색 점수 정보**:
+- search_type: 검색 방식 (lexical=텍스트 기반, semantic=의미 벡터 기반, combined=하이브리드)
+- elasticsearch_score: Elasticsearch 검색 점수 (참고용, 절대적 기준 아님)
+- 이 점수들은 참고 정보일 뿐, 최종 선택은 의미적 적합성을 기준으로 판단하세요."""
+        else:
+            score_guidance = ""
+        
+        prompt = f"""다음 엔티티에 대해 후보군 중에서 **가장 적합한 OMOP CDM 개념 하나를 선택**하고, 모든 후보에 대해 순위를 매겨주세요.
 
 **엔티티 이름**: {entity_name}
 
 **후보 개념들**:
 {json.dumps(candidates_info, ensure_ascii=False, indent=2)}
+{score_guidance}
 
-**지시사항**:
-1. 각 후보 개념이 엔티티 이름과 얼마나 의미적으로 일치하는지 평가하세요.
+**평가 기준**:
+1. 엔티티 이름과 개념의 **의미적 일치도**를 최우선으로 평가하세요.
 2. 의료 용어의 의미, 컨텍스트, 도메인 적합성을 고려하세요.
-3. **중요**: 무조건 같은 레벨이거나 상위 레벨의 개념으로만 매핑되어야 합니다. 하위 개념(sub-concept)으로는 매핑되면 안 됩니다.
-4. 각 후보에 대해 0.0~1.0 사이의 점수를 부여하세요 (1.0이 가장 적합함).
-5. 선택 이유를 간단히 설명해주세요 (한국어로). 특히 하위 개념인 경우 이를 명확히 지적하고 점수를 낮게 부여하세요.
+3. **중요**: 반드시 같은 레벨이거나 상위 레벨의 개념으로만 매핑되어야 합니다. 
+   - 하위 개념(sub-concept)으로 매핑되면 안 됩니다.
+   - 예: "고혈압"은 "본태성 고혈압"이 아닌 "고혈압"이나 "고혈압 질환"으로 매핑
+4. 완전히 다른 의미의 개념은 0점 처리하세요.
 
 **출력 형식** (JSON):
 {{
-  "results": [
+  "best_match": {{
+    "concept_id": "가장 적합한 후보의 개념 ID",
+    "reasoning": "선택 이유 (한국어로 간단히)"
+  }},
+  "rankings": [
     {{
-      "concept_id": "후보 개념 ID",
-      "score": 0.0~1.0 사이의 점수,
-      "rank": 1~{len(candidates)} 사이의 순위,
-      "reasoning": "선택 이유 (한국어로 간단히)"
+      "concept_id": "개념 ID",
+      "rank": 1,
+      "score": 0.0~1.0,
+      "reasoning": "평가 이유"
     }},
     ...
   ]
 }}
 
 JSON 형식으로만 응답해주세요. 다른 설명은 포함하지 마세요.
+rankings에는 모든 후보가 순위 순으로 포함되어야 합니다. 1위가 best_match와 동일해야 합니다.
 """
         return prompt
     
     def _parse_llm_response(self, response_text: str, candidates: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
-        LLM 응답 파싱
+        LLM 응답 파싱 - best_match와 rankings 형식 지원
         
         Args:
             response_text: LLM 응답 텍스트
@@ -594,7 +624,34 @@ JSON 형식으로만 응답해주세요. 다른 설명은 포함하지 마세요
             
             # 결과 딕셔너리로 변환
             result = {}
-            if 'results' in parsed:
+            
+            # 새 형식: best_match와 rankings
+            if 'best_match' in parsed and 'rankings' in parsed:
+                best_match_id = str(parsed['best_match'].get('concept_id', ''))
+                best_match_reasoning = parsed['best_match'].get('reasoning', '')
+                
+                for item in parsed['rankings']:
+                    concept_id = str(item.get('concept_id', ''))
+                    if concept_id:
+                        rank = int(item.get('rank', 999))
+                        score = float(item.get('score', 0.0))
+                        reasoning = item.get('reasoning', '')
+                        
+                        # best_match인 경우 reasoning 보완
+                        if concept_id == best_match_id and not reasoning:
+                            reasoning = best_match_reasoning
+                        
+                        result[concept_id] = {
+                            'score': score,
+                            'rank': rank,
+                            'reasoning': reasoning,
+                            'is_best_match': concept_id == best_match_id
+                        }
+                
+                logger.info(f"✅ LLM 선택 결과: best_match = {best_match_id}")
+            
+            # 이전 형식 지원: results 배열
+            elif 'results' in parsed:
                 for item in parsed['results']:
                     concept_id = str(item.get('concept_id', ''))
                     if concept_id:

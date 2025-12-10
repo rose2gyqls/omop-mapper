@@ -7,6 +7,8 @@ import sys
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils.dataframe import dataframe_to_rows
+from tqdm import tqdm
+import time
 
 sys.path.append('/home/work/skku/hyo/omop-mapper/src')
 
@@ -14,10 +16,18 @@ from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, Domain
 from omop_mapper.elasticsearch_client import ElasticsearchClient
 
 class EntityMappingTester:
-    def __init__(self, log_dir: str = "test_logs"):
-        """테스터 초기화"""
+    def __init__(self, log_dir: str = "test_logs", scoring_mode: str = "llm", include_stage1_scores: bool = False):
+        """테스터 초기화
+        
+        Args:
+            log_dir: 로그 디렉토리
+            scoring_mode: Stage 3 점수 계산 방식 ('llm' 또는 'hybrid')
+            include_stage1_scores: LLM 프롬프트에 Stage 1 점수 포함 여부
+        """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
+        self.scoring_mode = scoring_mode
+        self.include_stage1_scores = include_stage1_scores
         
         self.setup_logging()
         
@@ -25,7 +35,14 @@ class EntityMappingTester:
         self.es_client.concept_index = "concept-small"
         self.es_client.concept_synonym_index = "concept-synonym"
         
-        self.api = EntityMappingAPI(es_client=self.es_client)
+        self.api = EntityMappingAPI(
+            es_client=self.es_client,
+            scoring_mode=scoring_mode,
+            include_stage1_scores=include_stage1_scores
+        )
+        
+        self.logger.info(f"✅ Scoring Mode: {scoring_mode.upper()}")
+        self.logger.info(f"✅ Include Stage1 Scores: {include_stage1_scores}")
         
         self.domain_mapping = {
             'Condition': DomainID.CONDITION,
@@ -82,19 +99,46 @@ class EntityMappingTester:
         self.logger.info(f"로그 파일: {log_file}")
     
     def load_test_data_from_list(self, entity_list: list) -> pd.DataFrame:
-        """리스트에서 테스트 데이터 생성"""
+        """리스트에서 테스트 데이터 생성
+        
+        Args:
+            entity_list: 엔티티 리스트. 다음 형식 지원:
+                - 문자열 리스트: ['entity1', 'entity2', ...]
+                - (entity, domain) 튜플 리스트: [('entity1', 'Condition'), ('entity2', 'Drug'), ...]
+                - domain이 None이면 모든 도메인 검색
+        """
         self.logger.info(f"테스트 데이터 생성: {len(entity_list)}개 엔티티")
         
         test_data = []
-        for i, entity_name in enumerate(entity_list):
-            test_data.append({
-                'entity_plain_name': entity_name,
-                'sheet': 'manual'  # 수동 입력 표시
-            })
-            self.logger.info(f"  {i+1}. {entity_name}")
+        for i, item in enumerate(entity_list):
+            # (entity, domain) 튜플인 경우
+            if isinstance(item, tuple) and len(item) == 2:
+                entity_name, domain = item
+                test_data.append({
+                    'entity_plain_name': entity_name,
+                    'entity_domain': domain,
+                    'sheet': 'manual'
+                })
+                domain_str = domain if domain else 'All'
+                self.logger.info(f"  {i+1}. {entity_name} [{domain_str}]")
+            # 문자열인 경우
+            else:
+                test_data.append({
+                    'entity_plain_name': item,
+                    'entity_domain': None,
+                    'sheet': 'manual'
+                })
+                self.logger.info(f"  {i+1}. {item} [All]")
         
         df = pd.DataFrame(test_data)
         self.logger.info(f"전체 테스트 데이터: {len(df)}개 엔티티")
+        
+        # 도메인 분포 출력
+        if 'entity_domain' in df.columns:
+            domain_dist = df['entity_domain'].fillna('All').value_counts()
+            self.logger.info("\n도메인 분포:")
+            for domain, count in domain_dist.items():
+                self.logger.info(f"  {domain}: {count}개")
         
         return df
     
@@ -118,8 +162,10 @@ class EntityMappingTester:
     
     def test_single_entity(self, entity_input: EntityInput, test_index: int, sheet: str) -> dict:
         """단일 엔티티 테스트 (도메인별 결과)"""
+        input_domain = entity_input.domain_id.value if entity_input.domain_id else 'All'
+        
         self.logger.info("=" * 100)
-        self.logger.info(f"🧪 테스트 #{test_index} (시트 {sheet}): {entity_input.entity_name}")
+        self.logger.info(f"🧪 테스트 #{test_index} [{input_domain}]: {entity_input.entity_name}")
         self.logger.info("=" * 100)
         
         try:
@@ -145,6 +191,18 @@ class EntityMappingTester:
             
             if hasattr(self.api, '_last_rerank_candidates') and self.api._last_rerank_candidates:
                 stage3_candidates = self.api._last_rerank_candidates
+                # LLM 모드인 경우 Stage 3 결과 상세 로깅
+                if self.scoring_mode == 'llm' and stage3_candidates:
+                    self.logger.info("\n📊 Stage 3 LLM 평가 결과:")
+                    for i, candidate in enumerate(stage3_candidates[:10], 1):
+                        llm_score = candidate.get('llm_score', candidate.get('final_score', 0))
+                        llm_rank = candidate.get('llm_rank', i)
+                        llm_reasoning = candidate.get('llm_reasoning', 'N/A')
+                        self.logger.info(f"   {i}. {candidate['concept_name']} (ID: {candidate['concept_id']})")
+                        self.logger.info(f"      - LLM 점수: {llm_score}, 순위: {llm_rank}")
+                        if llm_reasoning and llm_reasoning != 'N/A':
+                            reasoning_short = llm_reasoning[:80] + '...' if len(llm_reasoning) > 80 else llm_reasoning
+                            self.logger.info(f"      - 이유: {reasoning_short}")
             
             # 도메인별 결과 정리
             domain_results = []
@@ -183,25 +241,14 @@ class EntityMappingTester:
                 if best_result:
                     for search_domain, stage_info in domain_stage_paths.items():
                         if stage_info.get('result_domain') == best_result.domain_id:
-                            # 가장 높은 점수를 가진 검색 도메인 찾기
-                            # (같은 결과 도메인이 여러 검색 도메인에서 나올 수 있음)
-                            for domain_result in domain_results:
-                                if domain_result['domain_id'] == best_result.domain_id and \
-                                   domain_result['mapped_concept_id'] == best_result.mapped_concept_id and \
-                                   domain_result['mapping_score'] == best_result.mapping_score:
-                                    # 이 결과를 낳은 검색 도메인 찾기
-                                    for sd, si in domain_stage_paths.items():
-                                        if si.get('result_domain') == best_result.domain_id:
-                                            best_search_domain = sd
-                                            break
-                                    break
-                            if best_search_domain:
-                                break
+                            best_search_domain = search_domain
+                            break
             
             test_result = {
                 'test_index': test_index,
                 'sheet': sheet,
                 'entity_name': entity_input.entity_name,
+                'input_domain': input_domain,
                 'success': results is not None and len(results) > 0,
                 'domain_count': len(results) if results else 0,
                 'domain_results': domain_results,
@@ -242,6 +289,7 @@ class EntityMappingTester:
                 'test_index': test_index,
                 'sheet': sheet,
                 'entity_name': entity_input.entity_name,
+                'input_domain': input_domain,
                 'success': False,
                 'domain_count': 0,
                 'domain_results': [],
@@ -258,9 +306,20 @@ class EntityMappingTester:
             }
     
     def run_test_with_entities(self, entity_list: list, max_entities: int = None):
-        """엔티티 리스트로 테스트 실행"""
+        """엔티티 리스트로 테스트 실행
+        
+        Args:
+            entity_list: 엔티티 리스트 (문자열 또는 (entity, domain) 튜플)
+            max_entities: 테스트할 최대 엔티티 수
+        """
+        self.logger.info("=" * 100)
         self.logger.info("🚀 Entity Mapping API 테스트 시작")
+        self.logger.info("=" * 100)
         self.logger.info(f"테스트 엔티티 리스트: {len(entity_list)}개")
+        self.logger.info(f"Scoring Mode: {self.scoring_mode.upper()}")
+        self.logger.info(f"Include Stage1 Scores: {self.include_stage1_scores}")
+        
+        start_time = time.time()
         
         # 데이터 생성
         test_data = self.load_test_data_from_list(entity_list)
@@ -273,7 +332,8 @@ class EntityMappingTester:
         test_results = []
         successful_tests = 0
         
-        for idx, row in test_data.iterrows():
+        # tqdm으로 진행 상황 표시
+        for idx, row in tqdm(test_data.iterrows(), total=len(test_data), desc="엔티티 매핑 테스트"):
             try:
                 entity_input = self.create_entity_input(row)
                 result = self.test_single_entity(entity_input, idx + 1, row['sheet'])
@@ -286,22 +346,30 @@ class EntityMappingTester:
                 self.logger.error(f"테스트 #{idx + 1} 처리 오류: {str(e)}")
                 continue
         
+        # 테스트 완료 시간
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        
         # 결과 요약
         total_tests = len(test_results)
         success_rate = (successful_tests / total_tests * 100) if total_tests > 0 else 0
         
-        self.logger.info("=" * 100)
+        self.logger.info("\n" + "=" * 100)
         self.logger.info("📊 테스트 결과 요약")
         self.logger.info("=" * 100)
         self.logger.info(f"총 테스트: {total_tests}개")
-        self.logger.info(f"성공: {successful_tests}개")
-        self.logger.info(f"실패: {total_tests - successful_tests}개")
-        self.logger.info(f"성공률: {success_rate:.2f}%")
+        self.logger.info(f"매핑 성공: {successful_tests}개 ({success_rate:.2f}%)")
+        self.logger.info(f"매핑 실패: {total_tests - successful_tests}개")
+        self.logger.info(f"소요 시간: {elapsed_time:.2f}초 ({elapsed_time/60:.2f}분)")
+        if total_tests > 0:
+            self.logger.info(f"평균 처리 시간: {elapsed_time/total_tests:.3f}초/엔티티")
         
         # 엔티티별 요약
+        self.logger.info("\n📋 엔티티별 결과:")
         for i, result in enumerate(test_results, 1):
             status = "✅ 성공" if result['success'] else "❌ 실패"
-            self.logger.info(f"  {i}. {result['entity_name']}: {status}")
+            input_domain = result.get('input_domain', 'All')
+            self.logger.info(f"  {i}. [{input_domain}] {result['entity_name']}: {status}")
             if result['success']:
                 search_domain = result.get('best_search_domain', 'N/A')
                 result_domain = result.get('best_result_domain', 'N/A')
@@ -320,7 +388,9 @@ class EntityMappingTester:
     def save_results_to_csv(self, test_results: list):
         """테스트 결과를 CSV 파일로 저장 (도메인별 결과 포함)"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_file = self.log_dir / f"test_results_{timestamp}.csv"
+        # 파일명에 설정 정보 포함
+        score_suffix = "with_scores" if self.include_stage1_scores else "no_scores"
+        csv_file = self.log_dir / f"test_results_{self.scoring_mode}_{score_suffix}_{timestamp}.csv"
         
         # CSV용 데이터 정리 (도메인별 결과 평탄화)
         csv_results = []
@@ -329,6 +399,7 @@ class EntityMappingTester:
             base_info = {
                 'test_index': result['test_index'],
                 'entity_name': result['entity_name'],
+                'input_domain': result.get('input_domain', 'All'),
                 'success': result['success'],
                 'domain_count': result.get('domain_count', 0),
                 'best_search_domain': result.get('best_search_domain', 'N/A'),
@@ -348,7 +419,9 @@ class EntityMappingTester:
     def save_results_to_xlsx(self, test_results: list):
         """테스트 결과를 XLSX 파일로 저장 (stage1, stage3 후보군을 열로 분리)"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        xlsx_file = self.log_dir / f"test_results_detailed_{timestamp}.xlsx"
+        # 파일명에 설정 정보 포함
+        score_suffix = "with_scores" if self.include_stage1_scores else "no_scores"
+        xlsx_file = self.log_dir / f"test_results_detailed_{self.scoring_mode}_{score_suffix}_{timestamp}.xlsx"
         
         # 엑셀 워크북 생성
         wb = openpyxl.Workbook()
@@ -367,7 +440,7 @@ class EntityMappingTester:
         
         # 헤더 설정
         headers = [
-            "Test Index", "Entity Name", "Success", "Domain Count",
+            "Test Index", "Entity Name", "Input Domain", "Success", "Domain Count",
             "Best Search Domain", "Best Result Domain", "Best Concept ID", "Best Concept Name", 
             "Best Score", "Best Confidence",
             "All Domains", "Domain Stage Paths", "Stage1 Candidates", "Stage2 Candidates", "Stage3 Candidates"
@@ -389,37 +462,38 @@ class EntityMappingTester:
         for row, result in enumerate(test_results, 2):
             ws.cell(row=row, column=1, value=result['test_index'])
             ws.cell(row=row, column=2, value=result['entity_name'])
-            ws.cell(row=row, column=3, value="성공" if result['success'] else "실패")
-            ws.cell(row=row, column=4, value=result.get('domain_count', 0))
-            ws.cell(row=row, column=5, value=result.get('best_search_domain', 'N/A'))
-            ws.cell(row=row, column=6, value=result.get('best_result_domain', 'N/A'))
-            ws.cell(row=row, column=7, value=result.get('best_concept_id', 'N/A'))
-            ws.cell(row=row, column=8, value=result.get('best_concept_name', 'N/A'))
-            ws.cell(row=row, column=9, value=result.get('best_score', 0.0))
-            ws.cell(row=row, column=10, value=result.get('best_confidence', 'N/A'))
+            ws.cell(row=row, column=3, value=result.get('input_domain', 'All'))
+            ws.cell(row=row, column=4, value="성공" if result['success'] else "실패")
+            ws.cell(row=row, column=5, value=result.get('domain_count', 0))
+            ws.cell(row=row, column=6, value=result.get('best_search_domain', 'N/A'))
+            ws.cell(row=row, column=7, value=result.get('best_result_domain', 'N/A'))
+            ws.cell(row=row, column=8, value=result.get('best_concept_id', 'N/A'))
+            ws.cell(row=row, column=9, value=result.get('best_concept_name', 'N/A'))
+            ws.cell(row=row, column=10, value=result.get('best_score', 0.0))
+            ws.cell(row=row, column=11, value=result.get('best_confidence', 'N/A'))
             
             # 모든 도메인 결과를 문자열로 변환
             domain_results_text = self._format_domain_results(result.get('domain_results', []))
-            ws.cell(row=row, column=11, value=domain_results_text)
+            ws.cell(row=row, column=12, value=domain_results_text)
             
             # 도메인별 Stage 경로 정보
             stage_paths_text = self._format_stage_paths(result.get('domain_stage_paths', {}))
-            ws.cell(row=row, column=12, value=stage_paths_text)
+            ws.cell(row=row, column=13, value=stage_paths_text)
             
             # Stage1 후보군 정보를 문자열로 변환
             stage1_text = self._format_candidates_for_cell(result.get('stage1_candidates', []), 'stage1')
-            ws.cell(row=row, column=13, value=stage1_text)
+            ws.cell(row=row, column=14, value=stage1_text)
             
             # Stage2 후보군 정보를 문자열로 변환
             stage2_text = self._format_candidates_for_cell(result.get('stage2_candidates', []), 'stage2')
-            ws.cell(row=row, column=14, value=stage2_text)
+            ws.cell(row=row, column=15, value=stage2_text)
             
             # Stage3 후보군 정보를 문자열로 변환
             stage3_text = self._format_candidates_for_cell(result.get('stage3_candidates', []), 'stage3')
-            ws.cell(row=row, column=15, value=stage3_text)
+            ws.cell(row=row, column=16, value=stage3_text)
             
             # 셀 스타일 설정 (텍스트 줄바꿈 허용)
-            for col in range(11, 16):  # All Domains, Stage Paths, Stage1, Stage2, Stage3 열
+            for col in range(12, 17):  # All Domains, Stage Paths, Stage1, Stage2, Stage3 열
                 cell = ws.cell(row=row, column=col)
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
         
@@ -427,19 +501,20 @@ class EntityMappingTester:
         column_widths = {
             'A': 10,  # Test Index
             'B': 35,  # Entity Name
-            'C': 10,  # Success
-            'D': 12,  # Domain Count
-            'E': 15,  # Best Search Domain
-            'F': 15,  # Best Result Domain
-            'G': 15,  # Best Concept ID
-            'H': 45,  # Best Concept Name
-            'I': 12,  # Best Score
-            'J': 15,  # Best Confidence
-            'K': 50,  # All Domains
-            'L': 45,  # Domain Stage Paths
-            'M': 70,  # Stage1 Candidates
-            'N': 70,  # Stage2 Candidates
-            'O': 85   # Stage3 Candidates
+            'C': 15,  # Input Domain
+            'D': 10,  # Success
+            'E': 12,  # Domain Count
+            'F': 15,  # Best Search Domain
+            'G': 15,  # Best Result Domain
+            'H': 15,  # Best Concept ID
+            'I': 45,  # Best Concept Name
+            'J': 12,  # Best Score
+            'K': 15,  # Best Confidence
+            'L': 50,  # All Domains
+            'M': 45,  # Domain Stage Paths
+            'N': 70,  # Stage1 Candidates
+            'O': 70,  # Stage2 Candidates
+            'P': 85   # Stage3 Candidates
         }
         
         for col_letter, width in column_widths.items():
@@ -516,9 +591,23 @@ class EntityMappingTester:
             else:  # stage3
                 search_type = candidate.get('search_type', 'unknown')
                 line = f"{i}. [{search_type}] {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
-                line += f"   텍스트: {candidate.get('text_similarity', 0):.4f}, "
-                line += f"의미적: {candidate.get('semantic_similarity', 0):.4f}, "
-                line += f"최종: {candidate.get('final_score', 0):.4f}\n"
+                
+                # LLM 모드인 경우 LLM 점수/순위/이유 표시
+                llm_score = candidate.get('llm_score')
+                llm_rank = candidate.get('llm_rank')
+                llm_reasoning = candidate.get('llm_reasoning')
+                
+                if llm_score is not None:
+                    line += f"   LLM점수: {llm_score}, 순위: {llm_rank}\n"
+                    if llm_reasoning:
+                        reasoning_short = llm_reasoning[:60] + '...' if len(llm_reasoning) > 60 else llm_reasoning
+                        line += f"   이유: {reasoning_short}\n"
+                else:
+                    # Hybrid 모드인 경우
+                    line += f"   텍스트: {candidate.get('text_similarity', 0):.4f}, "
+                    line += f"의미적: {candidate.get('semantic_similarity', 0):.4f}, "
+                    line += f"최종: {candidate.get('final_score', 0):.4f}\n"
+                
                 line += f"   Standard: {candidate.get('standard_concept', 'N/A')}, "
                 line += f"Domain: {candidate.get('domain_id', 'N/A')}"
             
@@ -528,101 +617,57 @@ class EntityMappingTester:
 
 def main():
     """메인 함수"""
-    tester = EntityMappingTester()
+    # ============================================================
+    # 설정 옵션
+    # ============================================================
+    SCORING_MODE = "llm"  # 'llm' 또는 'hybrid' 선택
+    INCLUDE_STAGE1_SCORES = False  # LLM 프롬프트에 Stage1 점수 포함 여부
     
+    # 테스터 초기화
+    tester = EntityMappingTester(
+        log_dir="test_logs",
+        scoring_mode=SCORING_MODE,
+        include_stage1_scores=INCLUDE_STAGE1_SCORES
+    )
+    
+    # ============================================================
     # 테스트할 엔티티 리스트
-    test_entities = test_entities = [
-        'ST-segment elevation myocardial infarction',
-        'acute coronary syndromes',
-        'acute myocardial infarction',
-        'adrenal incidentaloma',
-        'adrenal vein sampling',
-        'aldosterone-producing adenoma',
-        'aldosterone-to-renin ratio',
-        'angiotensin receptor blocker',
-        'angiotensin-converting enzyme inhibitor',
-        'atherosclerotic cardiovascular disease',
-        'atrial fibrillation',
-        'blood pressure',
-        'cardiac rehabilitation',
-        'cardiac troponin',
-        'cardiovascular',
-        'cardiovascular disease',
-        'chronic coronary disease',
-        'computed tomography',
-        'coronary artery bypass grafting',
-        'coronary artery disease',
-        'diastolic blood pressure',
-        'direct oral anticoagulant',
-        'electrocardiogram',
-        'fractional flow reserve',
-        'glucagon-like peptide-1',
-        'glucocorticoid-remediable aldosteronism',
-        'heart failure',
-        'high-sensitivity cardiac troponin',
-        'hypertension',
-        'idiopathic hyperaldosteronism',
-        'implantable cardioverter-defibrillator',
-        'intra-aortic balloon pump',
-        'intravascular ultrasound',
-        'left ventricular ejection fraction',
-        'left ventricular hypertrophy',
-        'low-density lipoprotein',
-        'low-density lipoprotein cholesterol',
-        'major adverse cardiovascular event',
-        'mechanical circulatory support',
-        'mineralocorticoid receptor antagonist',
-        'multivessel disease',
-        'non–ST-segment elevation ACS',
-        'non–ST-segment elevation myocardial infarction',
-        'optical coherence tomography',
-        'percutaneous coronary intervention',
-        'plasma aldosterone concentration',
-        'plasma renin activity',
-        'primary aldosteronism',
-        'proprotein convertase subtilisin/kexin type 9',
-        'primary percutaneous coronary intervention',
-        'proton pump inhibitor',
-        'randomized controlled trial',
-        'return of spontaneous circulation',
-        'sodium-glucose cotransporter-2',
-        'systolic blood pressure',
-        'unfractionated heparin',
-        'venoarterial extracorporeal membrane oxygenation',
-        'myocardial ischemia',
-        'breast cancer',
-        'type 2 diabetes',
-        # --- 추가 (여기서부터 확장) ---
-        'chronic kidney disease',
-        'glomerular filtration rate',
-        'end-stage renal disease',
-        'atrial flutter',
-        'ventricular tachycardia',
-        'ventricular fibrillation',
-        'sudden cardiac death',
-        'ischemic stroke',
-        'hemorrhagic stroke',
-        'pulmonary embolism',
-        'deep vein thrombosis',
-        'chronic obstructive pulmonary disease',
-        'obstructive sleep apnea',
-        'acute respiratory distress syndrome',
-        'body mass index',
-        'fasting plasma glucose',
-        'oral glucose tolerance test',
-        'glycated hemoglobin',
-        'insulin resistance',
-        'metabolic syndrome',
-        'nonalcoholic fatty liver disease',
-        'nonalcoholic steatohepatitis',
-        'hepatocellular carcinoma',
-        'prostate cancer',
-        'colorectal cancer',
+    # 형식: 문자열 또는 (entity, domain) 튜플
+    # domain: 'Condition', 'Procedure', 'Drug', 'Observation', 
+    #         'Measurement', 'Device' 또는 None (모든 도메인)
+    # ============================================================
+    test_entities = [
+        # (entity, domain) 튜플 형식 - 특정 도메인 지정
+        ('hypertension', 'Condition'),
+        ('atrial fibrillation', 'Condition'),
+        ('heart failure', 'Condition'),
+        ('type 2 diabetes', 'Condition'),
+        ('breast cancer', 'Condition'),
+        
+        ('blood pressure', 'Measurement'),
+        ('body mass index', 'Measurement'),
+        ('fasting plasma glucose', 'Measurement'),
+        ('glycated hemoglobin', 'Measurement'),
+        
+        ('percutaneous coronary intervention', 'Procedure'),
+        ('coronary artery bypass grafting', 'Procedure'),
+        ('electrocardiogram', 'Procedure'),
+        ('computed tomography', 'Procedure'),
+        
+        ('angiotensin receptor blocker', 'Drug'),
+        ('proton pump inhibitor', 'Drug'),
+        
+        # 문자열만 입력하면 모든 도메인 검색
+        # 'cardiovascular disease',
+        # 'cardiac troponin',
     ]
     
+    # 테스트 실행
     results = tester.run_test_with_entities(test_entities)
     
     print(f"\n✅ 테스트 완료! 로그는 {tester.log_dir} 디렉토리에 저장되었습니다.")
+    print(f"   - Scoring Mode: {SCORING_MODE}")
+    print(f"   - Include Stage1 Scores: {INCLUDE_STAGE1_SCORES}")
 
 if __name__ == "__main__":
     main()
