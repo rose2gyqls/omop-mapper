@@ -1,24 +1,21 @@
-"""
-Elasticsearch 클라이언트 for OMOP CDM 매핑
-"""
-
-from typing import List, Dict, Any, Optional
 import os
 import time
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-# Optional import for Elasticsearch support
+# Elasticsearch 라이브러리 임포트
 try:
     from elasticsearch import Elasticsearch
     HAS_ELASTICSEARCH = True
 except ImportError:
     HAS_ELASTICSEARCH = False
 
-# gRPC imports
+# gRPC 라이브러리 임포트
 try:
-    import grpc
     import json
     from concurrent.futures import ThreadPoolExecutor
+
+    import grpc
     HAS_GRPC = True
 except ImportError:
     HAS_GRPC = False

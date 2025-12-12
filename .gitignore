@@ -144,6 +144,7 @@ log/
 test_logs/
 test_logs_real_data/
 test_logs_snuh/
+test_logs_ablation/
 *.log
 temp/
 tmp/

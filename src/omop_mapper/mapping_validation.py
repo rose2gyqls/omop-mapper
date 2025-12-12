@@ -1,44 +1,31 @@
-"""
-매핑 검증 모듈
-- OpenAI LLM을 사용하여 매핑 결과 검증
-- 동의어를 기반으로 입력 엔티티와 매핑된 concept의 일치 여부 판단
-"""
-from typing import List, Dict, Any, Optional
+import json
 import logging
 import os
-import json
+from typing import Any, Dict, List, Optional
+
 from dotenv import load_dotenv
 
+# .env 파일 로드
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# OpenAI 라이브러리 임포트
 try:
     from openai import OpenAI
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
-    logger = logging.getLogger(__name__)
     logger.warning("openai가 설치되지 않았습니다. 검증 기능을 사용할 수 없습니다.")
-
-if 'logger' not in locals():
-    logger = logging.getLogger(__name__)
-
-# .env 파일 로드
-load_dotenv()
 
 
 class MappingValidator:
-    """매핑 결과 검증 클래스"""
-    
     def __init__(
         self,
         es_client=None,
         openai_api_key: Optional[str] = None,
         openai_model: str = "gpt-4o-mini"
     ):
-        """
-        Args:
-            es_client: Elasticsearch 클라이언트
-            openai_api_key: OpenAI API 키 (None이면 .env 파일에서 가져옴)
-            openai_model: OpenAI 모델명 (기본값: gpt-4o-mini)
-        """
         self.es_client = es_client
         
         # OpenAI API 초기화

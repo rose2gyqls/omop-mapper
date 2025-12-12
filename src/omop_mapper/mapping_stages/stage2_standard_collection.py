@@ -1,11 +1,5 @@
-"""
-Stage 2: Non-standard to Standard 변환 및 중복 제거
-- Standard 개념은 직접 추가
-- Non-standard 개념은 "Maps to" 관계를 통해 Standard 개념으로 변환
-- 동일한 concept_id와 concept_name인 경우 중복 제거
-"""
-from typing import List, Dict, Any
 import logging
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 

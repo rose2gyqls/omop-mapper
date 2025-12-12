@@ -1,7 +1,7 @@
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 from .elasticsearch_client import ElasticsearchClient
 from .mapping_stages import (
@@ -11,11 +11,11 @@ from .mapping_stages import (
 )
 from .mapping_validation import MappingValidator
 
+# SapBERT 관련 라이브러리 임포트
 try:
-    import torch
     import numpy as np
-    from transformers import AutoTokenizer, AutoModel
-    from sklearn.metrics.pairwise import cosine_similarity
+    import torch
+    from transformers import AutoModel, AutoTokenizer
     HAS_SAPBERT = True
 except ImportError:
     HAS_SAPBERT = False
@@ -74,30 +74,19 @@ class MappingResult:
     
 
 class EntityMappingAPI:
-    """엔티티 매핑 API 클래스 (3단계 매핑 파이프라인)"""
-
     def __init__(
         self,
         es_client: Optional[ElasticsearchClient] = None,
         confidence_threshold: float = 0.5,
         scoring_mode: str = "llm",
-        include_stage1_scores: bool = False
+        include_stage1_scores: bool = False,
+        use_lexical: bool = True
     ):
-        """
-        엔티티 매핑 API 초기화
-        
-        Args:
-            es_client: Elasticsearch 클라이언트
-            confidence_threshold: 매핑 신뢰도 임계치
-            scoring_mode: Stage 3 점수 계산 방식 ('llm' 또는 'hybrid', 기본값: 'llm')
-            include_stage1_scores: Stage 3 LLM 프롬프트에 Stage 1의 유사도 점수를 포함할지 여부 (기본값: False)
-                - True: LLM에게 lexical/semantic/combined 검색 점수를 참고 정보로 제공
-                - False: 후보 목록만 제공하고 LLM이 순수하게 의미적 적합성만으로 판단
-        """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
         self.scoring_mode = scoring_mode
         self.include_stage1_scores = include_stage1_scores
+        self.use_lexical = use_lexical
         
         # SapBERT 모델 초기화 (지연 로딩)
         self._sapbert_model = None
@@ -107,7 +96,8 @@ class EntityMappingAPI:
         # Stage 모듈 초기화
         self.stage1 = Stage1CandidateRetrieval(
             es_client=self.es_client,
-            has_sapbert=HAS_SAPBERT
+            has_sapbert=HAS_SAPBERT,
+            use_lexical=use_lexical
         )
         
         self.stage2 = Stage2StandardCollection(
@@ -131,15 +121,6 @@ class EntityMappingAPI:
     def map_entity(self, entity_input: EntityInput) -> Optional[List[MappingResult]]:
         """
         단일 엔티티를 OMOP CDM에 3단계 매핑
-        
-        **도메인 검색 전략**:
-        - entity_input.domain_id가 None이면: 6개 주요 도메인 모두에서 검색하여 최적 매핑 찾기
-        - entity_input.domain_id가 지정되면: 해당 도메인에서만 검색 (특정 도메인 매핑이 필요한 경우)
-        
-        **3단계 매핑 파이프라인** (각 도메인별로 수행):
-        - Stage 1: Elasticsearch에서 후보군 9개 추출 (Lexical 3 + Semantic 3 + Combined 3)
-        - Stage 2: Non-standard to Standard 변환 및 중복 제거
-        - Stage 3: LLM 기반 평가 및 최종 랭킹
         
         Args:
             entity_input: 매핑할 엔티티 정보

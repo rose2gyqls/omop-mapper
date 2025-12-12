@@ -193,13 +193,21 @@ class EntityMappingTester:
                 stage3_candidates = self.api._last_rerank_candidates
                 # LLM 모드인 경우 Stage 3 결과 상세 로깅
                 if self.scoring_mode == 'llm' and stage3_candidates:
-                    self.logger.info("\n📊 Stage 3 LLM 평가 결과:")
+                    header = "📊 Stage 3 LLM 평가 결과"
+                    if self.include_stage1_scores:
+                        header += " (SapBERT 의미유사도 포함)"
+                    self.logger.info(f"\n{header}:")
                     for i, candidate in enumerate(stage3_candidates[:10], 1):
                         llm_score = candidate.get('llm_score', candidate.get('final_score', 0))
                         llm_rank = candidate.get('llm_rank', i)
                         llm_reasoning = candidate.get('llm_reasoning', 'N/A')
+                        semantic_sim = candidate.get('semantic_similarity')
+                        
                         self.logger.info(f"   {i}. {candidate['concept_name']} (ID: {candidate['concept_id']})")
-                        self.logger.info(f"      - LLM 점수: {llm_score}, 순위: {llm_rank}")
+                        if semantic_sim is not None:
+                            self.logger.info(f"      - LLM 점수: {llm_score}, 순위: {llm_rank}, 의미유사도: {semantic_sim:.4f}")
+                        else:
+                            self.logger.info(f"      - LLM 점수: {llm_score}, 순위: {llm_rank}")
                         if llm_reasoning and llm_reasoning != 'N/A':
                             reasoning_short = llm_reasoning[:80] + '...' if len(llm_reasoning) > 80 else llm_reasoning
                             self.logger.info(f"      - 이유: {reasoning_short}")
@@ -596,9 +604,13 @@ class EntityMappingTester:
                 llm_score = candidate.get('llm_score')
                 llm_rank = candidate.get('llm_rank')
                 llm_reasoning = candidate.get('llm_reasoning')
+                semantic_sim = candidate.get('semantic_similarity')
                 
                 if llm_score is not None:
-                    line += f"   LLM점수: {llm_score}, 순위: {llm_rank}\n"
+                    if semantic_sim is not None:
+                        line += f"   LLM점수: {llm_score}, 순위: {llm_rank}, 의미유사도: {semantic_sim:.4f}\n"
+                    else:
+                        line += f"   LLM점수: {llm_score}, 순위: {llm_rank}\n"
                     if llm_reasoning:
                         reasoning_short = llm_reasoning[:60] + '...' if len(llm_reasoning) > 60 else llm_reasoning
                         line += f"   이유: {reasoning_short}\n"
@@ -638,28 +650,17 @@ def main():
     # ============================================================
     test_entities = [
         # (entity, domain) 튜플 형식 - 특정 도메인 지정
-        ('hypertension', 'Condition'),
-        ('atrial fibrillation', 'Condition'),
-        ('heart failure', 'Condition'),
-        ('type 2 diabetes', 'Condition'),
-        ('breast cancer', 'Condition'),
-        
-        ('blood pressure', 'Measurement'),
-        ('body mass index', 'Measurement'),
-        ('fasting plasma glucose', 'Measurement'),
-        ('glycated hemoglobin', 'Measurement'),
-        
-        ('percutaneous coronary intervention', 'Procedure'),
-        ('coronary artery bypass grafting', 'Procedure'),
-        ('electrocardiogram', 'Procedure'),
-        ('computed tomography', 'Procedure'),
-        
-        ('angiotensin receptor blocker', 'Drug'),
-        ('proton pump inhibitor', 'Drug'),
-        
-        # 문자열만 입력하면 모든 도메인 검색
-        # 'cardiovascular disease',
-        # 'cardiac troponin',
+        ('nodular panniculitis', 'Condition'),
+        ('cardiac troponin', 'Measurement'),
+        ('congenital small intestinal atresia', 'Condition'),
+        ('mass removal', 'Procedure'),
+        ('congenital ring syndrome', 'Condition'),
+        ('monophasic synovial sarcoma', 'Observation'),
+        ('flexible bronchoscopic removal of trachea or bronchial foreign body', 'Procedure'),
+        ('anaplastic astrocytoma', 'Observation'),
+        ('sacroiliac joint block', 'Procedure'),
+        ('endometrial polypectomy', 'Procedure'),
+        ('mandibular nerve block', 'Procedure'),
     ]
     
     # 테스트 실행

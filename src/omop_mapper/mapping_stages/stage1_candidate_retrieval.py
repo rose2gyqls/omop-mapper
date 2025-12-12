@@ -1,11 +1,6 @@
-"""
-Stage 1: Elasticsearch에서 각 도메인별 후보군 15개 추출
-- Lexical Analysis: 텍스트 기반 검색으로 top 5개
-- Semantic Analysis: 의미적 검색으로 top 5개
-- Combined Score: 하이브리드 검색으로 top 5개
-"""
-from typing import List, Dict, Any, Optional
 import logging
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -14,14 +9,18 @@ logger = logging.getLogger(__name__)
 class Stage1CandidateRetrieval:
     """Stage 1: 후보군 추출 (Lexical 3 + Semantic 3 + Combined 3)"""
     
-    def __init__(self, es_client, has_sapbert: bool = True):
+    def __init__(self, es_client, has_sapbert: bool = True, use_lexical: bool = True):
         """
         Args:
             es_client: Elasticsearch 클라이언트
             has_sapbert: SapBERT 사용 가능 여부
+            use_lexical: Lexical 검색 사용 여부 (기본값: True)
+                - True: Lexical + Semantic + Combined 검색
+                - False: Semantic + Combined 검색만 (Lexical 제외)
         """
         self.es_client = es_client
         self.has_sapbert = has_sapbert
+        self.use_lexical = use_lexical
         # Threshold 설정
         self.lexical_threshold = 5.0
         self.semantic_threshold = 0.8
@@ -56,25 +55,31 @@ class Stage1CandidateRetrieval:
         Returns:
             List[Dict]: Threshold를 통과한 후보 리스트 (각 후보는 _search_type 필드 포함)
         """
+        search_mode = "Lexical + Semantic + Combined" if self.use_lexical else "Semantic + Combined"
         logger.info("=" * 80)
-        logger.info("Stage 1: 후보군 추출 (Lexical + Semantic + Combined)")
+        logger.info(f"Stage 1: 후보군 추출 ({search_mode})")
         logger.info(f"  엔티티: {entity_name}")
         logger.info(f"  도메인: {domain_id}")
         logger.info("=" * 80)
         
         all_candidates = []
+        lexical_results = []
+        lexical_results_filtered = []
         
         # ===== 1. Lexical Analysis: 텍스트 기반 검색 =====
-        logger.info("\n📝 1-1. Lexical Analysis (텍스트 검색, threshold: {:.2f})".format(self.lexical_threshold))
-        lexical_results = self._perform_text_only_search(entity_name, domain_id, es_index, 3)
-        lexical_results_filtered = [hit for hit in lexical_results if hit['_score'] >= self.lexical_threshold]
-        logger.info(f"✅ Lexical: {len(lexical_results)}개 → {len(lexical_results_filtered)}개 (threshold 통과)")
-        
-        for hit in lexical_results_filtered:
-            hit['_search_type'] = 'lexical'
-            all_candidates.append(hit)
-            source = hit['_source']
-            logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
+        if self.use_lexical:
+            logger.info("\n📝 1-1. Lexical Analysis (텍스트 검색, threshold: {:.2f})".format(self.lexical_threshold))
+            lexical_results = self._perform_text_only_search(entity_name, domain_id, es_index, 3)
+            lexical_results_filtered = [hit for hit in lexical_results if hit['_score'] >= self.lexical_threshold]
+            logger.info(f"✅ Lexical: {len(lexical_results)}개 → {len(lexical_results_filtered)}개 (threshold 통과)")
+            
+            for hit in lexical_results_filtered:
+                hit['_search_type'] = 'lexical'
+                all_candidates.append(hit)
+                source = hit['_source']
+                logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
+        else:
+            logger.info("\n📝 1-1. Lexical Analysis - 건너뜀 (use_lexical=False)")
         
         # ===== 2. Semantic Analysis: 벡터 기반 검색 =====
         logger.info("\n🧠 1-2. Semantic Analysis (벡터 검색, threshold: {:.2f})".format(self.semantic_threshold))
@@ -115,7 +120,10 @@ class Stage1CandidateRetrieval:
         # 최종 요약
         logger.info("\n" + "=" * 80)
         logger.info(f"📊 Stage 1 완료: 총 {len(all_candidates)}개 후보 추출")
-        logger.info(f"  - Lexical: {len(lexical_results_filtered)}개 (threshold: {self.lexical_threshold:.2f})")
+        if self.use_lexical:
+            logger.info(f"  - Lexical: {len(lexical_results_filtered)}개 (threshold: {self.lexical_threshold:.2f})")
+        else:
+            logger.info(f"  - Lexical: 건너뜀 (use_lexical=False)")
         logger.info(f"  - Semantic: {len(semantic_results_filtered)}개 (threshold: {self.semantic_threshold:.2f})")
         logger.info(f"  - Combined: {len(combined_results_filtered)}개 (threshold: {self.combined_threshold:.2f})")
         logger.info("=" * 80)
@@ -125,11 +133,6 @@ class Stage1CandidateRetrieval:
     def _perform_text_only_search(self, entity_name: str, domain_id: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
         """
         텍스트 기반 검색 수행 (Lexical Search)
-        
-        **검색 전략**:
-        - Exact match: concept_name.keyword로 정확히 일치하는 항목 (boost: 3.0)
-        - Phrase match: concept_name에 구문 일치하는 항목 (boost: 2.5)
-        - Text match: concept_name에 텍스트 일치하는 항목 (boost: 2.0)
         
         Args:
             entity_name: 검색할 엔티티 이름
@@ -210,11 +213,6 @@ class Stage1CandidateRetrieval:
         """
         벡터 기반 검색 수행 (Semantic Search)
         
-        **검색 전략**:
-        - Elasticsearch KNN (k-Nearest Neighbors) 검색 사용
-        - concept_embedding 필드와 입력 임베딩 간의 유사도 계산
-        - 코사인 유사도 기반으로 가장 유사한 개념 검색
-        
         Args:
             entity_embedding: 엔티티의 임베딩 벡터 (SapBERT 등)
             domain_id: 도메인 필터 (해당 도메인만 검색)
@@ -270,15 +268,6 @@ class Stage1CandidateRetrieval:
     ) -> List[Dict[str, Any]]:
         """
         하이브리드 검색 수행 (텍스트 + 벡터 + 길이 유사도)
-        
-        **검색 전략**:
-        - KNN 벡터 검색 (boost: 0.6)
-        - 텍스트 검색 (exact match boost: 3.0, match boost: 2.5)
-        - 길이 유사도 가중치 (가우시안 decay 함수 사용)
-        
-        **길이 유사도**:
-        - 입력 엔티티와 후보 개념의 글자 수 차이를 고려
-        - 유사한 길이의 개념에 높은 가중치 부여
         
         Args:
             entity_name: 검색할 엔티티 이름

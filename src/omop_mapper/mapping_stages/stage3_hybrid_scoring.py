@@ -1,24 +1,23 @@
-"""
-Stage 3: Hybrid 또는 LLM 기반 후보군 평가 및 최종 랭킹
-- Hybrid: Text 유사도(Jaccard) + Semantic 유사도(SapBERT Cosine) 조합
-- LLM: OpenAI API를 사용하여 후보군 평가
-"""
-from typing import List, Dict, Any, Optional
+import json
 import logging
 import os
-import json
+from typing import Any, Dict, List, Optional
+
 from dotenv import load_dotenv
-import logging
+
+# .env 파일 로드
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# OpenAI 라이브러리 임포트
 try:
     from openai import OpenAI
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
 
-# Hybrid 모드용 라이브러리 임포트
+# Hybrid/Semantic 모드용 라이브러리 임포트
 try:
     import numpy as np
     import torch
@@ -27,11 +26,6 @@ try:
 except ImportError:
     HAS_HYBRID_LIBS = False
     np = None
-
-    logger = logging.getLogger(__name__)
-
-# .env 파일 로드
-load_dotenv()
 
 
 class Stage3HybridScoring:
@@ -52,15 +46,18 @@ class Stage3HybridScoring:
     ):
         """
         Args:
-            sapbert_model: SapBERT 모델 (hybrid 모드에서 사용)
-            sapbert_tokenizer: SapBERT 토크나이저 (hybrid 모드에서 사용)
-            sapbert_device: SapBERT 디바이스 (hybrid 모드에서 사용)
+            sapbert_model: SapBERT 모델 (hybrid/semantic_only 모드에서 사용)
+            sapbert_tokenizer: SapBERT 토크나이저 (hybrid/semantic_only 모드에서 사용)
+            sapbert_device: SapBERT 디바이스 (hybrid/semantic_only 모드에서 사용)
             text_weight: 텍스트 유사도 가중치 (hybrid 모드, 기본값: 0.4)
             semantic_weight: 의미적 유사도 가중치 (hybrid 모드, 기본값: 0.6)
             es_client: Elasticsearch 클라이언트
             openai_api_key: OpenAI API 키 (llm 모드, None이면 .env 파일에서 가져옴)
             openai_model: OpenAI 모델명 (llm 모드, 기본값: gpt-4o-mini)
-            scoring_mode: 점수 계산 방식 ('llm' 또는 'hybrid', 기본값: 'llm')
+            scoring_mode: 점수 계산 방식 ('llm', 'hybrid', 'semantic_only' 중 선택)
+                - 'llm': OpenAI LLM을 사용한 평가
+                - 'hybrid': Text(Jaccard) + Semantic(SapBERT) 조합
+                - 'semantic_only': SapBERT 코사인 유사도만 사용 (LLM 없음)
             include_stage1_scores: LLM 프롬프트에 Stage 1의 유사도 점수를 포함할지 여부 (기본값: False)
         """
         self.es_client = es_client
@@ -99,8 +96,13 @@ class Stage3HybridScoring:
                 logger.warning("⚠️ SapBERT 모델이 초기화되지 않았습니다. Hybrid 모드를 사용할 수 없습니다.")
             else:
                 logger.info(f"✅ Hybrid 점수 계산 모드 초기화 (text: {text_weight}, semantic: {semantic_weight})")
+        elif self.scoring_mode == "semantic_only":
+            if not HAS_HYBRID_LIBS:
+                logger.error("⚠️ Semantic Only 모드에 필요한 라이브러리가 설치되지 않았습니다 (numpy, sklearn).")
+            else:
+                logger.info("✅ Semantic Only 점수 계산 모드 초기화 (SapBERT 코사인 유사도만 사용)")
         else:
-            logger.error(f"⚠️ 알 수 없는 scoring_mode: {scoring_mode}. 'llm' 또는 'hybrid'를 사용하세요.")
+            logger.error(f"⚠️ 알 수 없는 scoring_mode: {scoring_mode}. 'llm', 'hybrid', 'semantic_only' 중 선택하세요.")
     
     def calculate_hybrid_scores(
         self, 
@@ -112,18 +114,6 @@ class Stage3HybridScoring:
         """
         Stage 2 후보들에 대해 Hybrid 또는 LLM 기반 평가 및 최종 랭킹
         
-        **Hybrid 평가 방식** (scoring_mode='hybrid'):
-        - 텍스트 유사도 (0.4): Jaccard 유사도 (n-gram=3)
-          - Non-std to std 변환된 후보는 고정 0.9 점수
-        - 의미적 유사도 (0.6): SapBERT 임베딩 + Cosine 유사도
-        - 최종 점수 = 0.4 * text_similarity + 0.6 * semantic_similarity
-        
-        **LLM 평가 방식** (scoring_mode='llm'):
-        - OpenAI GPT-4 모델을 사용하여 각 후보의 의미적 적합성 평가
-        - 각 후보에 0.0~1.0 점수 부여
-        - 하위 개념(sub-concept)으로 매핑되면 낮은 점수 부여
-        - 최종 점수(final_score)는 LLM 점수(llm_score)를 사용
-        
         Args:
             entity_name: 평가할 엔티티 이름
             stage2_candidates: Stage 2에서 수집된 Standard 후보들
@@ -133,8 +123,13 @@ class Stage3HybridScoring:
         Returns:
             List[Dict]: 최종 점수 기준으로 정렬된 후보들 (내림차순)
         """
+        mode_names = {
+            'hybrid': 'Hybrid (Text + Semantic)',
+            'llm': 'LLM',
+            'semantic_only': 'Semantic Only (SapBERT 유사도)'
+        }
         logger.info("=" * 80)
-        logger.info(f"Stage 3: {'Hybrid' if self.scoring_mode == 'hybrid' else 'LLM'} 기반 후보군 평가 및 최종 랭킹")
+        logger.info(f"Stage 3: {mode_names.get(self.scoring_mode, self.scoring_mode)} 기반 후보군 평가 및 최종 랭킹")
         logger.info("=" * 80)
         
         if not stage2_candidates:
@@ -145,7 +140,9 @@ class Stage3HybridScoring:
         if self.scoring_mode == "hybrid":
             return self._calculate_hybrid_mode(entity_name, stage2_candidates, entity_embedding)
         elif self.scoring_mode == "llm":
-            return self._calculate_llm_mode(entity_name, stage2_candidates)
+            return self._calculate_llm_mode(entity_name, stage2_candidates, entity_embedding)
+        elif self.scoring_mode == "semantic_only":
+            return self._calculate_semantic_only_mode(entity_name, stage2_candidates, entity_embedding)
         else:
             logger.error(f"⚠️ 알 수 없는 scoring_mode: {self.scoring_mode}")
             return []
@@ -270,10 +267,77 @@ class Stage3HybridScoring:
         
         return sorted_candidates
     
+    def _calculate_semantic_only_mode(
+        self,
+        entity_name: str,
+        stage2_candidates: List[Dict[str, Any]],
+        entity_embedding: Optional[Any] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Semantic Only 모드: SapBERT 코사인 유사도만 사용 (LLM 없음)
+        
+        Args:
+            entity_name: 엔티티 이름
+            stage2_candidates: Stage 2 후보들
+            entity_embedding: 엔티티의 SapBERT 임베딩
+            
+        Returns:
+            List[Dict]: 의미적 유사도로 정렬된 후보들
+        """
+        if entity_embedding is None:
+            logger.warning("⚠️ 엔티티 임베딩이 없습니다. Semantic Only 모드를 사용할 수 없습니다.")
+            return []
+        
+        final_candidates = []
+        
+        for candidate in stage2_candidates:
+            concept = candidate['concept']
+            
+            # 의미적 유사도 계산
+            concept_embedding = concept.get('concept_embedding')
+            semantic_similarity = self._compute_semantic_similarity(entity_embedding, concept_embedding)
+            
+            if semantic_similarity is None:
+                semantic_similarity = 0.0
+                logger.warning(f"⚠️ 후보 {concept.get('concept_id')}의 임베딩이 없습니다.")
+            
+            final_candidates.append({
+                'concept': concept,
+                'is_original_standard': candidate.get('is_original_standard', True),
+                'original_candidate': candidate.get('original_candidate', {}),
+                'elasticsearch_score': candidate.get('elasticsearch_score', 0.0),
+                'search_type': candidate.get('search_type', 'unknown'),
+                'semantic_similarity': semantic_similarity,
+                'final_score': semantic_similarity  # Semantic Only 모드에서는 semantic_similarity가 final_score
+            })
+        
+        # 의미적 유사도로 정렬
+        sorted_candidates = sorted(
+            final_candidates,
+            key=lambda x: x['final_score'],
+            reverse=True
+        )
+        
+        # 결과 로깅
+        logger.info("\n" + "=" * 80)
+        logger.info("🧠 Stage 3 Semantic Only 결과:")
+        logger.info("=" * 80)
+        for i, candidate in enumerate(sorted_candidates[:10], 1):
+            concept = candidate['concept']
+            search_type = candidate.get('search_type', 'unknown')
+            is_std_marker = "✓" if candidate['is_original_standard'] else "→"
+            logger.info(f"  {i}. [{search_type}] {is_std_marker} {concept.get('concept_name', 'N/A')} "
+                       f"(ID: {concept.get('concept_id', 'N/A')})")
+            logger.info(f"     의미유사도: {candidate['semantic_similarity']:.4f}")
+        logger.info("=" * 80)
+        
+        return sorted_candidates
+    
     def _calculate_llm_mode(
         self,
         entity_name: str,
-        stage2_candidates: List[Dict[str, Any]]
+        stage2_candidates: List[Dict[str, Any]],
+        entity_embedding: Optional[Any] = None
     ) -> List[Dict[str, Any]]:
         """
         LLM 모드: OpenAI API를 사용한 평가
@@ -281,6 +345,7 @@ class Stage3HybridScoring:
         Args:
             entity_name: 엔티티 이름
             stage2_candidates: Stage 2 후보들
+            entity_embedding: 엔티티의 SapBERT 임베딩 (include_stage1_scores=True일 때 사용)
             
         Returns:
             List[Dict]: LLM 점수로 정렬된 후보들
@@ -289,21 +354,29 @@ class Stage3HybridScoring:
             logger.error("⚠️ OpenAI API 클라이언트가 초기화되지 않았습니다.")
             return []
         
-        # 후보군 정보 준비
+        # 후보군 정보 준비 (semantic_similarity 미리 계산)
         final_candidates = []
         for candidate in stage2_candidates:
             concept = candidate['concept']
-            final_candidates.append({
+            candidate_data = {
                 'concept': concept,
                 'is_original_standard': candidate.get('is_original_standard', True),
                 'original_candidate': candidate.get('original_candidate', {}),
                 'elasticsearch_score': candidate.get('elasticsearch_score', 0.0),
                 'search_type': candidate.get('search_type', 'unknown')
-            })
+            }
+            
+            # include_stage1_scores=True이면 semantic_similarity 미리 계산
+            if self.include_stage1_scores and entity_embedding is not None:
+                concept_embedding = concept.get('concept_embedding')
+                semantic_sim = self._compute_semantic_similarity(entity_embedding, concept_embedding)
+                candidate_data['semantic_similarity'] = semantic_sim if semantic_sim is not None else 0.0
+            
+            final_candidates.append(candidate_data)
         
         # LLM 기반 평가 수행
         try:
-            llm_result = self._calculate_llm_scores_api(entity_name, final_candidates)
+            llm_result = self._calculate_llm_scores_api(entity_name, final_candidates, entity_embedding=entity_embedding)
             
             if not llm_result:
                 logger.error("⚠️ LLM 평가 결과가 없습니다.")
@@ -335,15 +408,22 @@ class Stage3HybridScoring:
             # 최종 순위 로깅
             logger.info("\n" + "=" * 80)
             logger.info("🤖 Stage 3 LLM 결과 - OpenAI 순위:")
+            if self.include_stage1_scores:
+                logger.info("   (SapBERT 의미적 유사도 포함)")
             logger.info("=" * 80)
             for i, candidate in enumerate(sorted_candidates[:10], 1):
                 concept = candidate['concept']
                 search_type = candidate.get('search_type', 'unknown')
                 llm_score = candidate.get('llm_score', 0.0)
                 llm_rank = candidate.get('llm_rank', 'N/A')
+                semantic_sim = candidate.get('semantic_similarity')
+                
                 logger.info(f"  {i}. {concept.get('concept_name', 'N/A')} "
                           f"(ID: {concept.get('concept_id', 'N/A')}) [{search_type}]")
-                logger.info(f"     LLM 점수: {llm_score:.4f} (순위: {llm_rank})")
+                if semantic_sim is not None:
+                    logger.info(f"     LLM 점수: {llm_score:.4f} (순위: {llm_rank}) | 의미유사도: {semantic_sim:.4f}")
+                else:
+                    logger.info(f"     LLM 점수: {llm_score:.4f} (순위: {llm_rank})")
                 if candidate.get('llm_reasoning'):
                     reasoning = candidate['llm_reasoning'][:100]
                     logger.info(f"     이유: {reasoning}...")
@@ -468,11 +548,68 @@ class Stage3HybridScoring:
             logger.error(f"Cosine 유사도 계산 실패: {e}")
             return 0.0
     
+    def _compute_semantic_similarity(
+        self,
+        entity_embedding: Any,
+        concept_embedding: Any
+    ) -> Optional[float]:
+        """
+        엔티티 임베딩과 개념 임베딩 간의 의미적 유사도 계산
+        
+        Args:
+            entity_embedding: 엔티티의 SapBERT 임베딩
+            concept_embedding: 개념의 SapBERT 임베딩 (다양한 형식 가능)
+            
+        Returns:
+            float: 코사인 유사도 (0.0 ~ 1.0) 또는 None
+        """
+        if entity_embedding is None or concept_embedding is None:
+            return None
+        
+        if not HAS_HYBRID_LIBS:
+            return None
+        
+        try:
+            # concept_embedding 형식 변환
+            if isinstance(concept_embedding, str):
+                # 문자열로 저장된 경우: JSON 파싱
+                try:
+                    concept_embedding = np.array(json.loads(concept_embedding))
+                except:
+                    return None
+            elif isinstance(concept_embedding, list):
+                # 리스트로 저장된 경우: numpy 배열로 변환
+                try:
+                    concept_embedding = np.array(concept_embedding)
+                except:
+                    return None
+            elif not isinstance(concept_embedding, np.ndarray):
+                # 그 외의 경우: numpy 배열로 시도
+                try:
+                    concept_embedding = np.array(concept_embedding)
+                except:
+                    return None
+            
+            # entity_embedding도 numpy 배열로 확인/변환
+            if isinstance(entity_embedding, list):
+                try:
+                    entity_embedding = np.array(entity_embedding)
+                except:
+                    return None
+            
+            # 코사인 유사도 계산
+            return self._calculate_cosine_similarity(entity_embedding, concept_embedding)
+            
+        except Exception as e:
+            logger.debug(f"의미적 유사도 계산 실패: {e}")
+            return None
+    
     def _calculate_llm_scores_api(
         self, 
         entity_name: str, 
         candidates: List[Dict[str, Any]],
-        max_candidates: int = 15
+        max_candidates: int = 15,
+        entity_embedding: Optional[Any] = None
     ) -> Optional[Dict[str, Dict[str, Any]]]:
         """
         OpenAI API를 사용하여 후보군 평가
@@ -481,6 +618,7 @@ class Stage3HybridScoring:
             entity_name: 엔티티 이름
             candidates: 평가할 후보군 리스트
             max_candidates: 평가할 최대 후보군 수 (기본값: 15)
+            entity_embedding: 엔티티의 SapBERT 임베딩 (include_stage1_scores=True일 때 사용)
             
         Returns:
             Dict[str, Dict[str, Any]]: concept_id를 키로 하는 평가 결과 딕셔너리
@@ -492,7 +630,7 @@ class Stage3HybridScoring:
         top_candidates = candidates[:max_candidates]
         
         # 프롬프트 생성
-        prompt = self._create_llm_prompt(entity_name, top_candidates)
+        prompt = self._create_llm_prompt(entity_name, top_candidates, entity_embedding=entity_embedding)
         
         try:
             # OpenAI API 호출
@@ -501,7 +639,7 @@ class Stage3HybridScoring:
                 messages=[
                     {
                         "role": "system",
-                        "content": "당신은 의료 용어 매핑 전문가입니다. 주어진 엔티티에 대해 가장 적합한 OMOP CDM 개념을 선택하고 각 후보에 대해 정확한 점수를 부여해야 합니다."
+                        "content": "당신은 의료 용어 매핑 전문가입니다. 주어진 엔티티에 대해 가장 적합한 OMOP CDM 표준용어를 매핑하고, 각 후보에 대해 정확한 점수를 부여해야 합니다."
                     },
                     {
                         "role": "user",
@@ -522,13 +660,19 @@ class Stage3HybridScoring:
             logger.error(f"OpenAI API 호출 실패: {e}")
             return None
     
-    def _create_llm_prompt(self, entity_name: str, candidates: List[Dict[str, Any]]) -> str:
+    def _create_llm_prompt(
+        self, 
+        entity_name: str, 
+        candidates: List[Dict[str, Any]],
+        entity_embedding: Optional[Any] = None
+    ) -> str:
         """
         LLM을 위한 프롬프트 생성 - 후보군 중 가장 적합한 것을 선택하도록 요청
         
         Args:
             entity_name: 엔티티 이름
             candidates: 후보군 리스트
+            entity_embedding: 엔티티의 SapBERT 임베딩 (include_stage1_scores=True일 때 사용)
             
         Returns:
             str: 프롬프트 문자열
@@ -543,26 +687,33 @@ class Stage3HybridScoring:
                 'domain_id': concept.get('domain_id', '')
             }
             
-            # include_stage1_scores가 True이면 Stage 1 점수 정보 포함
+            # include_stage1_scores가 True이면 SapBERT 임베딩 기반 의미적 유사도 포함
             if self.include_stage1_scores:
-                search_type = candidate.get('search_type', 'unknown')
-                elasticsearch_score = candidate.get('elasticsearch_score', 0.0)
-                candidate_info['search_type'] = search_type  # lexical, semantic, combined
-                candidate_info['elasticsearch_score'] = round(elasticsearch_score, 4)
+                # 이미 _calculate_llm_mode에서 계산된 semantic_similarity 사용
+                semantic_similarity = candidate.get('semantic_similarity')
+                if semantic_similarity is not None:
+                    candidate_info['semantic_similarity'] = round(semantic_similarity, 4)
+                elif entity_embedding is not None:
+                    # 계산되지 않은 경우 직접 계산
+                    concept_embedding = concept.get('concept_embedding')
+                    semantic_similarity = self._compute_semantic_similarity(entity_embedding, concept_embedding)
+                    if semantic_similarity is not None:
+                        candidate_info['semantic_similarity'] = round(semantic_similarity, 4)
             
             candidates_info.append(candidate_info)
         
         # 점수 포함 여부에 따른 안내 문구
         if self.include_stage1_scores:
             score_guidance = """
-**검색 점수 정보**:
-- search_type: 검색 방식 (lexical=텍스트 기반, semantic=의미 벡터 기반, combined=하이브리드)
-- elasticsearch_score: Elasticsearch 검색 점수 (참고용, 절대적 기준 아님)
-- 이 점수들은 참고 정보일 뿐, 최종 선택은 의미적 적합성을 기준으로 판단하세요."""
+**의미적 유사도 점수 정보**:
+- semantic_similarity: SapBERT 임베딩 기반 코사인 유사도 (0.0 ~ 1.0)
+  - 1.0에 가까울수록 엔티티와 후보 concept_name이 의미적으로 유사함
+  - 이 점수는 참고 정보일 뿐, 최종 선택은 의료 용어의 의미적 적합성을 기준으로 판단하세요.
+  - 유사도가 높더라도 상위/하위 concept 관계 등을 고려해야 합니다."""
         else:
             score_guidance = ""
         
-        prompt = f"""다음 엔티티에 대해 후보군 중에서 **가장 적합한 OMOP CDM 개념 하나를 선택**하고, 모든 후보에 대해 순위를 매겨주세요.
+        prompt = f"""다음 엔티티에 대해 후보군 중에서 **가장 적합한 OMOP CDM concept 하나를 선택**하고, 모든 후보에 대해 순위를 매겨주세요.
 
 **엔티티 이름**: {entity_name}
 
@@ -571,24 +722,25 @@ class Stage3HybridScoring:
 {score_guidance}
 
 **평가 기준**:
-1. 엔티티 이름과 개념의 **의미적 일치도**를 최우선으로 평가하세요.
+1. 엔티티 이름과 concept_name의 **의미적 일치도**를 최우선으로 평가하세요.
 2. 의료 용어의 의미, 컨텍스트, 도메인 적합성을 고려하세요.
-3. **중요**: 반드시 같은 레벨이거나 상위 레벨의 개념으로만 매핑되어야 합니다. 
-   - 하위 개념(sub-concept)으로 매핑되면 안 됩니다.
+3. **중요**: 무조건 같은 레벨에 매핑되어야하며, 차선으로 상위 레벨의 concept으로 매핑 가능합니다.
+   - 하위 concept(sub-concept)으로 매핑되면 안 됩니다.
    - 예: "고혈압"은 "본태성 고혈압"이 아닌 "고혈압"이나 "고혈압 질환"으로 매핑
-4. 완전히 다른 의미의 개념은 0점 처리하세요.
+   - 예: "cardiac troponin"은 "troponin i"나 "troponin t"가 아닌 "troponin measurement"로 매핑
+4. 완전히 다른 의미의 concept은 0점 처리하세요.
 
 **출력 형식** (JSON):
 {{
   "best_match": {{
-    "concept_id": "가장 적합한 후보의 개념 ID",
+    "concept_id": "가장 적합한 후보의 concept ID",
     "reasoning": "선택 이유 (한국어로 간단히)"
   }},
   "rankings": [
     {{
-      "concept_id": "개념 ID",
+      "concept_id": "concept ID",
       "rank": 1,
-      "score": 0.0~1.0,
+      "score": 0~5,
       "reasoning": "평가 이유"
     }},
     ...
