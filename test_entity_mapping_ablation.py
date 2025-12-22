@@ -21,10 +21,10 @@ from tqdm import tqdm
 import time
 import json
 
-sys.path.append('/home/work/skku/hyo/omop-mapper/src')
+sys.path.append('/home/work/skku/hyo/MapOMOP/src')
 
-from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
-from omop_mapper.elasticsearch_client import ElasticsearchClient
+from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
+from MapOMOP.elasticsearch_client import ElasticsearchClient
 
 
 # 6가지 테스트 조건 정의
@@ -635,7 +635,7 @@ def main():
     # ============================================================
     # 설정
     # ============================================================
-    CSV_PATH = "/home/work/skku/hyo/omop-mapper/data/mapping_test_snuh_top10k.csv"
+    CSV_PATH = "/home/work/skku/hyo/MapOMOP/data/mapping_test_snuh_top10k.csv"
     SAMPLE_SIZE = 1000  # 샘플 크기
     RANDOM_STATE = 42   # 랜덤 시드 (모든 테스트에서 동일한 데이터 사용)
     

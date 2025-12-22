@@ -9,10 +9,10 @@ from openpyxl.styles import Font, Alignment, PatternFill
 from tqdm import tqdm
 import time
 
-sys.path.append('/home/work/skku/hyo/omop-mapper/src')
+sys.path.append('/home/work/skku/hyo/MapOMOP/src')
 
-from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
-from omop_mapper.elasticsearch_client import ElasticsearchClient
+from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
+from MapOMOP.elasticsearch_client import ElasticsearchClient
 
 class SNUHEntityMappingTester:
     def __init__(self, log_dir: str = "test_logs_snuh", scoring_mode: str = "hybrid"):
@@ -75,19 +75,19 @@ class SNUHEntityMappingTester:
         self.logger.addHandler(console_handler)
         
         # API 로거들도 파일에 기록
-        api_logger = logging.getLogger('omop_mapper.entity_mapping_api')
+        api_logger = logging.getLogger('MapOMOP.entity_mapping_api')
         api_logger.setLevel(logging.INFO)
         api_logger.addHandler(file_handler)
         
-        stage1_logger = logging.getLogger('omop_mapper.mapping_stages.stage1_candidate_retrieval')
+        stage1_logger = logging.getLogger('MapOMOP.mapping_stages.stage1_candidate_retrieval')
         stage1_logger.setLevel(logging.INFO)
         stage1_logger.addHandler(file_handler)
         
-        stage2_logger = logging.getLogger('omop_mapper.mapping_stages.stage2_standard_collection')
+        stage2_logger = logging.getLogger('MapOMOP.mapping_stages.stage2_standard_collection')
         stage2_logger.setLevel(logging.INFO)
         stage2_logger.addHandler(file_handler)
         
-        stage3_logger = logging.getLogger('omop_mapper.mapping_stages.stage3_hybrid_scoring')
+        stage3_logger = logging.getLogger('MapOMOP.mapping_stages.stage3_hybrid_scoring')
         stage3_logger.setLevel(logging.INFO)
         stage3_logger.addHandler(file_handler)
         
@@ -671,7 +671,7 @@ def main():
     tester = SNUHEntityMappingTester(scoring_mode=SCORING_MODE)
     
     # SNUH 데이터 경로
-    csv_path = "/home/work/skku/hyo/omop-mapper/data/mapping_test_snuh.csv"
+    csv_path = "/home/work/skku/hyo/MapOMOP/data/mapping_test_snuh.csv"
     
     # Vocabulary 필터링 설정 (SNOMED와 LOINC만 테스트)
     # None으로 설정하면 모든 vocabulary를 테스트

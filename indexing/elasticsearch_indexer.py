@@ -175,18 +175,18 @@ class ElasticsearchIndexer:
         mapping["settings"] = self.INDEX_SETTINGS.copy()
         
         # Add embedding field if enabled
-            if self.include_embeddings:
+        if self.include_embeddings:
             embedding_field = {
-                        "type": "dense_vector",
-                        "dims": 768,
-                        "index": True,
-                        "similarity": "cosine"
-                    }
-            
-            if "synonym" in self.index_name.lower():
-                mapping["mappings"]["properties"]["concept_synonym_embedding"] = embedding_field
-            elif "relationship" not in self.index_name.lower():
-                mapping["mappings"]["properties"]["concept_embedding"] = embedding_field
+                    "type": "dense_vector",
+                    "dims": 768,
+                    "index": True,
+                    "similarity": "cosine"
+            }
+        
+        if "synonym" in self.index_name.lower():
+            mapping["mappings"]["properties"]["concept_synonym_embedding"] = embedding_field
+        elif "relationship" not in self.index_name.lower():
+            mapping["mappings"]["properties"]["concept_embedding"] = embedding_field
         
         return mapping
     

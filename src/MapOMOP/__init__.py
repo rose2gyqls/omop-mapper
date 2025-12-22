@@ -1,5 +1,5 @@
 """
-OMOP Mapper
+MapOMOP
 
 A 3-stage medical entity mapping system for OMOP CDM.
 
@@ -9,7 +9,7 @@ Stages:
     3. Hybrid Scoring: LLM or embedding-based final ranking
 
 Usage:
-    from omop_mapper import EntityMappingAPI, EntityInput, DomainID
+    from MapOMOP import EntityMappingAPI, EntityInput, DomainID
     
     api = EntityMappingAPI()
     entity = EntityInput(entity_name="aspirin", domain_id=DomainID.DRUG)

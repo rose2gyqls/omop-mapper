@@ -10,10 +10,10 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from tqdm import tqdm
 import time
 
-sys.path.append('/home/work/skku/hyo/omop-mapper/src')
+sys.path.append('/home/work/skku/hyo/MapOMOP/src')
 
-from omop_mapper.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
-from omop_mapper.elasticsearch_client import ElasticsearchClient
+from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
+from MapOMOP.elasticsearch_client import ElasticsearchClient
 
 class EntityMappingTester:
     def __init__(self, log_dir: str = "test_logs", scoring_mode: str = "llm", include_stage1_scores: bool = False):
@@ -80,19 +80,19 @@ class EntityMappingTester:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
         
-        api_logger = logging.getLogger('omop_mapper.entity_mapping_api')
+        api_logger = logging.getLogger('MapOMOP.entity_mapping_api')
         api_logger.setLevel(logging.INFO)
         api_logger.addHandler(file_handler)
         
-        stage1_logger = logging.getLogger('omop_mapper.mapping_stages.stage1_candidate_retrieval')
+        stage1_logger = logging.getLogger('MapOMOP.mapping_stages.stage1_candidate_retrieval')
         stage1_logger.setLevel(logging.INFO)
         stage1_logger.addHandler(file_handler)
         
-        stage2_logger = logging.getLogger('omop_mapper.mapping_stages.stage2_standard_collection')
+        stage2_logger = logging.getLogger('MapOMOP.mapping_stages.stage2_standard_collection')
         stage2_logger.setLevel(logging.INFO)
         stage2_logger.addHandler(file_handler)
         
-        stage3_logger = logging.getLogger('omop_mapper.mapping_stages.stage3_hybrid_scoring')
+        stage3_logger = logging.getLogger('MapOMOP.mapping_stages.stage3_hybrid_scoring')
         stage3_logger.setLevel(logging.INFO)
         stage3_logger.addHandler(file_handler)
         

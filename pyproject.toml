@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "omop-mapper"
+name = "MapOMOP"
 version = "1.0.0"
 description = "OMOP CDM Entity Mapping API"
 authors = ["rose <hyobinkim@gmail.com>"]
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 packages = [
-    {include = "omop_mapper", from = "src"}
+    {include = "MapOMOP", from = "src"}
 ]
 
 [tool.poetry.dependencies]
@@ -52,7 +52,7 @@ pre-commit = "^2.0.0"
 ipykernel = "^6.30.1"
 
 [tool.poetry.scripts]
-omop-mapper = "omop_mapper.cli:main"
+mapomop = "MapOMOP.cli:main"
 
 [build-system]
 requires = ["poetry-core"]
@@ -80,7 +80,7 @@ extend-exclude = '''
 profile = "black"
 multi_line_output = 3
 line_length = 88
-known_first_party = ["omop_mapper"]
+known_first_party = ["MapOMOP"]
 
 [tool.mypy]
 python_version = "3.8"
@@ -105,7 +105,7 @@ python_functions = ["test_*"]
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=src/omop_mapper",
+    "--cov=src/MapOMOP",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",

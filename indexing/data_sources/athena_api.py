@@ -77,7 +77,7 @@ class AthenaAPIDataSource(BaseDataSource):
         
         session.headers.update({
             'Accept': 'application/json',
-            'User-Agent': 'OMOP-Mapper/1.0'
+            'User-Agent': 'MapOMOP/1.0'
         })
         
         return session
