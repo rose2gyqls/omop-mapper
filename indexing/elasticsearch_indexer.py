@@ -1,180 +1,32 @@
 """
-Elasticsearch 인덱서 모듈
+Elasticsearch Indexer Module
 
-OMOP CDM CONCEPT 데이터를 Elasticsearch에 인덱싱하는 기능을 제공합니다.
+Provides functionality to index OMOP CDM data into Elasticsearch.
+Supports CONCEPT, CONCEPT_RELATIONSHIP, and CONCEPT_SYNONYM tables.
 """
 
 import logging
-from datetime import datetime
+import hashlib
 from typing import Dict, List, Optional, Any
+
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
-import json
 
 
-class ConceptElasticsearchIndexer:
-    """CONCEPT 데이터를 위한 Elasticsearch 인덱서"""
+class ElasticsearchIndexer:
+    """Elasticsearch indexer for OMOP CDM data."""
     
-    def __init__(
-        self,
-        es_host: str = "localhost",
-        es_port: int = 9200,
-        es_scheme: str = "http",
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        index_name: str = "concepts",
-        include_embeddings: bool = True
-    ):
-        """
-        Elasticsearch 인덱서 초기화
-        
-        Args:
-            es_host: Elasticsearch 호스트
-            es_port: Elasticsearch 포트
-            es_scheme: 연결 스키마 (http/https)
-            username: 사용자명 (선택사항)
-            password: 비밀번호 (선택사항)
-            index_name: 인덱스명
-        """
-        self.index_name = index_name
-        self.include_embeddings = include_embeddings
-        
-        # Elasticsearch 클라이언트 설정
-        try:
-            if username and password:
-                # 인증이 필요한 경우
-                self.es = Elasticsearch(
-                    hosts=[{"host": es_host, "port": es_port, "scheme": es_scheme}],
-                    basic_auth=(username, password),
-                    request_timeout=120,
-                    retry_on_timeout=True,
-                    max_retries=3
-                )
-            else:
-                # 인증이 없는 경우 (개발/테스트 환경)
-                self.es = Elasticsearch(
-                    hosts=[{"host": es_host, "port": es_port, "scheme": es_scheme}],
-                    request_timeout=120,
-                    retry_on_timeout=True,
-                    max_retries=3
-                )
-        except Exception as e:
-            # 호환성을 위한 fallback
-            try:
-                self.es = Elasticsearch([f"{es_scheme}://{es_host}:{es_port}"])
-            except Exception as e2:
-                raise ConnectionError(f"Elasticsearch 클라이언트 생성 실패: {e}, fallback 실패: {e2}")
-        
-        # 연결 테스트
-        if not self.es.ping():
-            raise ConnectionError("Elasticsearch 서버에 연결할 수 없습니다.")
-            
-        logging.info(f"Elasticsearch 연결 성공: {es_host}:{es_port}")
-    
-
-    def create_index(self, delete_if_exists: bool = False) -> bool:
-        """
-        CONCEPT 인덱스 생성
-        
-        Args:
-            delete_if_exists: 기존 인덱스가 있을 경우 삭제 여부
-            
-        Returns:
-            인덱스 생성 성공 여부
-        """
-        try:
-            # 기존 인덱스 확인 및 삭제
-            if self.es.indices.exists(index=self.index_name):
-                if delete_if_exists:
-                    logging.info(f"기존 인덱스 삭제 중: {self.index_name}")
-                    self.es.indices.delete(index=self.index_name)
-                else:
-                    logging.info(f"인덱스가 이미 존재합니다: {self.index_name}")
-                    return True
-            
-            # 인덱스 매핑 설정 (인덱스 이름에 따라 다른 매핑 적용)
-            if "relationship" in self.index_name.lower():
-                # CONCEPT_RELATIONSHIP 인덱스 매핑
-                index_mapping = {
-                    "mappings": {
-                        "properties": {
-                            "concept_id_1": {"type": "keyword"},
-                            "concept_id_2": {"type": "keyword"},
-                            "relationship_id": {"type": "keyword"},
-                            "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
-                            "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
-                            "invalid_reason": {"type": "keyword"}
-                        }
-                    },
-                    "settings": {
-                        "number_of_shards": 3,
-                        "number_of_replicas": 5,
-                        "refresh_interval": "30s",
-                        "index.write.wait_for_active_shards": "1",
-                        "index.max_result_window": 50000
-                    }
-                }
-            elif "synonym" in self.index_name.lower():
-                # CONCEPT_SYNONYM 인덱스 매핑
-                index_mapping = {
-                    "mappings": {
-                        "properties": {
-                            "concept_id": {"type": "keyword"},
-                            "concept_synonym_name": {
-                                "type": "text",
-                                "fields": {
-                                    "keyword": {
-                                        "type": "keyword"
-                                    },
-                                    "trigram": {
-                                        "type": "text",
-                                        "analyzer": "trigram_analyzer"
-                                    }
-                                }
-                            },
-                            "language_concept_id": {"type": "keyword"}
-                        }
-                    },
-                    "settings": {
-                        "number_of_shards": 3,
-                        "number_of_replicas": 5,
-                        "refresh_interval": "30s",
-                        "index.write.wait_for_active_shards": "1",
-                        "index.max_result_window": 50000,
-                        "analysis": {
-                            "analyzer": {
-                                "trigram_analyzer": {
-                                    "type": "custom",
-                                    "tokenizer": "standard",
-                                    "filter": ["lowercase", "trigram_filter"]
-                                }
-                            },
-                            "filter": {
-                                "trigram_filter": {
-                                    "type": "ngram",
-                                    "min_gram": 4,
-                                    "max_gram": 5
-                                }
-                            }
-                        }
-                    }
-                }
-            else:
-                # CONCEPT 인덱스 매핑
-                index_mapping = {
+    # Index mapping configurations
+    MAPPINGS = {
+        'concept': {
                     "mappings": {
                         "properties": {
                             "concept_id": {"type": "keyword"},
                             "concept_name": {
                                 "type": "text",
                                 "fields": {
-                                    "keyword": {
-                                        "type": "keyword"
-                                    },
-                                    "trigram": {
-                                        "type": "text",
-                                        "analyzer": "trigram_analyzer"
-                                    }
+                            "keyword": {"type": "keyword"},
+                            "trigram": {"type": "text", "analyzer": "trigram_analyzer"}
                                 }
                             },
                             "domain_id": {"type": "keyword"},
@@ -185,9 +37,40 @@ class ConceptElasticsearchIndexer:
                             "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
                             "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
                             "invalid_reason": {"type": "keyword"}
+                }
+            }
+        },
+        'concept-relationship': {
+            "mappings": {
+                "properties": {
+                    "concept_id_1": {"type": "keyword"},
+                    "concept_id_2": {"type": "keyword"},
+                    "relationship_id": {"type": "keyword"},
+                    "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
+                    "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
+                    "invalid_reason": {"type": "keyword"}
+                }
+            }
+        },
+        'concept-synonym': {
+            "mappings": {
+                "properties": {
+                    "concept_id": {"type": "keyword"},
+                    "concept_synonym_name": {
+                        "type": "text",
+                        "fields": {
+                            "keyword": {"type": "keyword"},
+                            "trigram": {"type": "text", "analyzer": "trigram_analyzer"}
                         }
                     },
-                    "settings": {
+                    "language_concept_id": {"type": "keyword"}
+                }
+            }
+        }
+    }
+    
+    # Common index settings
+    INDEX_SETTINGS = {
                         "number_of_shards": 3,
                         "number_of_replicas": 5,
                         "refresh_interval": "30s",
@@ -210,173 +93,240 @@ class ConceptElasticsearchIndexer:
                             }
                         }
                     }
-                }
-
-            # 임베딩을 포함하는 경우에만 매핑 추가
-            if self.include_embeddings:
-                if "synonym" in self.index_name.lower():
-                    # CONCEPT_SYNONYM 인덱스의 임베딩 필드
-                    index_mapping["mappings"]["properties"]["concept_synonym_embedding"] = {
-                        "type": "dense_vector",
-                        "dims": 768,
-                        "index": True,
-                        "similarity": "cosine"
-                    }
-                else:
-                    # CONCEPT 인덱스의 임베딩 필드
-                    index_mapping["mappings"]["properties"]["concept_embedding"] = {
-                        "type": "dense_vector",
-                        "dims": 768,
-                        "index": True,
-                        "similarity": "cosine"
-                    }
-            
-            # 인덱스 생성
-            self.es.indices.create(index=self.index_name, body=index_mapping)
-            logging.info(f"인덱스 생성 완료: {self.index_name}")
-            
-            # 인덱스 상태 확인
-            import time
-            time.sleep(2)  # 간단한 대기
+    
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 9200,
+        scheme: str = "http",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        index_name: str = "concept",
+        include_embeddings: bool = True
+    ):
+        """
+        Initialize Elasticsearch indexer.
+        
+        Args:
+            host: Elasticsearch host
+            port: Elasticsearch port
+            scheme: Connection scheme (http/https)
+            username: Username for authentication
+            password: Password for authentication
+            index_name: Target index name
+            include_embeddings: Whether to include vector embeddings
+        """
+        self.index_name = index_name
+        self.include_embeddings = include_embeddings
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Create Elasticsearch client
+        self.es = self._create_client(host, port, scheme, username, password)
+        
+        # Test connection
+        if not self.es.ping():
+            raise ConnectionError(f"Failed to connect to Elasticsearch at {host}:{port}")
+        
+        self.logger.info(f"Connected to Elasticsearch at {host}:{port}")
+    
+    def _create_client(
+        self,
+        host: str,
+        port: int,
+        scheme: str,
+        username: Optional[str],
+        password: Optional[str]
+    ) -> Elasticsearch:
+        """Create Elasticsearch client with retry logic."""
+        try:
+            if username and password:
+                return Elasticsearch(
+                    hosts=[{"host": host, "port": port, "scheme": scheme}],
+                    basic_auth=(username, password),
+                    request_timeout=120,
+                    retry_on_timeout=True,
+                    max_retries=3
+                )
+            else:
+                return Elasticsearch(
+                    hosts=[{"host": host, "port": port, "scheme": scheme}],
+                    request_timeout=120,
+                    retry_on_timeout=True,
+                    max_retries=3
+                )
+        except Exception as e:
+            # Fallback for older elasticsearch-py versions
             try:
-                health = self.es.cluster.health(index=self.index_name, wait_for_status="yellow", timeout="10s")
-                logging.info(f"인덱스 상태: {health['status']}")
+                return Elasticsearch([f"{scheme}://{host}:{port}"])
+            except Exception as e2:
+                raise ConnectionError(f"Failed to create ES client: {e}, fallback failed: {e2}")
+    
+    def _get_index_mapping(self) -> Dict:
+        """Get appropriate mapping for the index type."""
+        # Determine index type from name
+        if "relationship" in self.index_name.lower():
+            mapping = self.MAPPINGS['concept-relationship'].copy()
+        elif "synonym" in self.index_name.lower():
+            mapping = self.MAPPINGS['concept-synonym'].copy()
+        else:
+            mapping = self.MAPPINGS['concept'].copy()
+        
+        # Add settings
+        mapping["settings"] = self.INDEX_SETTINGS.copy()
+        
+        # Add embedding field if enabled
+            if self.include_embeddings:
+            embedding_field = {
+                        "type": "dense_vector",
+                        "dims": 768,
+                        "index": True,
+                        "similarity": "cosine"
+                    }
+            
+            if "synonym" in self.index_name.lower():
+                mapping["mappings"]["properties"]["concept_synonym_embedding"] = embedding_field
+            elif "relationship" not in self.index_name.lower():
+                mapping["mappings"]["properties"]["concept_embedding"] = embedding_field
+        
+        return mapping
+    
+    def create_index(self, delete_if_exists: bool = False) -> bool:
+        """
+        Create Elasticsearch index.
+        
+        Args:
+            delete_if_exists: Delete existing index if it exists
+            
+        Returns:
+            True if index was created successfully
+        """
+        try:
+            # Check if index exists
+            if self.es.indices.exists(index=self.index_name):
+                if delete_if_exists:
+                    self.logger.info(f"Deleting existing index: {self.index_name}")
+                    self.es.indices.delete(index=self.index_name)
+                else:
+                    self.logger.info(f"Index already exists: {self.index_name}")
+                    return True
+            
+            # Create index with mapping
+            mapping = self._get_index_mapping()
+            self.es.indices.create(index=self.index_name, body=mapping)
+            self.logger.info(f"Index created: {self.index_name}")
+            
+            # Wait for index to be ready
+            import time
+            time.sleep(2)
+            
+            try:
+                health = self.es.cluster.health(
+                    index=self.index_name, 
+                    wait_for_status="yellow", 
+                    timeout="10s"
+                )
+                self.logger.info(f"Index health: {health['status']}")
             except Exception as e:
-                logging.warning(f"인덱스 상태 확인 중 오류 (계속 진행): {e}")
+                self.logger.warning(f"Could not verify index health: {e}")
             
             return True
             
         except Exception as e:
-            logging.error(f"인덱스 생성 실패: {e}")
+            self.logger.error(f"Failed to create index: {e}")
             return False
     
-    def index_concepts(
+    def _generate_doc_id(self, doc: Dict) -> str:
+        """Generate document ID based on index type."""
+        if "relationship" in self.index_name.lower():
+            unique_str = f"{doc.get('concept_id_1', '')}_{doc.get('concept_id_2', '')}_{doc.get('relationship_id', '')}"
+            return hashlib.md5(unique_str.encode()).hexdigest()
+        elif "synonym" in self.index_name.lower():
+            unique_str = f"{doc.get('concept_id', '')}_{doc.get('concept_synonym_name', '')}"
+            return hashlib.md5(unique_str.encode()).hexdigest()
+        else:
+            return str(doc.get("concept_id", ""))
+    
+    def index_documents(
         self,
-        concepts_data: List[Dict[str, Any]],
-        batch_size: int = 1000,
-        show_progress: bool = True,
-        pipeline: Optional[str] = None,
-        lowercase_concept_name: bool = False
+        documents: List[Dict[str, Any]],
+        batch_size: int = 500,
+        show_progress: bool = False
     ) -> bool:
         """
-        CONCEPT 데이터를 Elasticsearch에 인덱싱
+        Index documents into Elasticsearch.
         
         Args:
-            concepts_data: 인덱싱할 CONCEPT 데이터 리스트
-            batch_size: 배치 크기
-            show_progress: 진행률 표시 여부
-            pipeline: Ingest Pipeline 이름 (선택사항)
-            lowercase_concept_name: concept_name을 소문자로 변환 여부
+            documents: List of documents to index
+            batch_size: Batch size for bulk indexing
+            show_progress: Whether to show progress logs
             
         Returns:
-            인덱싱 성공 여부
+            True if indexing was successful (>80% success rate)
         """
-        if not concepts_data:
-            logging.warning("인덱싱할 데이터가 없습니다.")
+        if not documents:
+            self.logger.warning("No documents to index")
             return True
         
         try:
-            # 배치 단위로 인덱싱
             total_indexed = 0
-            failed_docs = []
-            error_count = 0
+            failed_count = 0
             
-            for i in range(0, len(concepts_data), batch_size):
-                batch_data = concepts_data[i:i + batch_size]
+            for i in range(0, len(documents), batch_size):
+                batch = documents[i:i + batch_size]
                 
-                # Elasticsearch bulk 형식으로 변환
+                # Prepare bulk actions
                 actions = []
-                for doc in batch_data:
-                    # concept_name을 소문자로 변환 (옵션)
-                    if lowercase_concept_name and "concept_name" in doc and doc["concept_name"]:
-                        doc = doc.copy()  # 원본 데이터 보존
-                        doc["concept_name"] = doc["concept_name"].lower()
-                    # 임베딩 비활성화 시 필드 제거
-                    if not self.include_embeddings and "concept_embedding" in doc:
+                for doc in batch:
+                    # Remove embedding field if disabled
+                    if not self.include_embeddings:
                         doc = doc.copy()
                         doc.pop("concept_embedding", None)
+                        doc.pop("concept_synonym_embedding", None)
                     
-                    # 문서 ID 생성 (인덱스 타입에 따라 다르게)
-                    if "relationship" in self.index_name.lower():
-                        # CONCEPT_RELATIONSHIP의 경우 고유 ID 생성
-                        import hashlib
-                        unique_string = f"{doc.get('concept_id_1', '')}_{doc.get('concept_id_2', '')}_{doc.get('relationship_id', '')}"
-                        doc_id = hashlib.md5(unique_string.encode()).hexdigest()
-                    elif "synonym" in self.index_name.lower():
-                        # CONCEPT_SYNONYM의 경우 고유 ID 생성
-                        import hashlib
-                        unique_string = f"{doc['concept_id']}_{doc.get('concept_synonym_name', '')}"
-                        doc_id = hashlib.md5(unique_string.encode()).hexdigest()
-                    else:
-                        # CONCEPT의 경우 concept_id 사용
-                        doc_id = doc["concept_id"]
-                    
-                    action = {
+                    actions.append({
                         "_index": self.index_name,
-                        "_id": doc_id,
+                        "_id": self._generate_doc_id(doc),
                         "_source": doc
-                    }
-                    actions.append(action)
+                    })
                 
-                # 배치 인덱싱 실행
-                bulk_params = {
-                    "client": self.es,
-                    "actions": actions,
-                    "index": self.index_name,
-                    "chunk_size": min(batch_size, 50),  # 임베딩 포함 시 배치 크기 축소
-                    "request_timeout": 300,             # 타임아웃 증가
-                    "raise_on_error": False,
-                    "raise_on_exception": False,
-                    "max_retries": 3                    # 재시도 횟수 증가
-                }
-                
-                # Ingest Pipeline이 지정된 경우 추가
-                if pipeline:
-                    for action in actions:
-                        action["pipeline"] = pipeline
-                
+                # Execute bulk indexing
                 try:
-                    success_count, failed_items = bulk(**bulk_params)
-                    total_indexed += success_count
+                    success, failed = bulk(
+                        client=self.es,
+                        actions=actions,
+                        index=self.index_name,
+                        chunk_size=min(batch_size, 50),
+                        request_timeout=300,
+                        raise_on_error=False,
+                        raise_on_exception=False,
+                        max_retries=3
+                    )
+                    total_indexed += success
                     
-                    if failed_items:
-                        failed_docs.extend(failed_items)
-                        logging.warning(f"배치에서 {len(failed_items)}개 문서 인덱싱 실패")
-                        
-                        # 첫 번째 실패 원인만 로깅
-                        if failed_items:
-                            first_error = failed_items[0]
-                            if 'index' in first_error and 'error' in first_error['index']:
-                                error_info = first_error['index']['error']
-                                logging.warning(f"실패 원인: {error_info.get('type', 'unknown')} - {error_info.get('reason', 'unknown')}")
+                    if failed:
+                        failed_count += len(failed)
+                        if show_progress:
+                            self.logger.warning(f"Batch failed: {len(failed)} documents")
                             
-                except Exception as bulk_error:
-                    logging.error(f"Bulk 인덱싱 중 예외 발생: {bulk_error}")
-                    error_count += len(batch_data)
-                    continue
+                except Exception as e:
+                    self.logger.error(f"Bulk indexing error: {e}")
+                    failed_count += len(batch)
                 
                 if show_progress:
-                    progress = (i + batch_size) / len(concepts_data) * 100
-                    logging.info(f"인덱싱 진행률: {progress:.1f}% ({total_indexed}/{len(concepts_data)})")
+                    progress = (i + batch_size) / len(documents) * 100
+                    self.logger.info(f"Progress: {progress:.1f}% ({total_indexed}/{len(documents)})")
             
-            # 인덱스 새로고침
+            # Refresh index
             self.es.indices.refresh(index=self.index_name)
             
-            logging.info(f"인덱싱 완료: 총 {total_indexed}개 문서 인덱싱")
+            self.logger.info(f"Indexing complete: {total_indexed} documents indexed, {failed_count} failed")
             
-            if failed_docs:
-                logging.warning(f"실패한 문서 수: {len(failed_docs)}")
-                # 심각한 실패가 많은 경우에만 파일 저장
-                if len(failed_docs) > len(concepts_data) * 0.1:  # 10% 이상 실패시
-                    with open(f"failed_indexing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "w") as f:
-                        json.dump(failed_docs[:100], f, indent=2)  # 처음 100개만 저장
-            
-            # 성공한 문서가 80% 이상이면 성공으로 간주
-            success_rate = total_indexed / len(concepts_data) if concepts_data else 1.0
+            # Consider success if >80% indexed
+            success_rate = total_indexed / len(documents) if documents else 1.0
             return success_rate >= 0.8
             
         except Exception as e:
-            logging.error(f"인덱싱 중 오류 발생: {e}")
+            self.logger.error(f"Indexing error: {e}")
             return False
     
     def search_by_embedding(
@@ -386,106 +336,86 @@ class ConceptElasticsearchIndexer:
         min_score: float = 0.7
     ) -> List[Dict[str, Any]]:
         """
-        임베딩을 사용한 유사도 검색
+        Search using vector similarity.
         
         Args:
-            query_embedding: 쿼리 임베딩
-            size: 반환할 결과 수
-            min_score: 최소 유사도 점수
+            query_embedding: Query embedding vector
+            size: Number of results to return
+            min_score: Minimum similarity score
             
         Returns:
-            검색 결과 리스트
+            List of matching documents
         """
+        if not self.include_embeddings:
+            self.logger.warning("Embeddings disabled, cannot perform vector search")
+            return []
+        
         try:
-            if not hasattr(self, "include_embeddings") or not self.include_embeddings:
-                logging.warning("임베딩 비활성화 상태이므로 임베딩 검색을 건너뜁니다.")
-                return []
-            search_body = {
+            # Determine embedding field name
+            if "synonym" in self.index_name.lower():
+                field = "concept_synonym_embedding"
+            else:
+                field = "concept_embedding"
+            
+            query = {
                 "query": {
                     "script_score": {
                         "query": {"match_all": {}},
                         "script": {
-                            "source": "cosineSimilarity(params.query_vector, 'concept_embedding') + 1.0",
+                            "source": f"cosineSimilarity(params.query_vector, '{field}') + 1.0",
                             "params": {"query_vector": query_embedding}
                         }
                     }
                 },
-                "min_score": min_score + 1.0,  # script_score는 1.0을 더함
+                "min_score": min_score + 1.0,
                 "size": size
             }
             
-            response = self.es.search(index=self.index_name, body=search_body)
+            response = self.es.search(index=self.index_name, body=query)
             
             results = []
             for hit in response["hits"]["hits"]:
-                result = {
-                    "concept_id": hit["_source"]["concept_id"],
-                    "concept_name": hit["_source"]["concept_name"],
-                    "domain_id": hit["_source"]["domain_id"],
-                    "vocabulary_id": hit["_source"]["vocabulary_id"],
-                    "similarity_score": hit["_score"] - 1.0,  # 원래 점수로 복원
-                    "full_data": hit["_source"]
-                }
+                result = hit["_source"].copy()
+                result["_score"] = hit["_score"] - 1.0  # Restore original score
                 results.append(result)
             
             return results
             
         except Exception as e:
-            logging.error(f"임베딩 검색 중 오류 발생: {e}")
+            self.logger.error(f"Vector search error: {e}")
             return []
     
-    def search_concepts(
+    def search_by_text(
         self,
         query: str,
         size: int = 10,
-        search_type: str = "text",
-        embedder=None
+        field: str = None
     ) -> List[Dict[str, Any]]:
         """
-        개념 검색 (텍스트 또는 벡터 검색)
+        Search using text matching.
         
         Args:
-            query: 검색 쿼리
-            size: 반환할 결과 수
-            search_type: 검색 타입 ("text" 또는 "vector")
-            embedder: 벡터 검색용 임베더 (search_type="vector"일 때 필요)
+            query: Search query text
+            size: Number of results to return
+            field: Field to search (auto-detected if None)
             
         Returns:
-            검색 결과 리스트
+            List of matching documents
         """
         try:
-            if search_type == "vector" and embedder and self.include_embeddings:
-                # 벡터 검색
-                query_embedding = embedder.encode_texts([query])[0].tolist()
-                
-                # 인덱스 타입에 따라 다른 임베딩 필드 사용
-                embedding_field = "concept_synonym_embedding" if "synonym" in self.index_name.lower() else "concept_embedding"
-                
-                search_body = {
-                    "query": {
-                        "script_score": {
-                            "query": {"match_all": {}},
-                            "script": {
-                                "source": f"cosineSimilarity(params.query_vector, '{embedding_field}') + 1.0",
-                                "params": {"query_vector": query_embedding}
-                            }
-                        }
-                    },
-                    "size": size
-                }
+            # Determine search fields
+            if field:
+                fields = [field]
+            elif "synonym" in self.index_name.lower():
+                fields = ["concept_synonym_name^2", "concept_synonym_name.trigram"]
             else:
-                # 텍스트 검색
-                # 인덱스 타입에 따라 다른 검색 필드 사용
-                if "synonym" in self.index_name.lower():
-                    search_fields = ["concept_synonym_name^2", "concept_synonym_name.trigram"]
-                else:
-                    search_fields = ["concept_name^2", "concept_name.trigram"]
-                
-                search_body = {
+                fields = ["concept_name^2", "concept_name.trigram"]
+            
+            search_query = {
                     "query": {
                         "multi_match": {
                             "query": query,
-                            "fields": search_fields,
+                        "fields": fields,
                             "type": "best_fields",
                             "fuzziness": "AUTO"
                         }
@@ -493,47 +423,38 @@ class ConceptElasticsearchIndexer:
                     "size": size
                 }
             
-            response = self.es.search(index=self.index_name, body=search_body)
-            return response["hits"]["hits"]
+            response = self.es.search(index=self.index_name, body=search_query)
+            
+            return [hit["_source"] for hit in response["hits"]["hits"]]
             
         except Exception as e:
-            logging.error(f"검색 중 오류 발생: {e}")
+            self.logger.error(f"Text search error: {e}")
             return []
     
-    def get_index_stats(self) -> Dict[str, Any]:
-        """인덱스 통계 정보 반환"""
+    def get_stats(self) -> Dict[str, Any]:
+        """Get index statistics."""
         try:
             stats = self.es.indices.stats(index=self.index_name)
             return {
                 "document_count": stats["indices"][self.index_name]["total"]["docs"]["count"],
-                "store_size": stats["indices"][self.index_name]["total"]["store"]["size_in_bytes"],
+                "store_size_bytes": stats["indices"][self.index_name]["total"]["store"]["size_in_bytes"],
                 "index_name": self.index_name
             }
         except Exception as e:
-            logging.error(f"인덱스 통계 조회 실패: {e}")
+            self.logger.error(f"Failed to get stats: {e}")
             return {}
     
     def delete_index(self) -> bool:
-        """인덱스 삭제"""
+        """Delete the index."""
         try:
             if self.es.indices.exists(index=self.index_name):
                 self.es.indices.delete(index=self.index_name)
-                logging.info(f"인덱스 삭제 완료: {self.index_name}")
-                return True
-            else:
-                logging.info(f"삭제할 인덱스가 존재하지 않습니다: {self.index_name}")
+                self.logger.info(f"Index deleted: {self.index_name}")
                 return True
         except Exception as e:
-            logging.error(f"인덱스 삭제 실패: {e}")
+            self.logger.error(f"Failed to delete index: {e}")
             return False
 
 
-if __name__ == "__main__":
-    # 간단한 테스트
-    logging.basicConfig(level=logging.INFO)
-    indexer = ConceptElasticsearchIndexer(index_name="test_concepts")
-    print("Elasticsearch 인덱서 초기화 완료")
-    if indexer.es.ping():
-        print("Elasticsearch 연결 테스트 성공")
-    else:
-        print("Elasticsearch 연결 실패")
+# Backward compatibility alias
+ConceptElasticsearchIndexer = ElasticsearchIndexer

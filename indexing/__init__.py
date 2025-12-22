@@ -1,26 +1,23 @@
 """
-OMOP CONCEPT Elasticsearch 인덱싱 모듈
+OMOP CDM Indexing Module
 
-이 패키지는 OMOP CDM CONCEPT 데이터를 SapBERT 임베딩과 함께 
-Elasticsearch에 인덱싱하는 기능을 제공합니다.
+This module provides tools for indexing OMOP CDM data into Elasticsearch.
+Supports three data sources: local CSV, PostgreSQL, and Athena API.
 
-주요 기능:
-1. 표준 concepts 인덱스 생성 (concept_indexer_with_sapbert)
-2. concepts-small 인덱스 생성 (소문자 변환 포함)
-3. SapBERT 임베딩 생성
-4. Elasticsearch 인덱싱
+Components:
+    - data_sources: Data source adapters for different CDM sources
+    - elasticsearch_indexer: Elasticsearch indexing utilities
+    - sapbert_embedder: SapBERT embedding generator
+    - unified_indexer: Main indexer that orchestrates the indexing process
 """
 
-# 핵심 모듈
+from .elasticsearch_indexer import ElasticsearchIndexer
 from .sapbert_embedder import SapBERTEmbedder
-from .elasticsearch_indexer import ConceptElasticsearchIndexer
-from .concept_data_processor import ConceptDataProcessor
-
-__version__ = "2.1.0"
-__author__ = "hyo"
+from .unified_indexer import UnifiedIndexer, create_data_source
 
 __all__ = [
-    "SapBERTEmbedder",
-    "ConceptElasticsearchIndexer", 
-    "ConceptDataProcessor"
+    'ElasticsearchIndexer',
+    'SapBERTEmbedder',
+    'UnifiedIndexer',
+    'create_data_source'
 ]

@@ -1,3 +1,12 @@
+"""
+Stage 1: Candidate Retrieval
+
+Retrieves candidate concepts using multiple search strategies:
+- Lexical: Text-based search (exact match, phrase match, fuzzy)
+- Semantic: Vector-based search (SapBERT embeddings)
+- Combined: Hybrid search (text + vector + length similarity)
+"""
+
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -7,301 +16,204 @@ logger = logging.getLogger(__name__)
 
 
 class Stage1CandidateRetrieval:
-    """Stage 1: 후보군 추출 (Lexical 3 + Semantic 3 + Combined 3)"""
+    """Stage 1: Multi-strategy candidate retrieval."""
     
-    def __init__(self, es_client, has_sapbert: bool = True, use_lexical: bool = True):
+    # Threshold settings
+    LEXICAL_THRESHOLD = 5.0
+    SEMANTIC_THRESHOLD = 0.8
+    COMBINED_THRESHOLD = 5.0
+    
+    def __init__(
+        self,
+        es_client,
+        has_sapbert: bool = True,
+        use_lexical: bool = True
+    ):
         """
+        Initialize Stage 1.
+        
         Args:
-            es_client: Elasticsearch 클라이언트
-            has_sapbert: SapBERT 사용 가능 여부
-            use_lexical: Lexical 검색 사용 여부 (기본값: True)
-                - True: Lexical + Semantic + Combined 검색
-                - False: Semantic + Combined 검색만 (Lexical 제외)
+            es_client: Elasticsearch client
+            has_sapbert: Whether SapBERT is available
+            use_lexical: Whether to use lexical search
         """
         self.es_client = es_client
         self.has_sapbert = has_sapbert
         self.use_lexical = use_lexical
-        # Threshold 설정
-        self.lexical_threshold = 5.0
-        self.semantic_threshold = 0.8
-        self.combined_threshold = 5.0
     
     def retrieve_candidates(
-        self, 
-        entity_name: str, 
+        self,
+        entity_name: str,
         domain_id: str,
         entity_embedding: Optional[np.ndarray] = None,
-        es_index: str = "concept-small"
+        es_index: str = "concept"
     ) -> List[Dict[str, Any]]:
         """
-        각 도메인별로 다양한 검색 전략을 사용하여 후보군 추출
-        
-        **검색 전략**:
-        - Lexical: 텍스트 기반 검색 (최대 3개)
-        - Semantic: 벡터 기반 검색 (최대 3개, 임베딩이 있는 경우)
-        - Combined: 하이브리드 검색 (최대 3개, 임베딩이 있는 경우)
-        
-        **Threshold 필터링**:
-        - Lexical: {self.lexical_threshold} 이상
-        - Semantic: {self.semantic_threshold} 이상
-        - Combined: {self.combined_threshold} 이상
+        Retrieve candidates using multiple search strategies.
         
         Args:
-            entity_name: 엔티티 이름
-            domain_id: 검색할 도메인 ID (해당 도메인만 필터링)
-            entity_embedding: 엔티티 임베딩 벡터 (선택사항)
-            es_index: Elasticsearch 인덱스 이름
+            entity_name: Entity name to search
+            domain_id: Domain filter
+            entity_embedding: Entity embedding vector (optional)
+            es_index: Elasticsearch index name
             
         Returns:
-            List[Dict]: Threshold를 통과한 후보 리스트 (각 후보는 _search_type 필드 포함)
+            List of candidate hits with _search_type field
         """
-        search_mode = "Lexical + Semantic + Combined" if self.use_lexical else "Semantic + Combined"
-        logger.info("=" * 80)
-        logger.info(f"Stage 1: 후보군 추출 ({search_mode})")
-        logger.info(f"  엔티티: {entity_name}")
-        logger.info(f"  도메인: {domain_id}")
-        logger.info("=" * 80)
+        mode = "Lexical + Semantic + Combined" if self.use_lexical else "Semantic + Combined"
+        
+        logger.info("=" * 60)
+        logger.info(f"Stage 1: Candidate Retrieval ({mode})")
+        logger.info(f"  Entity: {entity_name}")
+        logger.info(f"  Domain: {domain_id}")
+        logger.info("=" * 60)
         
         all_candidates = []
-        lexical_results = []
-        lexical_results_filtered = []
         
-        # ===== 1. Lexical Analysis: 텍스트 기반 검색 =====
+        # 1. Lexical Search
+        lexical_filtered = []
         if self.use_lexical:
-            logger.info("\n📝 1-1. Lexical Analysis (텍스트 검색, threshold: {:.2f})".format(self.lexical_threshold))
-            lexical_results = self._perform_text_only_search(entity_name, domain_id, es_index, 3)
-            lexical_results_filtered = [hit for hit in lexical_results if hit['_score'] >= self.lexical_threshold]
-            logger.info(f"✅ Lexical: {len(lexical_results)}개 → {len(lexical_results_filtered)}개 (threshold 통과)")
+            logger.info(f"\n[1/3] Lexical Search (threshold: {self.LEXICAL_THRESHOLD})")
+            lexical_results = self._lexical_search(entity_name, domain_id, es_index, 3)
+            lexical_filtered = [h for h in lexical_results if h['_score'] >= self.LEXICAL_THRESHOLD]
             
-            for hit in lexical_results_filtered:
+            logger.info(f"  Results: {len(lexical_results)} -> {len(lexical_filtered)} (passed threshold)")
+            
+            for hit in lexical_filtered:
                 hit['_search_type'] = 'lexical'
                 all_candidates.append(hit)
-                source = hit['_source']
-                logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
         else:
-            logger.info("\n📝 1-1. Lexical Analysis - 건너뜀 (use_lexical=False)")
+            logger.info("\n[1/3] Lexical Search - Skipped (use_lexical=False)")
         
-        # ===== 2. Semantic Analysis: 벡터 기반 검색 =====
-        logger.info("\n🧠 1-2. Semantic Analysis (벡터 검색, threshold: {:.2f})".format(self.semantic_threshold))
-        semantic_results_filtered = []
+        # 2. Semantic Search
+        semantic_filtered = []
         if entity_embedding is not None:
-            semantic_results = self._perform_vector_search(entity_embedding, domain_id, es_index, 3)
-            semantic_results_filtered = [hit for hit in semantic_results if hit['_score'] >= self.semantic_threshold]
-            logger.info(f"✅ Semantic: {len(semantic_results)}개 → {len(semantic_results_filtered)}개 (threshold 통과)")
+            logger.info(f"\n[2/3] Semantic Search (threshold: {self.SEMANTIC_THRESHOLD})")
+            semantic_results = self._vector_search(entity_embedding, domain_id, es_index, 3)
+            semantic_filtered = [h for h in semantic_results if h['_score'] >= self.SEMANTIC_THRESHOLD]
             
-            for hit in semantic_results_filtered:
+            logger.info(f"  Results: {len(semantic_results)} -> {len(semantic_filtered)} (passed threshold)")
+            
+            for hit in semantic_filtered:
                 hit['_search_type'] = 'semantic'
                 all_candidates.append(hit)
-                source = hit['_source']
-                logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
         else:
-            logger.warning("⚠️ 임베딩 없음 - Semantic 검색 건너뜀")
+            logger.info("\n[2/3] Semantic Search - Skipped (no embedding)")
         
-        # ===== 3. Combined Score: 하이브리드 검색 =====
-        logger.info("\n🔄 1-3. Combined Score (하이브리드 검색, threshold: {:.2f})".format(self.combined_threshold))
-        combined_results_filtered = []
+        # 3. Combined/Hybrid Search
+        combined_filtered = []
+        logger.info(f"\n[3/3] Combined Search (threshold: {self.COMBINED_THRESHOLD})")
+        
         if entity_embedding is not None:
-            combined_results = self._perform_native_hybrid_search(
-                entity_name, entity_embedding, domain_id, es_index, 3
-            )
-            combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
+            combined_results = self._hybrid_search(entity_name, entity_embedding, domain_id, es_index, 3)
         else:
-            # 임베딩이 없으면 텍스트 검색 결과 재사용
-            combined_results = lexical_results[:3]
-            combined_results_filtered = [hit for hit in combined_results if hit['_score'] >= self.combined_threshold]
+            combined_results = lexical_filtered[:3] if self.use_lexical else []
         
-        logger.info(f"✅ Combined: {len(combined_results if entity_embedding is not None else lexical_results[:3])}개 → {len(combined_results_filtered)}개 (threshold 통과)")
-        for hit in combined_results_filtered:
+        combined_filtered = [h for h in combined_results if h['_score'] >= self.COMBINED_THRESHOLD]
+        
+        logger.info(f"  Results: {len(combined_results)} -> {len(combined_filtered)} (passed threshold)")
+        
+        for hit in combined_filtered:
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)
-            source = hit['_source']
-            logger.debug(f"  - {source.get('concept_name', 'N/A')} (ID: {source.get('concept_id', 'N/A')}) [점수: {hit['_score']:.4f}]")
         
-        # 최종 요약
-        logger.info("\n" + "=" * 80)
-        logger.info(f"📊 Stage 1 완료: 총 {len(all_candidates)}개 후보 추출")
+        # Summary
+        logger.info("\n" + "=" * 60)
+        logger.info(f"Stage 1 Complete: {len(all_candidates)} total candidates")
         if self.use_lexical:
-            logger.info(f"  - Lexical: {len(lexical_results_filtered)}개 (threshold: {self.lexical_threshold:.2f})")
-        else:
-            logger.info(f"  - Lexical: 건너뜀 (use_lexical=False)")
-        logger.info(f"  - Semantic: {len(semantic_results_filtered)}개 (threshold: {self.semantic_threshold:.2f})")
-        logger.info(f"  - Combined: {len(combined_results_filtered)}개 (threshold: {self.combined_threshold:.2f})")
-        logger.info("=" * 80)
+            logger.info(f"  - Lexical: {len(lexical_filtered)}")
+        logger.info(f"  - Semantic: {len(semantic_filtered)}")
+        logger.info(f"  - Combined: {len(combined_filtered)}")
+        logger.info("=" * 60)
         
         return all_candidates
-
-    def _perform_text_only_search(self, entity_name: str, domain_id: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
-        """
-        텍스트 기반 검색 수행 (Lexical Search)
-        
-        Args:
-            entity_name: 검색할 엔티티 이름
-            domain_id: 도메인 필터 (해당 도메인만 검색)
-            es_index: Elasticsearch 인덱스
-            top_k: 반환할 최대 결과 수
-            
-        Returns:
-            List[Dict]: 검색 결과 리스트
-        """
-        # Measurement 도메인의 경우 "Meas Value"도 포함 (OMOP CDM 특성)
+    
+    def _get_domain_filter(self, domain_id: str) -> Dict:
+        """Build domain filter query."""
+        # Handle Measurement domain (includes "Meas Value")
         if domain_id == "Measurement":
-            domain_filter = {
-                "terms": {
-                    "domain_id": ["Measurement", "Meas Value"]
-                }
-            }
-        else:
-            domain_filter = {
-                "term": {
-                    "domain_id": domain_id
-                }
-            }
-        
-        body = {
+            return {"terms": {"domain_id": ["Measurement", "Meas Value"]}}
+        return {"term": {"domain_id": domain_id}}
+    
+    def _lexical_search(
+        self,
+        entity_name: str,
+        domain_id: str,
+        es_index: str,
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """Perform text-based search."""
+        query = {
             "size": top_k,
             "query": {
                 "bool": {
-                    "must": [
-                        {
-                            "bool": {
-                                "should": [
-                                    {
-                                        "term": {
-                                            "concept_name.keyword": {
-                                                "value": entity_name,
-                                                "boost": 3.0
-                                            }
-                                        }
-                                    },
-                                    {
-                                        "match_phrase": {
-                                            "concept_name": {
-                                                "query": entity_name,
-                                                "boost": 2.5
-                                            }
-                                        }
-                                    },
-                                    {
-                                        "match": {
-                                            "concept_name": {
-                                                "query": entity_name,
-                                                "boost": 2.0
-                                            }
-                                        }
-                                    }
-                                ],
-                                "minimum_should_match": 1
-                            }
+                    "must": [{
+                        "bool": {
+                            "should": [
+                                {"term": {"concept_name.keyword": {"value": entity_name, "boost": 3.0}}},
+                                {"match_phrase": {"concept_name": {"query": entity_name, "boost": 2.5}}},
+                                {"match": {"concept_name": {"query": entity_name, "boost": 2.0}}}
+                            ],
+                            "minimum_should_match": 1
                         }
-                    ],
-                    "filter": [
-                        domain_filter
-                    ]
+                    }],
+                    "filter": [self._get_domain_filter(domain_id)]
                 }
             }
         }
         
         try:
-            response = self.es_client.es_client.search(index=es_index, body=body)
-            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
-            return hits
+            response = self.es_client.es_client.search(index=es_index, body=query)
+            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
         except Exception as e:
-            logger.error(f"텍스트 검색 실패: {e}")
+            logger.error(f"Lexical search failed: {e}")
             return []
     
-    def _perform_vector_search(self, entity_embedding: np.ndarray, domain_id: str, es_index: str, top_k: int) -> List[Dict[str, Any]]:
-        """
-        벡터 기반 검색 수행 (Semantic Search)
-        
-        Args:
-            entity_embedding: 엔티티의 임베딩 벡터 (SapBERT 등)
-            domain_id: 도메인 필터 (해당 도메인만 검색)
-            es_index: Elasticsearch 인덱스
-            top_k: 반환할 최대 결과 수
-            
-        Returns:
-            List[Dict]: 검색 결과 리스트
-        """
-        embedding_list = entity_embedding.tolist()
-        
-        # Measurement 도메인의 경우 "Meas Value"도 포함 (OMOP CDM 특성)
-        if domain_id == "Measurement":
-            domain_filter = {
-                "terms": {
-                    "domain_id": ["Measurement", "Meas Value"]
-                }
-            }
-        else:
-            domain_filter = {
-                "term": {
-                    "domain_id": domain_id
-                }
-            }
-        
-        vector_query = {
+    def _vector_search(
+        self,
+        entity_embedding: np.ndarray,
+        domain_id: str,
+        es_index: str,
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """Perform vector-based search."""
+        query = {
             "knn": {
                 "field": "concept_embedding",
-                "query_vector": embedding_list,
+                "query_vector": entity_embedding.tolist(),
                 "k": top_k,
                 "num_candidates": top_k * 3,
-                "filter": domain_filter
+                "filter": self._get_domain_filter(domain_id)
             },
             "size": top_k,
             "_source": True
         }
         
         try:
-            response = self.es_client.es_client.search(index=es_index, body=vector_query)
-            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
-            return hits
+            response = self.es_client.es_client.search(index=es_index, body=query)
+            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
         except Exception as e:
-            logger.error(f"벡터 검색 실패: {e}")
+            logger.error(f"Vector search failed: {e}")
             return []
     
-    def _perform_native_hybrid_search(
-        self, 
-        entity_name: str, 
+    def _hybrid_search(
+        self,
+        entity_name: str,
         entity_embedding: np.ndarray,
         domain_id: str,
-        es_index: str, 
+        es_index: str,
         top_k: int
     ) -> List[Dict[str, Any]]:
-        """
-        하이브리드 검색 수행 (텍스트 + 벡터 + 길이 유사도)
-        
-        Args:
-            entity_name: 검색할 엔티티 이름
-            entity_embedding: 엔티티 임베딩 벡터
-            domain_id: 도메인 필터
-            es_index: Elasticsearch 인덱스
-            top_k: 반환할 최대 결과 수
-            
-        Returns:
-            List[Dict]: 검색 결과 리스트
-        """
-        embedding_list = entity_embedding.tolist()
+        """Perform hybrid search (text + vector + length similarity)."""
         entity_length = len(entity_name.strip())
         scale_len = max(8.0, entity_length * 0.8)
+        domain_filter = self._get_domain_filter(domain_id)
         
-        # Measurement 도메인의 경우 "Meas Value"도 포함 (OMOP CDM 특성)
-        if domain_id == "Measurement":
-            domain_filter = {
-                "terms": {
-                    "domain_id": ["Measurement", "Meas Value"]
-                }
-            }
-        else:
-            domain_filter = {
-                "term": {
-                    "domain_id": domain_id
-                }
-            }
-        
-        body = {
+        query = {
             "size": top_k,
             "knn": {
                 "field": "concept_embedding",
-                "query_vector": embedding_list,
+                "query_vector": entity_embedding.tolist(),
                 "k": top_k * 2,
                 "num_candidates": top_k * 5,
                 "boost": 0.6,
@@ -311,64 +223,35 @@ class Stage1CandidateRetrieval:
                 "function_score": {
                     "query": {
                         "bool": {
-                            "must": [
-                                {
-                                    "bool": {
-                                        "should": [
-                                            {
-                                                "term": {
-                                                    "concept_name.keyword": {
-                                                        "value": entity_name,
-                                                        "boost": 3.0
-                                                    }
-                                                }
-                                            },
-                                            {
-                                                "match": {
-                                                    "concept_name": {
-                                                        "query": entity_name,
-                                                        "boost": 2.5
-                                                    }
-                                                }
-                                            }
-                                        ],
-                                        "minimum_should_match": 1
-                                    }
+                            "must": [{
+                                "bool": {
+                                    "should": [
+                                        {"term": {"concept_name.keyword": {"value": entity_name, "boost": 3.0}}},
+                                        {"match": {"concept_name": {"query": entity_name, "boost": 2.5}}}
+                                    ],
+                                    "minimum_should_match": 1
                                 }
-                            ],
-                            "filter": [
-                                domain_filter
-                            ]
+                            }],
+                            "filter": [domain_filter]
                         }
                     },
-                    "functions": [
-                        {
-                            "script_score": {
-                                "script": {
-                                    "params": {
-                                        "origin_len": float(entity_length),
-                                        "scale_len": float(scale_len)
-                                    },
-                                    "source": """
-                                        double origin = params.origin_len;
-                                        double scale = params.scale_len;
-                                        double len = 0.0;
-                                        
-                                        if (!doc['concept_name.keyword'].isEmpty()) {
-                                            len = doc['concept_name.keyword'].value.length();
-                                        } else if (!doc['concept_name'].isEmpty()) {
-                                            len = doc['concept_name'].value.length();
-                                        }
-                                        
-                                        double x = (len - origin) / scale;
-                                        double decay = Math.exp(-0.5 * x * x);
-                                        
-                                        return 1.0 + decay;
-                                    """
-                                }
+                    "functions": [{
+                        "script_score": {
+                            "script": {
+                                "params": {"origin_len": float(entity_length), "scale_len": float(scale_len)},
+                                "source": """
+                                    double origin = params.origin_len;
+                                    double scale = params.scale_len;
+                                    double len = 0.0;
+                                    if (!doc['concept_name.keyword'].isEmpty()) {
+                                        len = doc['concept_name.keyword'].value.length();
+                                    }
+                                    double x = (len - origin) / scale;
+                                    return 1.0 + Math.exp(-0.5 * x * x);
+                                """
                             }
                         }
-                    ],
+                    }],
                     "score_mode": "multiply",
                     "boost_mode": "multiply",
                     "boost": 0.4
@@ -377,11 +260,8 @@ class Stage1CandidateRetrieval:
         }
         
         try:
-            response = self.es_client.es_client.search(index=es_index, body=body)
-            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
-            return hits
+            response = self.es_client.es_client.search(index=es_index, body=query)
+            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
         except Exception as e:
-            logger.error(f"하이브리드 검색 실패: {e}")
-            # 실패시 텍스트 검색으로 대체
-            return self._perform_text_only_search(entity_name, domain_id, es_index, top_k)
-
+            logger.error(f"Hybrid search failed: {e}")
+            return self._lexical_search(entity_name, domain_id, es_index, top_k)
