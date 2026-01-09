@@ -168,7 +168,7 @@ class Stage2StandardCollection:
             }
             
             response = self.es_client.es_client.search(
-                index="concept",
+                index=self.es_client.concept_index,
                 body=query
             )
             

@@ -21,7 +21,7 @@ from tqdm import tqdm
 import time
 import json
 
-sys.path.append('/home/work/skku/hyo/MapOMOP/src')
+sys.path.append('/home/work/skku/hyo/omop-mapper/src')
 
 from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient
@@ -163,8 +163,8 @@ class AblationTester:
         self.logger.info(f"랜덤 샘플링 완료: {len(df_sample):,}개 (seed={random_state})")
         
         # 도메인 분포 출력
-        if 'domain' in df_sample.columns:
-            domain_dist = df_sample['domain'].value_counts()
+        if 'domain_id' in df_sample.columns:
+            domain_dist = df_sample['domain_id'].value_counts()
             self.logger.info("\n도메인 분포:")
             for domain, count in domain_dist.items():
                 self.logger.info(f"  {domain}: {count}개 ({count/len(df_sample)*100:.1f}%)")
@@ -173,12 +173,12 @@ class AblationTester:
     
     def create_entity_input(self, row) -> EntityInput:
         """DataFrame 행에서 EntityInput 생성"""
-        entity_name = str(row['source_name']).strip()
+        entity_name = str(row['source_value']).strip()
         
-        # 도메인 정보 사용
+        # 도메인 정보 사용 (CSV 컬럼명: domain_id)
         domain_id = None
-        if 'domain' in row and pd.notna(row['domain']):
-            domain_str = str(row['domain']).strip()
+        if 'domain_id' in row and pd.notna(row['domain_id']):
+            domain_str = str(row['domain_id']).strip()
             if domain_str and domain_str in self.domain_mapping:
                 domain_id = self.domain_mapping[domain_str]
         
@@ -292,7 +292,7 @@ class AblationTester:
                            desc=f"[{condition_name}]"):
             try:
                 entity_input = self.create_entity_input(row)
-                ground_truth = int(row['omop_concept_id']) if pd.notna(row['omop_concept_id']) else None
+                ground_truth = int(row['concept_id']) if pd.notna(row['concept_id']) else None
                 
                 result = self.test_single_entity(api, entity_input, ground_truth)
                 test_results.append(result)
@@ -635,14 +635,14 @@ def main():
     # ============================================================
     # 설정
     # ============================================================
-    CSV_PATH = "/home/work/skku/hyo/MapOMOP/data/mapping_test_snuh_top10k.csv"
-    SAMPLE_SIZE = 1000  # 샘플 크기
+    CSV_PATH = "/home/work/skku/hyo/omop-mapper/data/mapomop_test_data.csv"
+    SAMPLE_SIZE = 4129  # 샘플 크기
     RANDOM_STATE = 42   # 랜덤 시드 (모든 테스트에서 동일한 데이터 사용)
     
     # 테스트할 조건 선택 (None이면 모든 조건 테스트)
     # 특정 조건만 테스트하려면 인덱스 지정
     # 예: [TEST_CONDITIONS[0], TEST_CONDITIONS[3]]  # 1번, 4번 조건만
-    CONDITIONS_TO_TEST = None  # 모든 6가지 조건 테스트
+    CONDITIONS_TO_TEST = [TEST_CONDITIONS[4]]  # 모든 6가지 조건 테스트
     
     # ============================================================
     # 테스트 실행

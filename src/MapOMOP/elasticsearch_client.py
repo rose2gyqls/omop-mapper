@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-    from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +85,8 @@ class ElasticsearchClient:
     
     def _create_client(self) -> Optional[Elasticsearch]:
         """Create Elasticsearch client with retry logic."""
-            scheme = "https" if self.use_ssl else "http"
-            url = f"{scheme}://{self.host}:{self.port}"
+        scheme = "https" if self.use_ssl else "http"
+        url = f"{scheme}://{self.host}:{self.port}"
             
         config = {
                 'request_timeout': self.timeout,
@@ -96,13 +96,13 @@ class ElasticsearchClient:
             'ssl_show_warn': False
         }
         
-                if self.username and self.password:
+        if self.username and self.password:
             config['basic_auth'] = (self.username, self.password)
         
         try:
             client = Elasticsearch(url, **config)
             
-                    if client.ping():
+            if client.ping():
                 logger.info(f"Connected to Elasticsearch: {url}")
                 return client
             else:
@@ -142,13 +142,13 @@ class ElasticsearchClient:
             indices = self._get_concept_indices()
             if not indices:
                 logger.warning("No concept indices found")
-                    return []
+                return []
                 
             search_body = self._build_search_query(
                     query, domain_ids, vocabulary_ids, standard_concept_only, limit
                 )
                 
-                response = self.es_client.search(
+            response = self.es_client.search(
                 index=",".join(indices),
                     body=search_body
                 )
@@ -386,22 +386,22 @@ class ElasticsearchClient:
             if not self.es_client.ping():
                 return {"status": "error", "error": "Ping failed"}
             
-                    info = self.es_client.info()
+            info = self.es_client.info()
                     
-                    try:
-                        indices = self.es_client.cat.indices(format='json')
-                        index_count = len(indices)
+            try:
+                indices = self.es_client.cat.indices(format='json')
+                index_count = len(indices)
             except Exception:
-                        index_count = "unknown"
+                index_count = "unknown"
                     
-                    return {
-                        "status": "connected",
-                        "cluster_name": info.get('cluster_name', 'unknown'),
-                        "version": info.get('version', {}).get('number', 'unknown'),
-                        "index_count": index_count,
+            return {
+                "status": "connected",
+                "cluster_name": info.get('cluster_name', 'unknown'),
+                "version": info.get('version', {}).get('number', 'unknown'),
+                "index_count": index_count,
                 "host": self.host,
                 "port": self.port
-                    }
+            }
             
         except Exception as e:
             return {"status": "error", "error": str(e)}
@@ -410,7 +410,7 @@ class ElasticsearchClient:
         """Close connection."""
         if self.es_client:
             try:
-                    self.es_client.close()
+                self.es_client.close()
                 logger.info("Elasticsearch connection closed")
             except Exception as e:
                 logger.warning(f"Error closing connection: {e}")
