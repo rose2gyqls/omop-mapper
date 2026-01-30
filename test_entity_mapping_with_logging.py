@@ -650,17 +650,17 @@ def main():
     # ============================================================
     test_entities = [
         # (entity, domain) 튜플 형식 - 특정 도메인 지정
-        ('nodular panniculitis', 'Condition'),
-        ('cardiac troponin', 'Measurement'),
-        ('congenital small intestinal atresia', 'Condition'),
-        ('mass removal', 'Procedure'),
-        ('congenital ring syndrome', 'Condition'),
-        ('monophasic synovial sarcoma', 'Observation'),
-        ('flexible bronchoscopic removal of trachea or bronchial foreign body', 'Procedure'),
-        ('anaplastic astrocytoma', 'Observation'),
-        ('sacroiliac joint block', 'Procedure'),
-        ('endometrial polypectomy', 'Procedure'),
-        ('mandibular nerve block', 'Procedure'),
+        ('eosinophil', 'Measurement'),
+        # ('cardiac troponin', 'Measurement'),
+        # ('congenital small intestinal atresia', 'Condition'),
+        # ('mass removal', 'Procedure'),
+        # ('congenital ring syndrome', 'Condition'),
+        # ('monophasic synovial sarcoma', 'Observation'),
+        # ('flexible bronchoscopic removal of trachea or bronchial foreign body', 'Procedure'),
+        # ('anaplastic astrocytoma', 'Observation'),
+        # ('sacroiliac joint block', 'Procedure'),
+        # ('endometrial polypectomy', 'Procedure'),
+        # ('mandibular nerve block', 'Procedure'),
     ]
     
     # 테스트 실행

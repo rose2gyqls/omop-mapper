@@ -48,7 +48,8 @@ class Stage3HybridScoring:
         openai_api_key: Optional[str] = None,
         openai_model: str = "gpt-4o-mini",
         scoring_mode: str = "llm",
-        include_stage1_scores: bool = False
+        include_stage1_scores: bool = False,
+        include_non_std_info: bool = False
     ):
         """
         Initialize Stage 3.
@@ -64,10 +65,12 @@ class Stage3HybridScoring:
             openai_model: OpenAI model name
             scoring_mode: 'llm', 'hybrid', or 'semantic_only'
             include_stage1_scores: Include scores in LLM prompt
+            include_non_std_info: Include original non-std concept info in LLM prompt
         """
         self.es_client = es_client
         self.scoring_mode = scoring_mode.lower()
         self.include_stage1_scores = include_stage1_scores
+        self.include_non_std_info = include_non_std_info
         
         # Hybrid mode settings
         self.sapbert_model = sapbert_model
@@ -232,6 +235,7 @@ class Stage3HybridScoring:
                 'concept': concept,
                 'is_original_standard': candidate.get('is_original_standard', True),
                 'original_candidate': candidate.get('original_candidate', {}),
+                'original_non_standard': candidate.get('original_non_standard'),
                 'elasticsearch_score': candidate.get('elasticsearch_score', 0.0),
                 'search_type': candidate.get('search_type', 'unknown')
             }
@@ -350,10 +354,21 @@ class Stage3HybridScoring:
         candidates_info = []
         for i, c in enumerate(candidates, 1):
             concept = c['concept']
+            concept_name = concept.get('concept_name', '')
+            
+            # If include_non_std_info is True and this is a non-std to std mapping,
+            # show as "std_concept_name (non_std_concept_name)"
+            if self.include_non_std_info and not c.get('is_original_standard', True):
+                original_non_std = c.get('original_non_standard')
+                if original_non_std:
+                    non_std_name = original_non_std.get('concept_name', '')
+                    if non_std_name and non_std_name != concept_name:
+                        concept_name = f"{concept_name} ({non_std_name})"
+            
             info = {
                 'index': i,
                 'concept_id': str(concept.get('concept_id', '')),
-                'concept_name': concept.get('concept_name', ''),
+                'concept_name': concept_name,
                 'domain_id': concept.get('domain_id', '')
             }
             if self.include_stage1_scores and 'semantic_similarity' in c:

@@ -89,7 +89,8 @@ class EntityMappingAPI:
         confidence_threshold: float = 0.5,
         scoring_mode: str = "llm",
         include_stage1_scores: bool = False,
-        use_lexical: bool = True
+        use_lexical: bool = True,
+        include_non_std_info: bool = False
     ):
         """
         Initialize mapping API.
@@ -100,12 +101,14 @@ class EntityMappingAPI:
             scoring_mode: Scoring mode ('llm', 'hybrid', 'semantic_only')
             include_stage1_scores: Include Stage 1 scores in LLM prompt
             use_lexical: Whether to use lexical search in Stage 1
+            include_non_std_info: Include non-std concept info in LLM prompt
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
         self.scoring_mode = scoring_mode
         self.include_stage1_scores = include_stage1_scores
         self.use_lexical = use_lexical
+        self.include_non_std_info = include_non_std_info
         
         # SapBERT model (lazy loading)
         self._sapbert_model = None
@@ -144,6 +147,11 @@ class EntityMappingAPI:
         Returns:
             List of MappingResult for each domain (sorted by score)
         """
+        # Reset debug variables at the start of each mapping
+        self._last_stage1_candidates = []
+        self._last_stage2_candidates = []
+        self._last_rerank_candidates = []
+        
         try:
             entity_name = entity_input.entity_name
             input_domain = entity_input.domain_id
@@ -181,7 +189,8 @@ class EntityMappingAPI:
                     openai_api_key=None,
                     openai_model="gpt-4o-mini",
                     scoring_mode=self.scoring_mode,
-                    include_stage1_scores=self.include_stage1_scores
+                    include_stage1_scores=self.include_stage1_scores,
+                    include_non_std_info=self.include_non_std_info
                 )
             
             # Generate entity embedding
@@ -204,20 +213,23 @@ class EntityMappingAPI:
                     entity_input=entity_input
                 )
                 
+                domain_str = str(domain.value)
+                
+                # Always store candidates (even if domain_result is None)
+                if 'candidates' in domain_stages:
+                    domain_candidates[domain_str] = domain_stages['candidates']
+                
                 if domain_result:
                     all_results.append(domain_result)
-                    domain_str = str(domain.value)
-                    
-                    if 'candidates' in domain_stages:
-                        domain_candidates[domain_str] = domain_stages['candidates']
                     result_to_domain[id(domain_result)] = domain_str
             
             logger.info("=" * 80)
             logger.info(f"Mapping complete: {len(all_results)} domain(s) returned results")
             logger.info("=" * 80)
             
-            # Set debug variables for best result
+            # Set debug variables
             if all_results:
+                # Success case: use best result's candidates
                 for idx, result in enumerate(all_results, 1):
                     logger.info(f"  {idx}. [{result.domain_id}] {result.mapped_concept_name} "
                                f"(score: {result.mapping_score:.4f})")
@@ -231,6 +243,14 @@ class EntityMappingAPI:
                     self._last_stage1_candidates = domain_candidates[best_domain].get('stage1', [])
                     self._last_stage2_candidates = domain_candidates[best_domain].get('stage2', [])
                     self._last_rerank_candidates = domain_candidates[best_domain].get('stage3', [])
+            else:
+                # Failure case: use first domain's candidates (for single domain mapping)
+                if domain_candidates:
+                    first_domain = list(domain_candidates.keys())[0]
+                    self._last_stage1_candidates = domain_candidates[first_domain].get('stage1', [])
+                    self._last_stage2_candidates = domain_candidates[first_domain].get('stage2', [])
+                    self._last_rerank_candidates = domain_candidates[first_domain].get('stage3', [])
+                    logger.info(f"Mapping failed. Stage candidates recorded for debugging.")
             
             return all_results if all_results else None
             
@@ -270,7 +290,13 @@ class EntityMappingAPI:
             
             if not stage1_candidates:
                 logger.info(f"[{domain_str}] Stage 1: No candidates found")
-                return None, {}
+                stage_results['failure_reason'] = 'stage1_no_candidates'
+                stage_results['candidates'] = {
+                    'stage1': [],
+                    'stage2': [],
+                    'stage3': []
+                }
+                return None, stage_results
             
             # Stage 2: Standard Collection
             stage2_candidates = self.stage2.collect_standard_candidates(
@@ -280,7 +306,13 @@ class EntityMappingAPI:
             
             if not stage2_candidates:
                 logger.info(f"[{domain_str}] Stage 2: No standard candidates found")
-                return None, {}
+                stage_results['failure_reason'] = 'stage2_no_candidates'
+                stage_results['candidates'] = {
+                    'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
+                    'stage2': [],
+                    'stage3': []
+                }
+                return None, stage_results
             
             # Stage 3: Hybrid Scoring
             stage3_candidates = self.stage3.calculate_hybrid_scores(
@@ -292,7 +324,13 @@ class EntityMappingAPI:
             
             if not stage3_candidates:
                 logger.info(f"[{domain_str}] Stage 3: Scoring failed")
-                return None, {}
+                stage_results['failure_reason'] = 'stage3_scoring_failed'
+                stage_results['candidates'] = {
+                    'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
+                    'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
+                    'stage3': []
+                }
+                return None, stage_results
             
             # Create mapping result
             domain_entity_input = EntityInput(
@@ -308,12 +346,19 @@ class EntityMappingAPI:
             logger.info("Validation step")
             logger.info('=' * 60)
             
+            # Track original LLM top pick before validation
+            llm_top_concept_id = stage3_candidates[0]['concept'].get('concept_id') if stage3_candidates else None
+            llm_top_concept_name = stage3_candidates[0]['concept'].get('concept_name') if stage3_candidates else None
+            
             is_valid = self.validator.validate_mapping(
                 entity_name=entity_name,
                 concept_id=mapping_result.mapped_concept_id,
                 concept_name=mapping_result.mapped_concept_name,
                 synonyms=None
             )
+            
+            # Keep original stage3_candidates for logging (sorted by LLM score)
+            final_stage3_candidates = stage3_candidates
             
             if not is_valid:
                 logger.warning(f"[{domain_str}] Validation failed: {mapping_result.mapped_concept_name}")
@@ -326,9 +371,12 @@ class EntityMappingAPI:
                 )
                 
                 if validated:
-                    logger.info(f"Alternative found: {validated['concept'].get('concept_name')}")
+                    validated_concept_name = validated['concept'].get('concept_name')
+                    logger.info(f"Alternative found: {validated_concept_name}")
+                    logger.info(f"  [!] LLM top pick was: {llm_top_concept_name} (ID: {llm_top_concept_id})")
+                    logger.info(f"  [!] Changed to: {validated_concept_name} due to validation")
                     
-                    # Reorder candidates
+                    # Reorder candidates - but keep the original stage3 order for logging
                     for idx, c in enumerate(stage3_candidates):
                         if c['concept'].get('concept_id') == validated['concept'].get('concept_id'):
                             reordered = [stage3_candidates[idx]] + \
@@ -339,21 +387,33 @@ class EntityMappingAPI:
                     
                     mapping_result = self._create_final_result(domain_entity_input, reordered)
                     stage_results['validation_status'] = 'validated_alternative'
+                    stage_results['llm_top_pick'] = {
+                        'concept_id': str(llm_top_concept_id),
+                        'concept_name': llm_top_concept_name
+                    }
+                    stage_results['validation_changed_result'] = True
                 else:
                     logger.error(f"[{domain_str}] All candidates failed validation")
                     stage_results['validation_status'] = 'failed'
+                    # Store candidates even on failure
+                    stage_results['candidates'] = {
+                        'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
+                        'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
+                        'stage3': [self._format_stage3_candidate(c) for c in stage3_candidates]
+                    }
                     return None, stage_results
             else:
                 logger.info(f"[{domain_str}] Validation passed: {mapping_result.mapped_concept_name}")
                 stage_results['validation_status'] = 'validated'
+                stage_results['validation_changed_result'] = False
             
             stage_results['result_domain'] = mapping_result.domain_id
             
-            # Store candidates for debugging
+            # Store candidates for debugging (original LLM ranking order)
             stage_results['candidates'] = {
                 'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
                 'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
-                'stage3': [self._format_stage3_candidate(c) for c in stage3_candidates]
+                'stage3': [self._format_stage3_candidate(c) for c in final_stage3_candidates]
             }
             
             logger.info(f"\n[{domain_str}] Mapping complete: {mapping_result.mapped_concept_name}")
@@ -440,7 +500,7 @@ class EntityMappingAPI:
     def _format_stage2_candidate(self, c: Dict) -> Dict:
         """Format Stage 2 candidate for storage."""
         concept = c['concept']
-        return {
+        result = {
             'concept_id': str(concept.get('concept_id', '')),
             'concept_name': concept.get('concept_name', ''),
             'domain_id': concept.get('domain_id', ''),
@@ -449,21 +509,41 @@ class EntityMappingAPI:
             'is_original_standard': c.get('is_original_standard', True),
             'search_type': c.get('search_type', 'unknown')
         }
+        # Include original non-standard info if present
+        if not c.get('is_original_standard', True) and 'original_non_standard' in c:
+            non_std = c['original_non_standard']
+            result['original_non_standard'] = {
+                'concept_id': str(non_std.get('concept_id', '')),
+                'concept_name': non_std.get('concept_name', '')
+            }
+        return result
     
     def _format_stage3_candidate(self, c: Dict) -> Dict:
         """Format Stage 3 candidate for storage."""
         concept = c['concept']
-        return {
+        result = {
             'concept_id': str(concept.get('concept_id', '')),
             'concept_name': concept.get('concept_name', ''),
             'domain_id': concept.get('domain_id', ''),
             'vocabulary_id': concept.get('vocabulary_id', ''),
             'standard_concept': concept.get('standard_concept', ''),
+            'is_original_standard': c.get('is_original_standard', True),
             'llm_score': c.get('llm_score'),
             'llm_rank': c.get('llm_rank'),
+            'llm_reasoning': c.get('llm_reasoning', ''),
             'final_score': c.get('final_score', 0.0),
-            'search_type': c.get('search_type', 'unknown')
+            'search_type': c.get('search_type', 'unknown'),
+            'semantic_similarity': c.get('semantic_similarity'),
+            'text_similarity': c.get('text_similarity')
         }
+        # Include original non-standard info if present
+        if not c.get('is_original_standard', True) and 'original_non_standard' in c:
+            non_std = c['original_non_standard']
+            result['original_non_standard'] = {
+                'concept_id': str(non_std.get('concept_id', '')),
+                'concept_name': non_std.get('concept_name', '')
+            }
+        return result
     
     def _get_embedding(self, text: str):
         """Generate SapBERT embedding for text."""

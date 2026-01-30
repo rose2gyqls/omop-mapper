@@ -142,10 +142,9 @@ Thumbs.db
 # Project specific
 log/
 test_logs/
-test_logs_real_data/
-test_logs_snuh/
-test_logs_ablation/
-*.log
+test_logs_*/
 temp/
 tmp/
+
+# Large data files (exceeds GitHub 100MB limit)
 data/
