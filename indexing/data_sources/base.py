@@ -43,6 +43,13 @@ class BaseDataSource(ABC):
         'concept_id', 'concept_synonym_name', 'language_concept_id'
     ]
     
+    # CONCEPT_SMALL table columns (CONCEPT + SYNONYM merged)
+    CONCEPT_SMALL_COLUMNS = [
+        'concept_id', 'concept_name', 'name_type', 'domain_id', 'vocabulary_id',
+        'concept_class_id', 'standard_concept', 'concept_code',
+        'valid_start_date', 'valid_end_date', 'invalid_reason'
+    ]
+    
     def __init__(self, source_type: DataSourceType):
         """
         Initialize data source.
@@ -99,6 +106,21 @@ class BaseDataSource(ABC):
     ) -> Iterator[pd.DataFrame]:
         """Read CONCEPT_SYNONYM data in chunks."""
         pass
+    
+    def get_concept_small_count(self) -> int:
+        """Return total number of CONCEPT_SMALL records."""
+        # 기본 구현: 서브클래스에서 오버라이드 가능
+        return 0
+    
+    def read_concept_small(
+        self,
+        chunk_size: int = 1000,
+        skip_rows: int = 0,
+        max_rows: Optional[int] = None
+    ) -> Iterator[pd.DataFrame]:
+        """Read CONCEPT_SMALL data in chunks."""
+        # 기본 구현: 서브클래스에서 오버라이드
+        return iter([])
     
     # Common utility methods
     
@@ -220,6 +242,42 @@ class BaseDataSource(ABC):
         
         return df
     
+    def clean_concept_small_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Clean CONCEPT_SMALL data.
+        
+        Args:
+            df: Raw DataFrame
+            
+        Returns:
+            Cleaned DataFrame
+        """
+        df = df.copy()
+        
+        # Remove rows with null concept_id or concept_name
+        df = df.dropna(subset=['concept_id', 'concept_name'])
+        df['concept_id'] = df['concept_id'].astype(str)
+        
+        # Clean text columns
+        text_cols = ['concept_name', 'name_type', 'domain_id', 'vocabulary_id', 'concept_class_id']
+        for col in text_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+                df[col] = df[col].replace(['', 'None', 'nan', 'NaN'], None)
+        
+        # Validate date columns
+        for col in ['valid_start_date', 'valid_end_date']:
+            if col in df.columns:
+                df[col] = df[col].apply(self._parse_date)
+        
+        # Validate standard_concept (only 'S' or 'C' allowed)
+        if 'standard_concept' in df.columns:
+            df['standard_concept'] = df['standard_concept'].apply(
+                lambda x: x if x in ['S', 'C'] else None
+            )
+        
+        return df
+    
     def _parse_date(self, date_value) -> Optional[str]:
         """
         Parse date value to YYYYMMDD format.
@@ -332,6 +390,35 @@ class BaseDataSource(ABC):
             
             if include_embeddings and embeddings is not None and i < len(embeddings):
                 doc['concept_synonym_embedding'] = embeddings[i].tolist()
+            
+            documents.append(doc)
+        
+        return documents
+    
+    def to_es_concept_small(
+        self,
+        df: pd.DataFrame,
+        embeddings: np.ndarray = None,
+        include_embeddings: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert CONCEPT_SMALL DataFrame to Elasticsearch documents.
+        
+        Args:
+            df: CONCEPT_SMALL DataFrame
+            embeddings: Optional embedding vectors
+            include_embeddings: Whether to include embeddings
+            
+        Returns:
+            List of Elasticsearch documents
+        """
+        documents = []
+        
+        for i, (_, row) in enumerate(df.iterrows()):
+            doc = {col: self._to_str(row.get(col)) for col in self.CONCEPT_SMALL_COLUMNS if col in df.columns}
+            
+            if include_embeddings and embeddings is not None and i < len(embeddings):
+                doc['concept_embedding'] = embeddings[i].tolist()
             
             documents.append(doc)
         

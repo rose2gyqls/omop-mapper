@@ -24,9 +24,14 @@ class ElasticsearchIndexer:
                             "concept_id": {"type": "keyword"},
                             "concept_name": {
                                 "type": "text",
+                                "similarity": "custom_bm25",
                                 "fields": {
-                            "keyword": {"type": "keyword"},
-                            "trigram": {"type": "text", "analyzer": "trigram_analyzer"}
+                                    "keyword": {"type": "keyword"},
+                                    "trigram": {
+                                        "type": "text",
+                                        "analyzer": "trigram_analyzer",
+                                        "similarity": "custom_bm25"
+                                    }
                                 }
                             },
                             "domain_id": {"type": "keyword"},
@@ -37,6 +42,34 @@ class ElasticsearchIndexer:
                             "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
                             "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
                             "invalid_reason": {"type": "keyword"}
+                }
+            }
+        },
+        'concept-small': {
+            "mappings": {
+                "properties": {
+                    "concept_id": {"type": "keyword"},
+                    "concept_name": {
+                        "type": "text",
+                        "similarity": "custom_bm25",
+                        "fields": {
+                            "keyword": {"type": "keyword"},
+                            "trigram": {
+                                "type": "text",
+                                "analyzer": "trigram_analyzer",
+                                "similarity": "custom_bm25"
+                            }
+                        }
+                    },
+                    "name_type": {"type": "keyword"},
+                    "domain_id": {"type": "keyword"},
+                    "vocabulary_id": {"type": "keyword"},
+                    "concept_class_id": {"type": "keyword"},
+                    "standard_concept": {"type": "keyword"},
+                    "concept_code": {"type": "keyword"},
+                    "valid_start_date": {"type": "date", "format": "yyyyMMdd"},
+                    "valid_end_date": {"type": "date", "format": "yyyyMMdd"},
+                    "invalid_reason": {"type": "keyword"}
                 }
             }
         },
@@ -56,13 +89,7 @@ class ElasticsearchIndexer:
             "mappings": {
                 "properties": {
                     "concept_id": {"type": "keyword"},
-                    "concept_synonym_name": {
-                        "type": "text",
-                        "fields": {
-                            "keyword": {"type": "keyword"},
-                            "trigram": {"type": "text", "analyzer": "trigram_analyzer"}
-                        }
-                    },
+                    "concept_synonym_name": {"type": "keyword"},
                     "language_concept_id": {"type": "keyword"}
                 }
             }
@@ -76,6 +103,13 @@ class ElasticsearchIndexer:
                         "refresh_interval": "30s",
                         "index.write.wait_for_active_shards": "1",
                         "index.max_result_window": 50000,
+                        "similarity": {
+                            "custom_bm25": {
+                                "type": "BM25",
+                                "k1": 0.9,
+                                "b": 0.5
+                            }
+                        },
                         "analysis": {
                             "analyzer": {
                                 "trigram_analyzer": {
@@ -164,29 +198,35 @@ class ElasticsearchIndexer:
     def _get_index_mapping(self) -> Dict:
         """Get appropriate mapping for the index type."""
         # Determine index type from name
-        if "relationship" in self.index_name.lower():
+        index_lower = self.index_name.lower()
+        
+        if "relationship" in index_lower:
             mapping = self.MAPPINGS['concept-relationship'].copy()
-        elif "synonym" in self.index_name.lower():
+        elif "synonym" in index_lower:
             mapping = self.MAPPINGS['concept-synonym'].copy()
+        elif "small" in index_lower:
+            mapping = self.MAPPINGS['concept-small'].copy()
         else:
             mapping = self.MAPPINGS['concept'].copy()
+        
+        # Deep copy mappings to avoid mutation
+        import copy
+        mapping = copy.deepcopy(mapping)
         
         # Add settings
         mapping["settings"] = self.INDEX_SETTINGS.copy()
         
-        # Add embedding field if enabled
+        # Add embedding field if enabled (concept, concept-small만 해당)
+        # synonym, relationship은 임베딩 불필요
         if self.include_embeddings:
-            embedding_field = {
+            if "synonym" not in index_lower and "relationship" not in index_lower:
+                embedding_field = {
                     "type": "dense_vector",
                     "dims": 768,
                     "index": True,
                     "similarity": "cosine"
-            }
-        
-        if "synonym" in self.index_name.lower():
-            mapping["mappings"]["properties"]["concept_synonym_embedding"] = embedding_field
-        elif "relationship" not in self.index_name.lower():
-            mapping["mappings"]["properties"]["concept_embedding"] = embedding_field
+                }
+                mapping["mappings"]["properties"]["concept_embedding"] = embedding_field
         
         return mapping
     
@@ -237,11 +277,17 @@ class ElasticsearchIndexer:
     
     def _generate_doc_id(self, doc: Dict) -> str:
         """Generate document ID based on index type."""
-        if "relationship" in self.index_name.lower():
+        index_lower = self.index_name.lower()
+        
+        if "relationship" in index_lower:
             unique_str = f"{doc.get('concept_id_1', '')}_{doc.get('concept_id_2', '')}_{doc.get('relationship_id', '')}"
             return hashlib.md5(unique_str.encode()).hexdigest()
-        elif "synonym" in self.index_name.lower():
+        elif "synonym" in index_lower:
             unique_str = f"{doc.get('concept_id', '')}_{doc.get('concept_synonym_name', '')}"
+            return hashlib.md5(unique_str.encode()).hexdigest()
+        elif "small" in index_lower:
+            # concept-small: concept_id + concept_name으로 고유 ID 생성
+            unique_str = f"{doc.get('concept_id', '')}_{doc.get('concept_name', '')}"
             return hashlib.md5(unique_str.encode()).hexdigest()
         else:
             return str(doc.get("concept_id", ""))

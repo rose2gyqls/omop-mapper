@@ -34,6 +34,7 @@ class UnifiedIndexer:
     # Fixed index names
     INDEX_NAMES = {
         'concept': 'concept',
+        'concept-small': 'concept-small',
         'relationship': 'concept-relationship',
         'synonym': 'concept-synonym'
     }
@@ -115,7 +116,8 @@ class UnifiedIndexer:
         """Get or create Elasticsearch indexer for index type."""
         if index_type not in self._es_indexers:
             index_name = self.INDEX_NAMES[index_type]
-            include_emb = self.include_embeddings and index_type != 'relationship'
+            # relationship, synonym은 임베딩 불필요
+            include_emb = self.include_embeddings and index_type not in ['relationship', 'synonym']
             
             self._es_indexers[index_type] = ElasticsearchIndexer(
                 host=self.es_config['host'],
@@ -220,6 +222,105 @@ class UnifiedIndexer:
             self.logger.error(traceback.format_exc())
             return False
     
+    def index_concept_small(
+        self,
+        delete_existing: bool = True,
+        max_rows: Optional[int] = None,
+        skip_rows: int = 0
+    ) -> bool:
+        """
+        Index CONCEPT_SMALL data (merged CONCEPT + SYNONYM).
+        
+        Args:
+            delete_existing: Delete existing index
+            max_rows: Maximum rows to process
+            skip_rows: Rows to skip
+            
+        Returns:
+            True if successful
+        """
+        self.logger.info("=" * 60)
+        self.logger.info("Starting CONCEPT_SMALL indexing")
+        self.logger.info("=" * 60)
+        
+        start_time = time.time()
+        
+        try:
+            indexer = self._get_indexer('concept-small')
+            
+            if not indexer.create_index(delete_if_exists=delete_existing):
+                self.logger.error("Failed to create index")
+                return False
+            
+            total = self.data_source.get_concept_small_count()
+            if total == 0:
+                self.logger.error(
+                    "CONCEPT_SMALL 파일이 없거나 비어있습니다. "
+                    "prepare_concept_small.py를 먼저 실행하세요."
+                )
+                return False
+            
+            actual_max = min(max_rows or total, total - skip_rows)
+            
+            self.logger.info(f"Total records: {total:,}")
+            self.logger.info(f"Processing: {actual_max:,} (skip: {skip_rows:,})")
+            
+            processed = 0
+            indexed = 0
+            
+            with tqdm(total=actual_max, desc="CONCEPT_SMALL", unit="rows") as pbar:
+                for chunk in self.data_source.read_concept_small(
+                    chunk_size=self.chunk_size,
+                    skip_rows=skip_rows,
+                    max_rows=actual_max
+                ):
+                    if len(chunk) == 0:
+                        continue
+                    
+                    # Lowercase if enabled
+                    if self.lowercase:
+                        chunk = chunk.copy()
+                        chunk['concept_name'] = chunk['concept_name'].str.lower()
+                    
+                    # Generate embeddings
+                    embeddings = None
+                    if self.include_embeddings and self.embedder:
+                        names = chunk['concept_name'].fillna('').tolist()
+                        embeddings = self.embedder.encode(names, show_progress=False)
+                    
+                    # Convert and index
+                    docs = self.data_source.to_es_concept_small(
+                        chunk,
+                        embeddings=embeddings,
+                        include_embeddings=self.include_embeddings
+                    )
+                    
+                    if indexer.index_documents(docs, show_progress=False):
+                        indexed += len(docs)
+                    
+                    processed += len(chunk)
+                    pbar.update(len(chunk))
+                    
+                    # Clear GPU memory
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            
+            elapsed = time.time() - start_time
+            stats = indexer.get_stats()
+            
+            self.logger.info(f"CONCEPT_SMALL indexing complete")
+            self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}")
+            self.logger.info(f"Time: {elapsed/60:.1f} min, Speed: {processed/elapsed:.1f} rows/sec")
+            self.logger.info(f"Index stats: {stats}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"CONCEPT_SMALL indexing failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+    
     def index_relationships(
         self,
         delete_existing: bool = True,
@@ -304,6 +405,8 @@ class UnifiedIndexer:
         """
         Index CONCEPT_SYNONYM data.
         
+        단순 조회용 인덱스 (임베딩 없음, 테이블 그대로 인덱싱)
+        
         Args:
             delete_existing: Delete existing index
             max_rows: Maximum rows to process
@@ -334,31 +437,24 @@ class UnifiedIndexer:
             processed = 0
             indexed = 0
             
+            # 임베딩 없이 큰 청크로 빠르게 처리
+            syn_chunk_size = self.chunk_size * 5
+            
             with tqdm(total=actual_max, desc="SYNONYM", unit="rows") as pbar:
                 for chunk in self.data_source.read_synonyms(
-                    chunk_size=self.chunk_size,
+                    chunk_size=syn_chunk_size,
                     skip_rows=skip_rows,
                     max_rows=actual_max
                 ):
                     if len(chunk) == 0:
                         continue
                     
-                    # Get names for embedding
-                    names = chunk['concept_synonym_name'].fillna('').tolist()
-                    if self.lowercase:
-                        names = [n.lower() if n else "" for n in names]
-                    
-                    # Generate embeddings
-                    embeddings = None
-                    if self.include_embeddings and self.embedder:
-                        embeddings = self.embedder.encode(names, show_progress=False)
-                    
-                    # Convert and index
+                    # 테이블 그대로 인덱싱 (임베딩 없음)
                     docs = self.data_source.to_es_synonyms(
                         chunk,
-                        embeddings=embeddings,
-                        include_embeddings=self.include_embeddings,
-                        lowercase=self.lowercase
+                        embeddings=None,
+                        include_embeddings=False,
+                        lowercase=False
                     )
                     
                     if indexer.index_documents(docs, show_progress=False):
@@ -366,10 +462,6 @@ class UnifiedIndexer:
                     
                     processed += len(chunk)
                     pbar.update(len(chunk))
-                    
-                    # Clear GPU memory
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
             
             elapsed = time.time() - start_time
             stats = indexer.get_stats()
@@ -399,7 +491,7 @@ class UnifiedIndexer:
         Args:
             delete_existing: Delete existing indices
             max_rows: Maximum rows per table
-            tables: Tables to index (default: all)
+            tables: Tables to index (default: concept-small, relationship, synonym)
             
         Returns:
             Dict of table -> success status
@@ -409,12 +501,18 @@ class UnifiedIndexer:
         self.logger.info("=" * 60)
         
         if tables is None:
-            tables = ['concept', 'relationship', 'synonym']
+            # 기본값: concept-small, relationship, synonym 인덱싱
+            tables = ['concept-small', 'relationship', 'synonym']
         
         results = {}
         
+        # concept (원본 concept 테이블만 인덱싱)
         if 'concept' in tables:
             results['concept'] = self.index_concepts(delete_existing, max_rows)
+        
+        # concept-small (concept + synonym merged)
+        if 'concept-small' in tables:
+            results['concept-small'] = self.index_concept_small(delete_existing, max_rows)
         
         if 'relationship' in tables:
             results['relationship'] = self.index_relationships(delete_existing, max_rows)
@@ -457,6 +555,7 @@ def create_data_source(source_type: str, **kwargs) -> BaseDataSource:
             concept_file=kwargs.get('concept_file', 'CONCEPT.csv'),
             relationship_file=kwargs.get('relationship_file', 'CONCEPT_RELATIONSHIP.csv'),
             synonym_file=kwargs.get('synonym_file', 'CONCEPT_SYNONYM.csv'),
+            concept_small_file=kwargs.get('concept_small_file', 'CONCEPT_SMALL.csv'),
             delimiter=kwargs.get('delimiter', '\t')
         )
     

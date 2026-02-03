@@ -31,6 +31,9 @@ class PostgresDataSource(BaseDataSource):
         'synonym': 'cdm2024_samples.concept_synonym'
     }
     
+    # 영어 동의어 language_concept_id
+    ENGLISH_LANGUAGE_CONCEPT_ID = 4180186
+    
     def __init__(
         self,
         host: str = None,
@@ -124,6 +127,31 @@ class PostgresDataSource(BaseDataSource):
     def get_synonym_count(self) -> int:
         """Return total number of CONCEPT_SYNONYM records."""
         return self._get_count(self.tables['synonym'])
+    
+    def get_concept_small_count(self) -> int:
+        """
+        Return total number of CONCEPT_SMALL records.
+        CONCEPT (Original) + CONCEPT_SYNONYM (영어만, Synonym) 합계
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # CONCEPT 수 + 영어 SYNONYM 수
+            query = f"""
+                SELECT 
+                    (SELECT COUNT(*) FROM {self.tables['concept']}) +
+                    (SELECT COUNT(*) FROM {self.tables['synonym']} 
+                     WHERE language_concept_id = {self.ENGLISH_LANGUAGE_CONCEPT_ID})
+            """
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            conn.close()
+            return count
+        except Exception as e:
+            self.logger.error(f"Count query failed for concept_small: {e}")
+            return 0
     
     def _read_table_chunks(
         self,
@@ -223,3 +251,98 @@ class PostgresDataSource(BaseDataSource):
             cleaned = self.clean_synonym_data(chunk)
             if len(cleaned) > 0:
                 yield cleaned
+    
+    def read_concept_small(
+        self,
+        chunk_size: int = 1000,
+        skip_rows: int = 0,
+        max_rows: Optional[int] = None
+    ) -> Iterator[pd.DataFrame]:
+        """
+        Read CONCEPT_SMALL data in chunks.
+        
+        SQL UNION을 사용하여 CONCEPT + CONCEPT_SYNONYM (영어만)을 합쳐서 반환합니다.
+        - CONCEPT: name_type = 'Original'
+        - CONCEPT_SYNONYM (language_concept_id=4180186): name_type = 'Synonym'
+        """
+        try:
+            conn = self._get_connection()
+            
+            concept_table = self.tables['concept']
+            synonym_table = self.tables['synonym']
+            
+            # UNION ALL 쿼리: CONCEPT (Original) + SYNONYM (영어만, JOIN으로 메타데이터 가져옴)
+            base_query = f"""
+                SELECT 
+                    concept_id,
+                    concept_name,
+                    'Original' AS name_type,
+                    domain_id,
+                    vocabulary_id,
+                    concept_class_id,
+                    standard_concept,
+                    concept_code,
+                    valid_start_date,
+                    valid_end_date,
+                    invalid_reason
+                FROM {concept_table}
+                
+                UNION ALL
+                
+                SELECT 
+                    c.concept_id,
+                    s.concept_synonym_name AS concept_name,
+                    'Synonym' AS name_type,
+                    c.domain_id,
+                    c.vocabulary_id,
+                    c.concept_class_id,
+                    c.standard_concept,
+                    c.concept_code,
+                    c.valid_start_date,
+                    c.valid_end_date,
+                    c.invalid_reason
+                FROM {synonym_table} s
+                JOIN {concept_table} c ON s.concept_id = c.concept_id
+                WHERE s.language_concept_id = {self.ENGLISH_LANGUAGE_CONCEPT_ID}
+            """
+            
+            # 서브쿼리로 감싸서 ORDER BY, LIMIT, OFFSET 적용
+            offset = skip_rows
+            total_read = 0
+            
+            while True:
+                if max_rows is not None:
+                    remaining = max_rows - total_read
+                    if remaining <= 0:
+                        break
+                    limit = min(chunk_size, remaining)
+                else:
+                    limit = chunk_size
+                
+                query = f"""
+                    SELECT * FROM (
+                        {base_query}
+                    ) AS concept_small
+                    ORDER BY concept_id, name_type
+                    LIMIT {limit} OFFSET {offset}
+                """
+                
+                chunk = pd.read_sql(query, conn)
+                
+                if len(chunk) == 0:
+                    break
+                
+                chunk.columns = chunk.columns.str.lower()
+                total_read += len(chunk)
+                offset += len(chunk)
+                
+                # 데이터 정제
+                cleaned = self.clean_concept_small_data(chunk)
+                if len(cleaned) > 0:
+                    yield cleaned
+            
+            conn.close()
+            
+        except Exception as e:
+            self.logger.error(f"Error reading concept_small: {e}")
+            raise

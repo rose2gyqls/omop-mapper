@@ -9,6 +9,7 @@ Final scoring and ranking of candidates using multiple strategies:
 
 import json
 import logging
+import math
 import os
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+def sigmoid_normalize(score: float, center: float = 3.0, scale: float = 1.0) -> float:
+    """
+    Normalize ES score to 0-1 range using sigmoid.
+    
+    Args:
+        score: Raw ES score (e.g., BM25 score)
+        center: Score at which sigmoid returns 0.5
+        scale: Steepness of the curve
+        
+    Returns:
+        Normalized score between 0 and 1
+    """
+    return 1 / (1 + math.exp(-(score - center) / scale))
 
 # Optional dependencies
 try:
@@ -163,6 +179,10 @@ class Stage3HybridScoring:
             concept_emb = concept.get('concept_embedding')
             semantic_sim = self._compute_cosine(entity_embedding, concept_emb) or 0.0
             
+            # Elasticsearch score (sigmoid normalized)
+            es_score = candidate.get('elasticsearch_score', 0.0)
+            es_score_normalized = sigmoid_normalize(es_score, center=3.0)
+            
             # Combined score
             final_score = self.text_weight * text_sim + self.semantic_weight * semantic_sim
             
@@ -170,7 +190,8 @@ class Stage3HybridScoring:
                 'concept': concept,
                 'is_original_standard': candidate.get('is_original_standard', True),
                 'original_candidate': candidate.get('original_candidate', {}),
-                'elasticsearch_score': candidate.get('elasticsearch_score', 0.0),
+                'elasticsearch_score': es_score,
+                'elasticsearch_score_normalized': es_score_normalized,
                 'search_type': candidate.get('search_type', 'unknown'),
                 'text_similarity': text_sim,
                 'semantic_similarity': semantic_sim,
@@ -201,11 +222,16 @@ class Stage3HybridScoring:
             concept_emb = concept.get('concept_embedding')
             semantic_sim = self._compute_cosine(entity_embedding, concept_emb) or 0.0
             
+            # Elasticsearch score (sigmoid normalized)
+            es_score = candidate.get('elasticsearch_score', 0.0)
+            es_score_normalized = sigmoid_normalize(es_score, center=3.0)
+            
             results.append({
                 'concept': concept,
                 'is_original_standard': candidate.get('is_original_standard', True),
                 'original_candidate': candidate.get('original_candidate', {}),
-                'elasticsearch_score': candidate.get('elasticsearch_score', 0.0),
+                'elasticsearch_score': es_score,
+                'elasticsearch_score_normalized': es_score_normalized,
                 'search_type': candidate.get('search_type', 'unknown'),
                 'semantic_similarity': semantic_sim,
                 'final_score': semantic_sim
@@ -231,12 +257,18 @@ class Stage3HybridScoring:
         results = []
         for candidate in candidates:
             concept = candidate['concept']
+            
+            # Elasticsearch score (sigmoid normalized)
+            es_score = candidate.get('elasticsearch_score', 0.0)
+            es_score_normalized = sigmoid_normalize(es_score, center=3.0)
+            
             data = {
                 'concept': concept,
                 'is_original_standard': candidate.get('is_original_standard', True),
                 'original_candidate': candidate.get('original_candidate', {}),
                 'original_non_standard': candidate.get('original_non_standard'),
-                'elasticsearch_score': candidate.get('elasticsearch_score', 0.0),
+                'elasticsearch_score': es_score,
+                'elasticsearch_score_normalized': es_score_normalized,
                 'search_type': candidate.get('search_type', 'unknown')
             }
             

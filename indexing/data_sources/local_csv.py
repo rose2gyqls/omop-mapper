@@ -24,6 +24,7 @@ class LocalCSVDataSource(BaseDataSource):
         concept_file: str = "CONCEPT.csv",
         relationship_file: str = "CONCEPT_RELATIONSHIP.csv",
         synonym_file: str = "CONCEPT_SYNONYM.csv",
+        concept_small_file: str = "CONCEPT_SMALL.csv",
         delimiter: str = "\t"
     ):
         """
@@ -34,6 +35,7 @@ class LocalCSVDataSource(BaseDataSource):
             concept_file: CONCEPT file name
             relationship_file: CONCEPT_RELATIONSHIP file name
             synonym_file: CONCEPT_SYNONYM file name
+            concept_small_file: CONCEPT_SMALL file name (merged concept + synonym)
             delimiter: CSV delimiter (default: tab)
         """
         super().__init__(DataSourceType.LOCAL_CSV)
@@ -45,6 +47,7 @@ class LocalCSVDataSource(BaseDataSource):
         self.concept_path = self.data_folder / concept_file
         self.relationship_path = self.data_folder / relationship_file
         self.synonym_path = self.data_folder / synonym_file
+        self.concept_small_path = self.data_folder / concept_small_file
         
         # Validate
         self._validate()
@@ -59,7 +62,8 @@ class LocalCSVDataSource(BaseDataSource):
         for name, path in [
             ("CONCEPT", self.concept_path),
             ("CONCEPT_RELATIONSHIP", self.relationship_path),
-            ("CONCEPT_SYNONYM", self.synonym_path)
+            ("CONCEPT_SYNONYM", self.synonym_path),
+            ("CONCEPT_SMALL", self.concept_small_path)
         ]:
             if path.exists():
                 size_mb = path.stat().st_size / (1024 * 1024)
@@ -98,6 +102,10 @@ class LocalCSVDataSource(BaseDataSource):
     def get_synonym_count(self) -> int:
         """Return total number of CONCEPT_SYNONYM records."""
         return self._count_lines(self.synonym_path)
+    
+    def get_concept_small_count(self) -> int:
+        """Return total number of CONCEPT_SMALL records."""
+        return self._count_lines(self.concept_small_path)
     
     def _read_csv_chunks(
         self,
@@ -193,5 +201,31 @@ class LocalCSVDataSource(BaseDataSource):
             max_rows
         ):
             cleaned = self.clean_synonym_data(chunk)
+            if len(cleaned) > 0:
+                yield cleaned
+    
+    def read_concept_small(
+        self,
+        chunk_size: int = 1000,
+        skip_rows: int = 0,
+        max_rows: Optional[int] = None
+    ) -> Iterator[pd.DataFrame]:
+        """Read CONCEPT_SMALL data in chunks."""
+        if not self.concept_small_path.exists():
+            self.logger.error(
+                f"CONCEPT_SMALL 파일을 찾을 수 없습니다: {self.concept_small_path}\n"
+                f"prepare_concept_small.py를 먼저 실행하여 파일을 생성하세요."
+            )
+            return
+        
+        for chunk in self._read_csv_chunks(
+            self.concept_small_path,
+            self.CONCEPT_SMALL_COLUMNS,
+            "CONCEPT_SMALL",
+            chunk_size,
+            skip_rows,
+            max_rows
+        ):
+            cleaned = self.clean_concept_small_data(chunk)
             if len(cleaned) > 0:
                 yield cleaned

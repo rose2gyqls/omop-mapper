@@ -8,20 +8,35 @@ Retrieves candidate concepts using multiple search strategies:
 """
 
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
+def sigmoid_normalize(score: float, center: float = 3.0, scale: float = 1.0) -> float:
+    """
+    Normalize ES score to 0-1 range using sigmoid.
+    
+    Args:
+        score: Raw ES score (e.g., BM25 score)
+        center: Score at which sigmoid returns 0.5
+        scale: Steepness of the curve
+        
+    Returns:
+        Normalized score between 0 and 1
+    """
+    return 1 / (1 + math.exp(-(score - center) / scale))
+
 
 class Stage1CandidateRetrieval:
     """Stage 1: Multi-strategy candidate retrieval."""
     
     # Threshold settings
-    LEXICAL_THRESHOLD = 5.0
+    LEXICAL_THRESHOLD = 3.0
     SEMANTIC_THRESHOLD = 0.8
-    COMBINED_THRESHOLD = 5.0
+    COMBINED_THRESHOLD = 3.0
     
     def __init__(
         self,
@@ -130,9 +145,6 @@ class Stage1CandidateRetrieval:
     
     def _get_domain_filter(self, domain_id: str) -> Dict:
         """Build domain filter query."""
-        # Handle Measurement domain (includes "Meas Value")
-        if domain_id == "Measurement":
-            return {"terms": {"domain_id": ["Measurement", "Meas Value"]}}
         return {"term": {"domain_id": domain_id}}
     
     def _lexical_search(
@@ -152,7 +164,11 @@ class Stage1CandidateRetrieval:
                             "should": [
                                 {"term": {"concept_name.keyword": {"value": entity_name, "boost": 3.0}}},
                                 {"match_phrase": {"concept_name": {"query": entity_name, "boost": 2.5}}},
-                                {"match": {"concept_name": {"query": entity_name, "boost": 2.0}}}
+                                {"match": {"concept_name": {
+                                    "query": entity_name,
+                                    "minimum_should_match": "1<60%",
+                                    "boost": 2.0
+                                }}}
                             ],
                             "minimum_should_match": 1
                         }
@@ -164,7 +180,11 @@ class Stage1CandidateRetrieval:
         
         try:
             response = self.es_client.es_client.search(index=es_index, body=query)
-            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            # Add sigmoid normalized score
+            for hit in hits:
+                hit['_score_normalized'] = sigmoid_normalize(hit['_score'], center=3.0)
+            return hits
         except Exception as e:
             logger.error(f"Lexical search failed: {e}")
             return []
@@ -227,7 +247,11 @@ class Stage1CandidateRetrieval:
                                 "bool": {
                                     "should": [
                                         {"term": {"concept_name.keyword": {"value": entity_name, "boost": 3.0}}},
-                                        {"match": {"concept_name": {"query": entity_name, "boost": 2.5}}}
+                                        {"match": {"concept_name": {
+                                            "query": entity_name,
+                                            "minimum_should_match": "1<60%",
+                                            "boost": 2.5
+                                        }}}
                                     ],
                                     "minimum_should_match": 1
                                 }
@@ -261,7 +285,11 @@ class Stage1CandidateRetrieval:
         
         try:
             response = self.es_client.es_client.search(index=es_index, body=query)
-            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            # Add sigmoid normalized score
+            for hit in hits:
+                hit['_score_normalized'] = sigmoid_normalize(hit['_score'], center=3.0)
+            return hits
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
             return self._lexical_search(entity_name, domain_id, es_index, top_k)
