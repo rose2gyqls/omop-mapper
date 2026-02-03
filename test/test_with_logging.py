@@ -10,7 +10,8 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from tqdm import tqdm
 import time
 
-sys.path.append('/home/work/skku/hyo/MapOMOP/src')
+# 상대 경로로 src 디렉토리 추가
+sys.path.append(str(Path(__file__).parent.parent / 'src'))
 
 from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient

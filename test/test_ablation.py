@@ -21,7 +21,8 @@ from tqdm import tqdm
 import time
 import json
 
-sys.path.append('/home/work/skku/hyo/omop-mapper/src')
+# 상대 경로로 src 디렉토리 추가
+sys.path.append(str(Path(__file__).parent.parent / 'src'))
 
 from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient
