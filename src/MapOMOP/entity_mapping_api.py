@@ -14,7 +14,8 @@ from .elasticsearch_client import ElasticsearchClient
 from .mapping_stages import (
     Stage1CandidateRetrieval,
     Stage2StandardCollection,
-    Stage3HybridScoring
+    Stage3HybridScoring,
+    ScoringMode
 )
 from .mapping_validation import MappingValidator
 
@@ -87,9 +88,7 @@ class EntityMappingAPI:
         self,
         es_client: Optional[ElasticsearchClient] = None,
         confidence_threshold: float = 0.5,
-        scoring_mode: str = "llm",
-        include_stage1_scores: bool = False,
-        use_lexical: bool = True,
+        scoring_mode: str = ScoringMode.LLM,
         include_non_std_info: bool = False
     ):
         """
@@ -98,16 +97,15 @@ class EntityMappingAPI:
         Args:
             es_client: Elasticsearch client instance
             confidence_threshold: Minimum confidence threshold
-            scoring_mode: Scoring mode ('llm', 'hybrid', 'semantic_only')
-            include_stage1_scores: Include Stage 1 scores in LLM prompt
-            use_lexical: Whether to use lexical search in Stage 1
+            scoring_mode: Scoring mode
+                - 'llm': LLM without score (default)
+                - 'llm_with_score': LLM with semantic score in prompt
+                - 'semantic': Semantic similarity only
             include_non_std_info: Include non-std concept info in LLM prompt
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
         self.scoring_mode = scoring_mode
-        self.include_stage1_scores = include_stage1_scores
-        self.use_lexical = use_lexical
         self.include_non_std_info = include_non_std_info
         
         # SapBERT model (lazy loading)
@@ -118,8 +116,7 @@ class EntityMappingAPI:
         # Stage modules
         self.stage1 = Stage1CandidateRetrieval(
             es_client=self.es_client,
-            has_sapbert=HAS_SAPBERT,
-            use_lexical=use_lexical
+            has_sapbert=HAS_SAPBERT
         )
         
         self.stage2 = Stage2StandardCollection(es_client=self.es_client)
@@ -183,13 +180,10 @@ class EntityMappingAPI:
                     sapbert_model=self._sapbert_model,
                     sapbert_tokenizer=self._sapbert_tokenizer,
                     sapbert_device=self._sapbert_device,
-                    text_weight=0.4,
-                    semantic_weight=0.6,
                     es_client=self.es_client,
                     openai_api_key=None,
                     openai_model="gpt-4o-mini",
                     scoring_mode=self.scoring_mode,
-                    include_stage1_scores=self.include_stage1_scores,
                     include_non_std_info=self.include_non_std_info
                 )
             

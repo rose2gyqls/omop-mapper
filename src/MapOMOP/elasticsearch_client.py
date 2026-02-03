@@ -7,26 +7,11 @@ Supports concept, concept-relationship, and concept-synonym indices.
 
 import logging
 import os
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from elasticsearch import Elasticsearch
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass 
-class SearchResult:
-    """Search result data class."""
-    concept_id: str
-    concept_name: str
-    domain_id: str
-    vocabulary_id: str
-    concept_class_id: str
-    standard_concept: str
-    concept_code: str
-    score: float
-    synonyms: List[str] = field(default_factory=list)
 
 
 class ElasticsearchClient:
@@ -39,7 +24,7 @@ class ElasticsearchClient:
     DEFAULT_PASSWORD = "snomed"
     
     # Index names
-    CONCEPT_INDEX = "concept"
+    CONCEPT_INDEX = "concept-small"
     SYNONYM_INDEX = "concept-synonym"
     RELATIONSHIP_INDEX = "concept-relationship"
     
@@ -89,8 +74,8 @@ class ElasticsearchClient:
         url = f"{scheme}://{self.host}:{self.port}"
             
         config = {
-                'request_timeout': self.timeout,
-                'max_retries': 3,
+            'request_timeout': self.timeout,
+            'max_retries': 3,
             'retry_on_timeout': True,
             'verify_certs': False,
             'ssl_show_warn': False
@@ -112,147 +97,6 @@ class ElasticsearchClient:
         except Exception as e:
             logger.error(f"Elasticsearch connection failed: {e}")
             return None
-    
-    def search_concepts(
-        self,
-        query: str,
-        domain_ids: Optional[List[str]] = None,
-        vocabulary_ids: Optional[List[str]] = None,
-        standard_concept_only: bool = False,
-        limit: int = 10
-    ) -> List[SearchResult]:
-        """
-        Search OMOP CDM concepts.
-        
-        Args:
-            query: Search query text
-            domain_ids: Domain ID filter (e.g., ['Condition', 'Drug'])
-            vocabulary_ids: Vocabulary ID filter (e.g., ['SNOMED', 'RxNorm'])
-            standard_concept_only: Only search standard concepts
-            limit: Maximum results to return
-            
-        Returns:
-            List of SearchResult objects
-        """
-        if not self.es_client:
-            logger.warning("Elasticsearch client not initialized")
-            return []
-        
-        try:
-            indices = self._get_concept_indices()
-            if not indices:
-                logger.warning("No concept indices found")
-                return []
-                
-            search_body = self._build_search_query(
-                    query, domain_ids, vocabulary_ids, standard_concept_only, limit
-                )
-                
-            response = self.es_client.search(
-                index=",".join(indices),
-                    body=search_body
-                )
-            
-            results = self._parse_search_results(response)
-            logger.debug(f"Search '{query}' returned {len(results)} results")
-            return results
-            
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
-    
-    def _get_concept_indices(self) -> List[str]:
-        """Get available concept indices."""
-        try:
-            indices = self.es_client.cat.indices(format='json')
-            concept_indices = []
-            
-            for idx in indices:
-                name = idx['index']
-                if any(kw in name.lower() for kw in ['concept', 'omop']):
-                    if 'synonym' not in name.lower() and 'relationship' not in name.lower():
-                        concept_indices.append(name)
-            
-            return concept_indices if concept_indices else [self.concept_index]
-            
-        except Exception as e:
-            logger.debug(f"Failed to list indices: {e}")
-            return [self.concept_index]
-    
-    def _build_search_query(
-        self,
-        query: str,
-        domain_ids: Optional[List[str]],
-        vocabulary_ids: Optional[List[str]],
-        standard_concept_only: bool,
-        limit: int
-    ) -> Dict[str, Any]:
-        """Build Elasticsearch search query."""
-        search_body = {
-            "size": limit,
-            "query": {
-                "bool": {
-                    "must": [{
-                        "bool": {
-                            "should": [
-                                {"term": {"concept_name.keyword": {"value": query.lower(), "boost": 4.0}}},
-                                {"match_phrase": {"concept_name": {"query": query, "boost": 2.5}}},
-                                {"match": {"concept_name": {"query": query, "boost": 2.0}}},
-                                {"match": {"concept_code": {"query": query, "boost": 2.0}}},
-                                {"wildcard": {"concept_name": {"value": f"*{query}*", "boost": 1.5}}},
-                                {"fuzzy": {"concept_name": {"value": query, "fuzziness": "AUTO", "boost": 1.0}}}
-                            ],
-                            "minimum_should_match": 1
-                        }
-                    }],
-                    "filter": []
-                }
-            },
-            "sort": [
-                {"_score": {"order": "desc"}},
-                {"concept_name.keyword": {"order": "asc"}}
-            ]
-        }
-        
-        # Domain filter
-        if domain_ids:
-            search_body["query"]["bool"]["filter"].append({
-                "terms": {"domain_id": domain_ids}
-            })
-        
-        # Vocabulary filter
-        if vocabulary_ids:
-            search_body["query"]["bool"]["filter"].append({
-                "terms": {"vocabulary_id": vocabulary_ids}
-            })
-        
-        # Standard concept filter
-        if standard_concept_only:
-            search_body["query"]["bool"]["filter"].append({
-                "term": {"standard_concept": "S"}
-            })
-        
-        return search_body
-    
-    def _parse_search_results(self, response: Dict[str, Any]) -> List[SearchResult]:
-        """Parse Elasticsearch search response."""
-        results = []
-        
-        for hit in response.get('hits', {}).get('hits', []):
-            source = hit['_source']
-            result = SearchResult(
-                concept_id=str(source.get('concept_id', '')),
-                concept_name=source.get('concept_name', ''),
-                domain_id=source.get('domain_id', ''),
-                vocabulary_id=source.get('vocabulary_id', ''),
-                concept_class_id=source.get('concept_class_id', ''),
-                standard_concept=source.get('standard_concept', ''),
-                concept_code=source.get('concept_code', ''),
-                score=hit['_score']
-            )
-            results.append(result)
-        
-        return results
     
     def search_synonyms(self, concept_id: str) -> List[str]:
         """
@@ -287,95 +131,6 @@ class ElasticsearchClient:
         except Exception as e:
             logger.error(f"Synonym search failed: {e}")
             return []
-
-    def search_synonyms_bulk(self, concept_ids: List[str]) -> Dict[str, List[str]]:
-        """
-        Bulk search synonyms for multiple concepts.
-        
-        Args:
-            concept_ids: List of OMOP concept IDs
-        
-        Returns:
-            Dict mapping concept_id to list of synonyms
-        """
-        result: Dict[str, List[str]] = {}
-        
-        if not self.es_client or not concept_ids:
-            return result
-        
-        try:
-            response = self.es_client.search(
-                index=self.concept_synonym_index,
-                body={
-                    "query": {"terms": {"concept_id": [str(cid) for cid in concept_ids]}},
-                    "size": max(100, len(concept_ids) * 10)
-                }
-            )
-            
-            for hit in response.get('hits', {}).get('hits', []):
-                src = hit['_source']
-                cid = str(src.get('concept_id', ''))
-                syn = src.get('concept_synonym_name', '')
-                
-                if cid and syn:
-                    if cid not in result:
-                        result[cid] = []
-                    if syn not in result[cid]:
-                        result[cid].append(syn)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Bulk synonym search failed: {e}")
-            return {}
-    
-    def search_synonyms_with_embeddings_bulk(
-        self,
-        concept_ids: List[str]
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Bulk search synonyms with embeddings for multiple concepts.
-        
-        Args:
-            concept_ids: List of OMOP concept IDs
-        
-        Returns:
-            Dict mapping concept_id to list of synonym dicts with 'name' and 'embedding'
-        """
-        result: Dict[str, List[Dict[str, Any]]] = {}
-        
-        if not self.es_client or not concept_ids:
-            return result
-        
-        try:
-            response = self.es_client.search(
-                index=self.concept_synonym_index,
-                body={
-                    "query": {"terms": {"concept_id": [str(cid) for cid in concept_ids]}},
-                    "size": max(100, len(concept_ids) * 10)
-                }
-            )
-            
-            for hit in response.get('hits', {}).get('hits', []):
-                src = hit['_source']
-                cid = str(src.get('concept_id', ''))
-                syn_name = src.get('concept_synonym_name', '')
-                syn_embedding = src.get('concept_synonym_embedding')
-                
-                if cid and syn_name:
-                    if cid not in result:
-                        result[cid] = []
-                    
-                    entry = {'name': syn_name}
-                    if syn_embedding and len(syn_embedding) == 768:
-                        entry['embedding'] = syn_embedding
-                    result[cid].append(entry)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Bulk synonym+embedding search failed: {e}")
-            return {}
     
     def health_check(self) -> Dict[str, Any]:
         """Check cluster health status."""
@@ -418,4 +173,4 @@ class ElasticsearchClient:
     @classmethod
     def create_default(cls) -> 'ElasticsearchClient':
         """Create client with default settings."""
-        return cls() 
+        return cls()

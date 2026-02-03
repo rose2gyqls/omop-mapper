@@ -16,13 +16,15 @@ Usage:
     results = api.map_entity(entity)
 """
 
-from .elasticsearch_client import ElasticsearchClient, SearchResult
+from .elasticsearch_client import ElasticsearchClient
 from .entity_mapping_api import (
     DomainID,
     EntityInput,
     EntityMappingAPI,
     MappingResult,
 )
+from .mapping_stages import ScoringMode
+from .utils import sigmoid_normalize
 
 __version__ = "1.0.0"
 __author__ = "rose"
@@ -33,7 +35,10 @@ __all__ = [
     "EntityInput",
     "DomainID",
     "MappingResult",
+    # Scoring Mode
+    "ScoringMode",
     # Elasticsearch
     "ElasticsearchClient",
-    "SearchResult",
+    # Utils
+    "sigmoid_normalize",
 ]

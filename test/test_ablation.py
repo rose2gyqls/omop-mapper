@@ -1,13 +1,10 @@
 """
-6가지 Ablation 테스트 실행 스크립트
+3가지 Ablation 테스트 실행 스크립트
 
 테스트 조건:
-1. Stage1 (Semantic + Combined) + Stage3 LLM (점수 포함)
-2. Stage1 (Semantic + Combined) + Stage3 LLM (점수 미포함)
-3. Stage1 (Semantic + Combined) + Stage3 Semantic Only
-4. Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 포함)
-5. Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 미포함)
-6. Stage1 (Lexical + Semantic + Combined) + Stage3 Semantic Only
+1. Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 포함)
+2. Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 미포함)
+3. Stage1 (Lexical + Semantic + Combined) + Stage3 Semantic Only
 """
 import pandas as pd
 import logging
@@ -28,49 +25,23 @@ from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient
 
 
-# 6가지 테스트 조건 정의
+# 3가지 테스트 조건 정의
+# scoring_mode: 'llm' (디폴트), 'llm_with_score', 'semantic'
 TEST_CONDITIONS = [
     {
-        'name': 'semantic_combined_llm_with_scores',
-        'description': 'Stage1 (Semantic + Combined) + Stage3 LLM (점수 포함)',
-        'use_lexical': False,
-        'scoring_mode': 'llm',
-        'include_stage1_scores': True
+        'name': 'llm_no_score',
+        'description': 'Stage3 LLM (점수 미포함) - 디폴트',
+        'scoring_mode': 'llm'
     },
     {
-        'name': 'semantic_combined_llm_no_scores',
-        'description': 'Stage1 (Semantic + Combined) + Stage3 LLM (점수 미포함)',
-        'use_lexical': False,
-        'scoring_mode': 'llm',
-        'include_stage1_scores': False
+        'name': 'llm_with_score',
+        'description': 'Stage3 LLM (점수 포함)',
+        'scoring_mode': 'llm_with_score'
     },
     {
-        'name': 'semantic_combined_semantic_only',
-        'description': 'Stage1 (Semantic + Combined) + Stage3 Semantic Only',
-        'use_lexical': False,
-        'scoring_mode': 'semantic_only',
-        'include_stage1_scores': False
-    },
-    {
-        'name': 'full_search_llm_with_scores',
-        'description': 'Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 포함)',
-        'use_lexical': True,
-        'scoring_mode': 'llm',
-        'include_stage1_scores': True
-    },
-    {
-        'name': 'full_search_llm_no_scores',
-        'description': 'Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 미포함)',
-        'use_lexical': True,
-        'scoring_mode': 'llm',
-        'include_stage1_scores': False
-    },
-    {
-        'name': 'full_search_semantic_only',
-        'description': 'Stage1 (Lexical + Semantic + Combined) + Stage3 Semantic Only',
-        'use_lexical': True,
-        'scoring_mode': 'semantic_only',
-        'include_stage1_scores': False
+        'name': 'semantic',
+        'description': 'Stage3 Semantic Only',
+        'scoring_mode': 'semantic'
     }
 ]
 
@@ -269,9 +240,7 @@ class AblationTester:
         
         self.logger.info("\n" + "=" * 100)
         self.logger.info(f"🧪 테스트 조건: {condition['description']}")
-        self.logger.info(f"   - use_lexical: {condition['use_lexical']}")
         self.logger.info(f"   - scoring_mode: {condition['scoring_mode']}")
-        self.logger.info(f"   - include_stage1_scores: {condition['include_stage1_scores']}")
         self.logger.info("=" * 100)
         
         start_time = time.time()
@@ -279,9 +248,7 @@ class AblationTester:
         # API 초기화 (조건에 맞게)
         api = EntityMappingAPI(
             es_client=self.es_client,
-            scoring_mode=condition['scoring_mode'],
-            include_stage1_scores=condition['include_stage1_scores'],
-            use_lexical=condition['use_lexical']
+            scoring_mode=condition['scoring_mode']
         )
         
         # 테스트 실행
@@ -319,9 +286,7 @@ class AblationTester:
         summary = {
             'condition_name': condition_name,
             'description': condition['description'],
-            'use_lexical': condition['use_lexical'],
             'scoring_mode': condition['scoring_mode'],
-            'include_stage1_scores': condition['include_stage1_scores'],
             'total_tests': total_tests,
             'successful_mappings': successful_mappings,
             'correct_mappings': correct_mappings,
@@ -411,9 +376,7 @@ class AblationTester:
             summary_data.append({
                 'condition_name': summary['condition_name'],
                 'description': summary['description'],
-                'use_lexical': summary['use_lexical'],
                 'scoring_mode': summary['scoring_mode'],
-                'include_stage1_scores': summary['include_stage1_scores'],
                 'total_tests': summary['total_tests'],
                 'successful_mappings': summary['successful_mappings'],
                 'correct_mappings': summary['correct_mappings'],
@@ -463,7 +426,7 @@ class AblationTester:
     def _create_summary_sheet(self, ws, all_summaries):
         """요약 시트 생성"""
         headers = [
-            "조건명", "설명", "use_lexical", "scoring_mode", "include_scores",
+            "조건명", "설명", "scoring_mode",
             "총 테스트", "매핑 성공", "정답 매칭", "Success Rate (%)", "Accuracy (%)",
             "소요시간(초)", "평균시간(초/엔티티)"
         ]
@@ -482,19 +445,17 @@ class AblationTester:
         for row, summary in enumerate(all_summaries, 2):
             ws.cell(row=row, column=1, value=summary['condition_name'])
             ws.cell(row=row, column=2, value=summary['description'])
-            ws.cell(row=row, column=3, value=str(summary['use_lexical']))
-            ws.cell(row=row, column=4, value=summary['scoring_mode'])
-            ws.cell(row=row, column=5, value=str(summary['include_stage1_scores']))
-            ws.cell(row=row, column=6, value=summary['total_tests'])
-            ws.cell(row=row, column=7, value=summary['successful_mappings'])
-            ws.cell(row=row, column=8, value=summary['correct_mappings'])
-            ws.cell(row=row, column=9, value=round(summary['success_rate'], 2))
-            ws.cell(row=row, column=10, value=round(summary['accuracy'], 2))
-            ws.cell(row=row, column=11, value=round(summary['elapsed_time'], 2))
-            ws.cell(row=row, column=12, value=round(summary['avg_time_per_entity'], 4))
+            ws.cell(row=row, column=3, value=summary['scoring_mode'])
+            ws.cell(row=row, column=4, value=summary['total_tests'])
+            ws.cell(row=row, column=5, value=summary['successful_mappings'])
+            ws.cell(row=row, column=6, value=summary['correct_mappings'])
+            ws.cell(row=row, column=7, value=round(summary['success_rate'], 2))
+            ws.cell(row=row, column=8, value=round(summary['accuracy'], 2))
+            ws.cell(row=row, column=9, value=round(summary['elapsed_time'], 2))
+            ws.cell(row=row, column=10, value=round(summary['avg_time_per_entity'], 4))
             
             # Accuracy 컬러링
-            accuracy_cell = ws.cell(row=row, column=10)
+            accuracy_cell = ws.cell(row=row, column=8)
             if summary['accuracy'] >= 80:
                 accuracy_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
             elif summary['accuracy'] >= 60:
@@ -503,7 +464,7 @@ class AblationTester:
                 accuracy_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
         # 열 너비 설정
-        column_widths = [35, 55, 12, 15, 15, 10, 12, 12, 15, 12, 12, 18]
+        column_widths = [35, 45, 18, 10, 12, 12, 15, 12, 12, 18]
         for i, width in enumerate(column_widths, 1):
             ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = width
     
@@ -642,8 +603,8 @@ def main():
     
     # 테스트할 조건 선택 (None이면 모든 조건 테스트)
     # 특정 조건만 테스트하려면 인덱스 지정
-    # 예: [TEST_CONDITIONS[0], TEST_CONDITIONS[3]]  # 1번, 4번 조건만
-    CONDITIONS_TO_TEST = [TEST_CONDITIONS[4]]  # 모든 6가지 조건 테스트
+    # 예: [TEST_CONDITIONS[0], TEST_CONDITIONS[1]]  # 1번, 2번 조건만
+    CONDITIONS_TO_TEST = None  # 모든 3가지 조건 테스트
     
     # ============================================================
     # 테스트 실행

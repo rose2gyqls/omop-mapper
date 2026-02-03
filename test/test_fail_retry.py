@@ -224,8 +224,8 @@ class FailRetryMappingTester:
         self.logger.info("=" * 100)
         self.logger.info("테스트 조건:")
         self.logger.info("  - Domain: 각 엔티티별 지정된 도메인")
-        self.logger.info("  - Stage 1: Lexical + Semantic + Combined (use_lexical: True)")
-        self.logger.info("  - Stage 3: LLM (점수 미포함, include_stage1_scores: False)")
+        self.logger.info("  - Stage 1: Lexical + Semantic + Combined")
+        self.logger.info("  - Stage 3: LLM (점수 미포함)")
         self.logger.info("  - Non-std 정보 포함 프롬프트 (include_non_std_info: True)")
         self.logger.info("=" * 100)
         
@@ -234,12 +234,10 @@ class FailRetryMappingTester:
         
         start_time = time.time()
         
-        # API 초기화
+        # API 초기화 (scoring_mode: 'llm' = LLM without score, 'llm_with_score', 'semantic')
         api = EntityMappingAPI(
             es_client=self.es_client,
             scoring_mode='llm',
-            include_stage1_scores=False,
-            use_lexical=True,
             include_non_std_info=True
         )
         
@@ -285,9 +283,7 @@ class FailRetryMappingTester:
         summary = {
             'test_name': 'fail_retry_mapping',
             'description': 'Stage1 (Lexical + Semantic + Combined) + Stage3 LLM (점수 미포함, Non-std 정보 포함)',
-            'use_lexical': True,
             'scoring_mode': 'llm',
-            'include_stage1_scores': False,
             'include_non_std_info': True,
             'total_tests': total_tests,
             'successful_mappings': successful_mappings,
@@ -318,9 +314,7 @@ class FailRetryMappingTester:
         summary_data = [{
             'test_name': summary['test_name'],
             'description': summary['description'],
-            'use_lexical': summary['use_lexical'],
             'scoring_mode': summary['scoring_mode'],
-            'include_stage1_scores': summary['include_stage1_scores'],
             'include_non_std_info': summary['include_non_std_info'],
             'total_tests': summary['total_tests'],
             'successful_mappings': summary['successful_mappings'],
@@ -383,9 +377,7 @@ class FailRetryMappingTester:
         summary_items = [
             ("테스트명", summary['test_name']),
             ("설명", summary['description']),
-            ("use_lexical", str(summary['use_lexical'])),
             ("scoring_mode", summary['scoring_mode']),
-            ("include_stage1_scores", str(summary['include_stage1_scores'])),
             ("include_non_std_info", str(summary['include_non_std_info'])),
             ("총 테스트", summary['total_tests']),
             ("매핑 성공", summary['successful_mappings']),

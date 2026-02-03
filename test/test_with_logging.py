@@ -17,18 +17,19 @@ from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient
 
 class EntityMappingTester:
-    def __init__(self, log_dir: str = "test_logs", scoring_mode: str = "llm", include_stage1_scores: bool = False):
+    def __init__(self, log_dir: str = "test_logs", scoring_mode: str = "llm"):
         """테스터 초기화
         
         Args:
             log_dir: 로그 디렉토리
-            scoring_mode: Stage 3 점수 계산 방식 ('llm' 또는 'hybrid')
-            include_stage1_scores: LLM 프롬프트에 Stage 1 점수 포함 여부
+            scoring_mode: Stage 3 점수 계산 방식
+                - 'llm': LLM without score (디폴트)
+                - 'llm_with_score': LLM with semantic score in prompt
+                - 'semantic': Semantic similarity only
         """
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
         self.scoring_mode = scoring_mode
-        self.include_stage1_scores = include_stage1_scores
         
         self.setup_logging()
         
@@ -38,12 +39,10 @@ class EntityMappingTester:
         
         self.api = EntityMappingAPI(
             es_client=self.es_client,
-            scoring_mode=scoring_mode,
-            include_stage1_scores=include_stage1_scores
+            scoring_mode=scoring_mode
         )
         
-        self.logger.info(f"✅ Scoring Mode: {scoring_mode.upper()}")
-        self.logger.info(f"✅ Include Stage1 Scores: {include_stage1_scores}")
+        self.logger.info(f"✅ Scoring Mode: {scoring_mode}")
         
         self.domain_mapping = {
             'Condition': DomainID.CONDITION,
@@ -193,9 +192,9 @@ class EntityMappingTester:
             if hasattr(self.api, '_last_rerank_candidates') and self.api._last_rerank_candidates:
                 stage3_candidates = self.api._last_rerank_candidates
                 # LLM 모드인 경우 Stage 3 결과 상세 로깅
-                if self.scoring_mode == 'llm' and stage3_candidates:
+                if self.scoring_mode in ['llm', 'llm_with_score'] and stage3_candidates:
                     header = "📊 Stage 3 LLM 평가 결과"
-                    if self.include_stage1_scores:
+                    if self.scoring_mode == 'llm_with_score':
                         header += " (SapBERT 의미유사도 포함)"
                     self.logger.info(f"\n{header}:")
                     for i, candidate in enumerate(stage3_candidates[:10], 1):
@@ -325,8 +324,7 @@ class EntityMappingTester:
         self.logger.info("🚀 Entity Mapping API 테스트 시작")
         self.logger.info("=" * 100)
         self.logger.info(f"테스트 엔티티 리스트: {len(entity_list)}개")
-        self.logger.info(f"Scoring Mode: {self.scoring_mode.upper()}")
-        self.logger.info(f"Include Stage1 Scores: {self.include_stage1_scores}")
+        self.logger.info(f"Scoring Mode: {self.scoring_mode}")
         
         start_time = time.time()
         
@@ -397,9 +395,7 @@ class EntityMappingTester:
     def save_results_to_csv(self, test_results: list):
         """테스트 결과를 CSV 파일로 저장 (도메인별 결과 포함)"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # 파일명에 설정 정보 포함
-        score_suffix = "with_scores" if self.include_stage1_scores else "no_scores"
-        csv_file = self.log_dir / f"test_results_{self.scoring_mode}_{score_suffix}_{timestamp}.csv"
+        csv_file = self.log_dir / f"test_results_{self.scoring_mode}_{timestamp}.csv"
         
         # CSV용 데이터 정리 (도메인별 결과 평탄화)
         csv_results = []
@@ -428,9 +424,7 @@ class EntityMappingTester:
     def save_results_to_xlsx(self, test_results: list):
         """테스트 결과를 XLSX 파일로 저장 (stage1, stage3 후보군을 열로 분리)"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # 파일명에 설정 정보 포함
-        score_suffix = "with_scores" if self.include_stage1_scores else "no_scores"
-        xlsx_file = self.log_dir / f"test_results_detailed_{self.scoring_mode}_{score_suffix}_{timestamp}.xlsx"
+        xlsx_file = self.log_dir / f"test_results_detailed_{self.scoring_mode}_{timestamp}.xlsx"
         
         # 엑셀 워크북 생성
         wb = openpyxl.Workbook()
@@ -633,14 +627,13 @@ def main():
     # ============================================================
     # 설정 옵션
     # ============================================================
-    SCORING_MODE = "llm"  # 'llm' 또는 'hybrid' 선택
-    INCLUDE_STAGE1_SCORES = False  # LLM 프롬프트에 Stage1 점수 포함 여부
+    # scoring_mode 선택: 'llm' (디폴트), 'llm_with_score', 'semantic'
+    SCORING_MODE = "llm"
     
     # 테스터 초기화
     tester = EntityMappingTester(
         log_dir="test_logs",
-        scoring_mode=SCORING_MODE,
-        include_stage1_scores=INCLUDE_STAGE1_SCORES
+        scoring_mode=SCORING_MODE
     )
     
     # ============================================================
@@ -669,7 +662,6 @@ def main():
     
     print(f"\n✅ 테스트 완료! 로그는 {tester.log_dir} 디렉토리에 저장되었습니다.")
     print(f"   - Scoring Mode: {SCORING_MODE}")
-    print(f"   - Include Stage1 Scores: {INCLUDE_STAGE1_SCORES}")
 
 if __name__ == "__main__":
     main()

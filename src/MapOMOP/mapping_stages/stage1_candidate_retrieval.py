@@ -8,26 +8,13 @@ Retrieves candidate concepts using multiple search strategies:
 """
 
 import logging
-import math
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from ..utils import sigmoid_normalize
 
-def sigmoid_normalize(score: float, center: float = 3.0, scale: float = 1.0) -> float:
-    """
-    Normalize ES score to 0-1 range using sigmoid.
-    
-    Args:
-        score: Raw ES score (e.g., BM25 score)
-        center: Score at which sigmoid returns 0.5
-        scale: Steepness of the curve
-        
-    Returns:
-        Normalized score between 0 and 1
-    """
-    return 1 / (1 + math.exp(-(score - center) / scale))
+logger = logging.getLogger(__name__)
 
 
 class Stage1CandidateRetrieval:
@@ -38,23 +25,16 @@ class Stage1CandidateRetrieval:
     SEMANTIC_THRESHOLD = 0.8
     COMBINED_THRESHOLD = 3.0
     
-    def __init__(
-        self,
-        es_client,
-        has_sapbert: bool = True,
-        use_lexical: bool = True
-    ):
+    def __init__(self, es_client, has_sapbert: bool = True):
         """
         Initialize Stage 1.
         
         Args:
             es_client: Elasticsearch client
             has_sapbert: Whether SapBERT is available
-            use_lexical: Whether to use lexical search
         """
         self.es_client = es_client
         self.has_sapbert = has_sapbert
-        self.use_lexical = use_lexical
     
     def retrieve_candidates(
         self,
@@ -66,6 +46,8 @@ class Stage1CandidateRetrieval:
         """
         Retrieve candidates using multiple search strategies.
         
+        Uses Lexical + Semantic + Combined search strategies.
+        
         Args:
             entity_name: Entity name to search
             domain_id: Domain filter
@@ -75,10 +57,8 @@ class Stage1CandidateRetrieval:
         Returns:
             List of candidate hits with _search_type field
         """
-        mode = "Lexical + Semantic + Combined" if self.use_lexical else "Semantic + Combined"
-        
         logger.info("=" * 60)
-        logger.info(f"Stage 1: Candidate Retrieval ({mode})")
+        logger.info("Stage 1: Candidate Retrieval (Lexical + Semantic + Combined)")
         logger.info(f"  Entity: {entity_name}")
         logger.info(f"  Domain: {domain_id}")
         logger.info("=" * 60)
@@ -86,19 +66,15 @@ class Stage1CandidateRetrieval:
         all_candidates = []
         
         # 1. Lexical Search
-        lexical_filtered = []
-        if self.use_lexical:
-            logger.info(f"\n[1/3] Lexical Search (threshold: {self.LEXICAL_THRESHOLD})")
-            lexical_results = self._lexical_search(entity_name, domain_id, es_index, 3)
-            lexical_filtered = [h for h in lexical_results if h['_score'] >= self.LEXICAL_THRESHOLD]
-            
-            logger.info(f"  Results: {len(lexical_results)} -> {len(lexical_filtered)} (passed threshold)")
-            
-            for hit in lexical_filtered:
-                hit['_search_type'] = 'lexical'
-                all_candidates.append(hit)
-        else:
-            logger.info("\n[1/3] Lexical Search - Skipped (use_lexical=False)")
+        logger.info(f"\n[1/3] Lexical Search (threshold: {self.LEXICAL_THRESHOLD})")
+        lexical_results = self._lexical_search(entity_name, domain_id, es_index, 3)
+        lexical_filtered = [h for h in lexical_results if h['_score'] >= self.LEXICAL_THRESHOLD]
+        
+        logger.info(f"  Results: {len(lexical_results)} -> {len(lexical_filtered)} (passed threshold)")
+        
+        for hit in lexical_filtered:
+            hit['_search_type'] = 'lexical'
+            all_candidates.append(hit)
         
         # 2. Semantic Search
         semantic_filtered = []
@@ -122,7 +98,7 @@ class Stage1CandidateRetrieval:
         if entity_embedding is not None:
             combined_results = self._hybrid_search(entity_name, entity_embedding, domain_id, es_index, 3)
         else:
-            combined_results = lexical_filtered[:3] if self.use_lexical else []
+            combined_results = lexical_filtered[:3]
         
         combined_filtered = [h for h in combined_results if h['_score'] >= self.COMBINED_THRESHOLD]
         
@@ -135,8 +111,7 @@ class Stage1CandidateRetrieval:
         # Summary
         logger.info("\n" + "=" * 60)
         logger.info(f"Stage 1 Complete: {len(all_candidates)} total candidates")
-        if self.use_lexical:
-            logger.info(f"  - Lexical: {len(lexical_filtered)}")
+        logger.info(f"  - Lexical: {len(lexical_filtered)}")
         logger.info(f"  - Semantic: {len(semantic_filtered)}")
         logger.info(f"  - Combined: {len(combined_filtered)}")
         logger.info("=" * 60)
