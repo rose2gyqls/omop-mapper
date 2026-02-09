@@ -27,11 +27,17 @@ except ImportError:
 class MappingValidator:
     """Validates mapping results using LLM."""
     
+    # Default LLM hyperparameters
+    DEFAULT_TEMPERATURE = 0.1
+    DEFAULT_TOP_P = 1.0
+    
     def __init__(
         self,
         es_client=None,
         openai_api_key: Optional[str] = None,
-        openai_model: str = "gpt-4o-mini"
+        openai_model: str = "gpt-4o-mini",
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None
     ):
         """
         Initialize validator.
@@ -40,10 +46,14 @@ class MappingValidator:
             es_client: Elasticsearch client for synonym lookup
             openai_api_key: OpenAI API key (uses env var if None)
             openai_model: OpenAI model name
+            temperature: LLM temperature (0.0-2.0, default 0.1)
+            top_p: LLM top_p / nucleus sampling (0.0-1.0, default 1.0)
         """
         self.es_client = es_client
         self.openai_client = None
         self.openai_model = openai_model
+        self.temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
+        self.top_p = top_p if top_p is not None else self.DEFAULT_TOP_P
         
         if not HAS_OPENAI:
             logger.error("OpenAI library not installed")
@@ -125,7 +135,8 @@ class MappingValidator:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 max_tokens=256,
                 response_format={"type": "json_object"}
             )

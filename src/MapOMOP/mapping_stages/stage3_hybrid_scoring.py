@@ -106,6 +106,10 @@ class Stage3HybridScoring:
     USER_PROMPT_TEMPLATE = USER_PROMPT_TEMPLATE
     SCORE_HINT_TEMPLATE = SCORE_HINT_TEMPLATE
     
+    # Default LLM hyperparameters
+    DEFAULT_TEMPERATURE = 0.3
+    DEFAULT_TOP_P = 1.0
+    
     def __init__(
         self,
         sapbert_model=None,
@@ -115,7 +119,9 @@ class Stage3HybridScoring:
         openai_api_key: Optional[str] = None,
         openai_model: str = "gpt-4o-mini",
         scoring_mode: str = ScoringMode.LLM,
-        include_non_std_info: bool = False
+        include_non_std_info: bool = False,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None
     ):
         """
         Initialize Stage 3.
@@ -132,6 +138,8 @@ class Stage3HybridScoring:
                 - 'llm_with_score': LLM with semantic score in prompt
                 - 'semantic': Semantic similarity only
             include_non_std_info: Include original non-std concept info in LLM prompt
+            temperature: LLM temperature (0.0-2.0, default 0.3)
+            top_p: LLM top_p / nucleus sampling (0.0-1.0, default 1.0)
         """
         self.es_client = es_client
         self.scoring_mode = scoring_mode.lower()
@@ -145,6 +153,8 @@ class Stage3HybridScoring:
         # LLM settings
         self.openai_client = None
         self.openai_model = openai_model
+        self.temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
+        self.top_p = top_p if top_p is not None else self.DEFAULT_TOP_P
         
         # Initialize based on mode
         self._initialize_mode(openai_api_key)
@@ -361,7 +371,8 @@ class Stage3HybridScoring:
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 max_tokens=2048,
                 response_format={"type": "json_object"}
             )
