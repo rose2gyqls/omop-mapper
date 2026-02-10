@@ -8,6 +8,11 @@ Stages:
     2. Standard Collection: Convert non-standard to standard concepts
     3. Hybrid Scoring: LLM or embedding-based final ranking
 
+LLM Providers:
+    - OpenAI (gpt-4o-mini, etc.)
+    - SNUH Hari (snuh/hari-q3-14b via vLLM)
+    - Google Gemma (google/gemma-3-12b-it via vLLM)
+
 Usage:
     from MapOMOP import EntityMappingAPI, EntityInput, DomainID
     
@@ -23,6 +28,12 @@ from .entity_mapping_api import (
     EntityMappingAPI,
     MappingResult,
 )
+from .llm_client import (
+    LLMClient,
+    LLMProvider,
+    get_llm_client,
+    create_llm_client,
+)
 from .mapping_stages import ScoringMode
 from .utils import sigmoid_normalize
 
@@ -37,6 +48,11 @@ __all__ = [
     "MappingResult",
     # Scoring Mode
     "ScoringMode",
+    # LLM Client
+    "LLMClient",
+    "LLMProvider",
+    "get_llm_client",
+    "create_llm_client",
     # Elasticsearch
     "ElasticsearchClient",
     # Utils

@@ -122,12 +122,8 @@ class EntityMappingAPI:
         self.stage2 = Stage2StandardCollection(es_client=self.es_client)
         self.stage3 = None  # Initialized after SapBERT loading
         
-        # Validation module
-        self.validator = MappingValidator(
-            es_client=self.es_client,
-            openai_api_key=None,
-            openai_model="gpt-4o-mini"
-        )
+        # Validation module (uses LLM client from environment config)
+        self.validator = MappingValidator(es_client=self.es_client)
         
         # Debug variables
         self._last_stage1_candidates = []
@@ -174,15 +170,13 @@ class EntityMappingAPI:
             if HAS_SAPBERT and self._sapbert_model is None:
                 self._initialize_sapbert_model()
             
-            # Initialize Stage 3
+            # Initialize Stage 3 (uses LLM client from environment config)
             if self.stage3 is None:
                 self.stage3 = Stage3HybridScoring(
                     sapbert_model=self._sapbert_model,
                     sapbert_tokenizer=self._sapbert_tokenizer,
                     sapbert_device=self._sapbert_device,
                     es_client=self.es_client,
-                    openai_api_key=None,
-                    openai_model="gpt-4o-mini",
                     scoring_mode=self.scoring_mode,
                     include_non_std_info=self.include_non_std_info
                 )

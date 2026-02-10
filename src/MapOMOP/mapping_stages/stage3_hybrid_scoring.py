@@ -5,28 +5,23 @@ Final scoring and ranking of candidates using multiple strategies:
 - llm: LLM-based evaluation without semantic scores (default)
 - llm_with_score: LLM-based evaluation with semantic scores in prompt
 - semantic: SapBERT cosine similarity only
+
+Supports multiple LLM providers via LLMClient:
+- OpenAI (gpt-4o-mini, etc.)
+- SNUH Hari (snuh/hari-q3-14b)
+- Google Gemma (google/gemma-3-12b-it)
 """
 
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
-
 from ..utils import sigmoid_normalize
-
-load_dotenv()
+from ..llm_client import LLMClient, get_llm_client, LLMProvider
 
 logger = logging.getLogger(__name__)
 
 # Optional dependencies
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
-
 try:
     import numpy as np
     from sklearn.metrics.pairwise import cosine_similarity
@@ -116,8 +111,7 @@ class Stage3HybridScoring:
         sapbert_tokenizer=None,
         sapbert_device=None,
         es_client=None,
-        openai_api_key: Optional[str] = None,
-        openai_model: str = "gpt-4o-mini",
+        llm_client: Optional[LLMClient] = None,
         scoring_mode: str = ScoringMode.LLM,
         include_non_std_info: bool = False,
         temperature: Optional[float] = None,
@@ -131,15 +125,14 @@ class Stage3HybridScoring:
             sapbert_tokenizer: SapBERT tokenizer
             sapbert_device: SapBERT device
             es_client: Elasticsearch client
-            openai_api_key: OpenAI API key
-            openai_model: OpenAI model name
+            llm_client: LLM client instance (uses default if None)
             scoring_mode: Scoring mode
                 - 'llm': LLM without score (default)
                 - 'llm_with_score': LLM with semantic score in prompt
                 - 'semantic': Semantic similarity only
             include_non_std_info: Include original non-std concept info in LLM prompt
-            temperature: LLM temperature (0.0-2.0, default 0.3)
-            top_p: LLM top_p / nucleus sampling (0.0-1.0, default 1.0)
+            temperature: LLM temperature (0.0-2.0, default from env or 0.3)
+            top_p: LLM top_p / nucleus sampling (0.0-1.0, default from env or 1.0)
         """
         self.es_client = es_client
         self.scoring_mode = scoring_mode.lower()
@@ -150,28 +143,30 @@ class Stage3HybridScoring:
         self.sapbert_tokenizer = sapbert_tokenizer
         self.sapbert_device = sapbert_device
         
-        # LLM settings
-        self.openai_client = None
-        self.openai_model = openai_model
-        self.temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
-        self.top_p = top_p if top_p is not None else self.DEFAULT_TOP_P
+        # LLM client (supports OpenAI, Hari, Gemma)
+        self.llm_client = llm_client
+        self.temperature = temperature
+        self.top_p = top_p
         
         # Initialize based on mode
-        self._initialize_mode(openai_api_key)
+        self._initialize_mode()
     
-    def _initialize_mode(self, openai_api_key: Optional[str]):
+    def _initialize_mode(self):
         """Initialize based on scoring mode."""
         if self.scoring_mode in [ScoringMode.LLM, ScoringMode.LLM_WITH_SCORE]:
-            if HAS_OPENAI:
-                api_key = openai_api_key or os.getenv('OPENAI_API_KEY')
-                if api_key:
-                    self.openai_client = OpenAI(api_key=api_key)
-                    mode_desc = "with score" if self.scoring_mode == ScoringMode.LLM_WITH_SCORE else "without score"
-                    logger.info(f"Stage 3 initialized (LLM mode {mode_desc}, model: {self.openai_model})")
-                else:
-                    logger.error("OPENAI_API_KEY not set")
+            # Use provided client or get default
+            if self.llm_client is None:
+                self.llm_client = get_llm_client()
+            
+            if self.llm_client.is_initialized:
+                mode_desc = "with score" if self.scoring_mode == ScoringMode.LLM_WITH_SCORE else "without score"
+                llm_info = self.llm_client.get_info()
+                logger.info(
+                    f"Stage 3 initialized (LLM mode {mode_desc}, "
+                    f"provider: {llm_info['provider']}, model: {llm_info['model']})"
+                )
             else:
-                logger.error("OpenAI library not installed")
+                logger.error("LLM client not initialized")
         elif self.scoring_mode == ScoringMode.SEMANTIC:
             logger.info("Stage 3 initialized (Semantic mode)")
         else:
@@ -270,8 +265,8 @@ class Stage3HybridScoring:
         entity_embedding: Optional[Any]
     ) -> List[Dict[str, Any]]:
         """Score using LLM evaluation."""
-        if not self.openai_client:
-            logger.error("OpenAI client not initialized")
+        if not self.llm_client or not self.llm_client.is_initialized:
+            logger.error("LLM client not initialized")
             return []
         
         # Prepare candidates with optional semantic scores
@@ -365,19 +360,23 @@ class Stage3HybridScoring:
         prompt = self._build_prompt(entity_name, candidates)
         
         try:
-            response = self.openai_client.chat.completions.create(
-                model=self.openai_model,
-                messages=[
-                    {"role": "system", "content": self.SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
+            messages = [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ]
+            
+            response = self.llm_client.chat_completion(
+                messages=messages,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 max_tokens=2048,
-                response_format={"type": "json_object"}
+                json_mode=True
             )
             
-            return self._parse_llm_response(response.choices[0].message.content, candidates)
+            if response is None:
+                return None
+            
+            return self._parse_llm_response(response, candidates)
             
         except Exception as e:
             logger.error(f"LLM API call failed: {e}")
