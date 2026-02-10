@@ -19,7 +19,6 @@ class DataSourceType(Enum):
     """Enumeration of supported data source types."""
     LOCAL_CSV = "local_csv"
     POSTGRES = "postgres"
-    ATHENA_API = "athena_api"
 
 
 class BaseDataSource(ABC):

@@ -2,7 +2,7 @@
 Unified Indexer Module
 
 Main indexer that orchestrates OMOP CDM data indexing from multiple sources.
-Supports local CSV, PostgreSQL, and Athena API data sources.
+Supports local CSV and PostgreSQL data sources.
 
 Index Names (fixed):
     - concept
@@ -21,8 +21,7 @@ from data_sources import (
     BaseDataSource,
     DataSourceType,
     LocalCSVDataSource,
-    PostgresDataSource,
-    AthenaAPIDataSource
+    PostgresDataSource
 )
 from sapbert_embedder import SapBERTEmbedder
 from elasticsearch_indexer import ElasticsearchIndexer
@@ -543,7 +542,7 @@ def create_data_source(source_type: str, **kwargs) -> BaseDataSource:
     Factory function to create data source.
     
     Args:
-        source_type: 'local_csv', 'postgres', or 'athena_api'
+        source_type: 'local_csv', 'postgres'
         **kwargs: Data source specific arguments
         
     Returns:
@@ -569,15 +568,6 @@ def create_data_source(source_type: str, **kwargs) -> BaseDataSource:
             concept_table=kwargs.get('concept_table'),
             relationship_table=kwargs.get('relationship_table'),
             synonym_table=kwargs.get('synonym_table')
-        )
-    
-    elif source_type == 'athena_api':
-        return AthenaAPIDataSource(
-            vocabularies=kwargs.get('vocabularies'),
-            domains=kwargs.get('domains'),
-            standard_only=kwargs.get('standard_only', True),
-            page_size=kwargs.get('page_size', 100),
-            rate_limit_delay=kwargs.get('rate_limit_delay', 0.5)
         )
     
     else:

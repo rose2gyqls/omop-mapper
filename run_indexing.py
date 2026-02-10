@@ -36,7 +36,7 @@ DEFAULT_TABLES = ['concept-small', 'synonym', 'relationship']
 # ----------------------------------------------------------------------------
 # Local CSV 설정
 # ----------------------------------------------------------------------------
-DEFAULT_DATA_FOLDER = '/Users/rose/omop-mapper/data/omop-cdm'
+DEFAULT_DATA_FOLDER = '/workspace/omop-mapper/data/omop-cdm'
 
 # ----------------------------------------------------------------------------
 # PostgreSQL 설정
