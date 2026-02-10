@@ -56,13 +56,13 @@ DEFAULT_ES_USER = 'elastic'
 DEFAULT_ES_PASSWORD = 'snomed'
 
 # ----------------------------------------------------------------------------
-# 인덱싱 옵션
+# 인덱싱 옵션 (대용량/GPU 최적화 기본값)
 # ----------------------------------------------------------------------------
 DEFAULT_GPU = 0                 # GPU 번호 (-1: CPU 사용)
 DEFAULT_EMBEDDINGS = True       # SapBERT 임베딩 포함 여부
 DEFAULT_LOWERCASE = True        # concept_name 소문자 변환 여부
-DEFAULT_BATCH_SIZE = 128        # 임베딩 배치 크기
-DEFAULT_CHUNK_SIZE = 1000       # 데이터 처리 청크 크기
+DEFAULT_BATCH_SIZE = 512        # 임베딩 배치 크기 (GPU: 512~1024 권장)
+DEFAULT_CHUNK_SIZE = 10000      # 데이터 청크 크기 (클수록 GPU 활용·ES round-trip 감소)
 
 # ============================================================================
 # 메인 코드

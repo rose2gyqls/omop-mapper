@@ -24,7 +24,8 @@ class SapBERTEmbedder:
         model_name: str = None,
         device: Optional[str] = None,
         max_length: int = 25,
-        batch_size: int = 128
+        batch_size: int = 512,
+        use_fp16: bool = True
     ):
         """
         Initialize SapBERT embedder.
@@ -33,11 +34,13 @@ class SapBERTEmbedder:
             model_name: HuggingFace model name (default: SapBERT-from-PubMedBERT-fulltext)
             device: Device to use ('cuda:0', 'cpu', etc.). Auto-detected if None.
             max_length: Maximum token length for tokenization
-            batch_size: Batch size for encoding
+            batch_size: Batch size for encoding (use 512-1024 on GPU for throughput)
+            use_fp16: Use half precision on GPU for ~2x speed (ignored on CPU)
         """
         self.model_name = model_name or self.DEFAULT_MODEL
         self.max_length = max_length
         self.batch_size = batch_size
+        self.use_fp16 = use_fp16
         self.logger = logging.getLogger(self.__class__.__name__)
         
         # Set device
@@ -46,13 +49,19 @@ class SapBERTEmbedder:
         else:
             self.device = device
         
+        self._is_cuda = isinstance(self.device, str) and "cuda" in self.device
+        if self._is_cuda and not torch.cuda.is_available():
+            self._is_cuda = False
+        
         self.logger.info(f"Loading SapBERT model: {self.model_name}")
-        self.logger.info(f"Device: {self.device}")
+        self.logger.info(f"Device: {self.device}, batch_size: {batch_size}, fp16: {use_fp16 and self._is_cuda}")
         
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModel.from_pretrained(self.model_name)
         self.model.to(self.device)
+        if self._is_cuda and use_fp16:
+            self.model = self.model.half()
         self.model.eval()
         
         self.logger.info("SapBERT model loaded successfully")
@@ -82,12 +91,12 @@ class SapBERTEmbedder:
         
         all_embeddings = []
         
-        # Process in batches
+        # Process in batches (inference_mode is faster than no_grad on modern PyTorch)
         iterator = range(0, len(texts), self.batch_size)
         if show_progress:
             iterator = tqdm(iterator, desc="Generating embeddings")
         
-        with torch.no_grad():
+        with torch.inference_mode():
             for i in iterator:
                 batch_texts = texts[i:i + self.batch_size]
                 batch_embeddings = self._encode_batch(batch_texts)
@@ -108,7 +117,7 @@ class SapBERTEmbedder:
             texts: Batch of texts
             
         Returns:
-            Batch embeddings as numpy array
+            Batch embeddings as numpy array (float32 for ES compatibility)
         """
         # Tokenize
         tokens = self.tokenizer.batch_encode_plus(
@@ -120,7 +129,7 @@ class SapBERTEmbedder:
         )
         
         # Move to device
-        tokens = {k: v.to(self.device) for k, v in tokens.items()}
+        tokens = {k: v.to(self.device, non_blocking=True) for k, v in tokens.items()}
         
         # Get model output
         outputs = self.model(**tokens)
@@ -128,7 +137,9 @@ class SapBERTEmbedder:
         # Use CLS token embedding
         cls_embeddings = outputs.last_hidden_state[:, 0, :]
         
-        return cls_embeddings.cpu().numpy()
+        # Convert to float32 for Elasticsearch dense_vector; keep on CPU as numpy
+        out = cls_embeddings.float().cpu().numpy()
+        return out
     
     def encode_single(self, text: str) -> np.ndarray:
         """

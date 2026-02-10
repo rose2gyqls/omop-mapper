@@ -295,16 +295,18 @@ class ElasticsearchIndexer:
     def index_documents(
         self,
         documents: List[Dict[str, Any]],
-        batch_size: int = 500,
-        show_progress: bool = False
+        batch_size: int = 2000,
+        show_progress: bool = False,
+        refresh: bool = False
     ) -> bool:
         """
         Index documents into Elasticsearch.
         
         Args:
             documents: List of documents to index
-            batch_size: Batch size for bulk indexing
+            batch_size: Batch size for bulk indexing (larger = fewer round-trips)
             show_progress: Whether to show progress logs
+            refresh: If True, refresh index after indexing (set False during bulk load for speed)
             
         Returns:
             True if indexing was successful (>80% success rate)
@@ -335,17 +337,18 @@ class ElasticsearchIndexer:
                         "_source": doc
                     })
                 
-                # Execute bulk indexing
+                # Execute bulk indexing (refresh=False during bulk for throughput)
                 try:
                     success, failed = bulk(
                         client=self.es,
                         actions=actions,
                         index=self.index_name,
-                        chunk_size=min(batch_size, 50),
-                        request_timeout=300,
+                        chunk_size=min(batch_size, 500),
+                        request_timeout=600,
                         raise_on_error=False,
                         raise_on_exception=False,
-                        max_retries=3
+                        max_retries=3,
+                        refresh=refresh
                     )
                     total_indexed += success
                     
@@ -359,11 +362,11 @@ class ElasticsearchIndexer:
                     failed_count += len(batch)
                 
                 if show_progress:
-                    progress = (i + batch_size) / len(documents) * 100
+                    progress = (i + len(batch)) / len(documents) * 100
                     self.logger.info(f"Progress: {progress:.1f}% ({total_indexed}/{len(documents)})")
             
-            # Refresh index
-            self.es.indices.refresh(index=self.index_name)
+            if refresh:
+                self.es.indices.refresh(index=self.index_name)
             
             self.logger.info(f"Indexing complete: {total_indexed} documents indexed, {failed_count} failed")
             

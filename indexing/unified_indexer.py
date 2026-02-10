@@ -47,8 +47,8 @@ class UnifiedIndexer:
         es_password: str = "snomed",
         model_name: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
         gpu_device: int = 0,
-        batch_size: int = 128,
-        chunk_size: int = 1000,
+        batch_size: int = 512,
+        chunk_size: int = 10000,
         include_embeddings: bool = True,
         lowercase: bool = True
     ):
@@ -63,8 +63,8 @@ class UnifiedIndexer:
             es_password: Elasticsearch password
             model_name: SapBERT model name
             gpu_device: GPU device number (-1 for CPU)
-            batch_size: Embedding batch size
-            chunk_size: Data processing chunk size
+            batch_size: Embedding batch size (512+ on GPU recommended)
+            chunk_size: Data processing chunk size (10000+ for concept-small recommended)
             include_embeddings: Whether to include SapBERT embeddings
             lowercase: Whether to lowercase concept/synonym names
         """
@@ -188,21 +188,25 @@ class UnifiedIndexer:
                         names = chunk['concept_name'].fillna('').tolist()
                         embeddings = self.embedder.encode(names, show_progress=False)
                     
-                    # Convert and index
+                    # Convert and index (refresh only on last chunk)
                     docs = self.data_source.to_es_concepts(
                         chunk,
                         embeddings=embeddings,
                         include_embeddings=self.include_embeddings
                     )
                     
-                    if indexer.index_documents(docs, show_progress=False):
+                    is_last_chunk = (processed + len(chunk)) >= actual_max
+                    if indexer.index_documents(
+                        docs,
+                        show_progress=False,
+                        refresh=is_last_chunk
+                    ):
                         indexed += len(docs)
                     
                     processed += len(chunk)
                     pbar.update(len(chunk))
                     
-                    # Clear GPU memory
-                    if torch.cuda.is_available():
+                    if torch.cuda.is_available() and processed % 100000 == 0 and processed > 0:
                         torch.cuda.empty_cache()
             
             elapsed = time.time() - start_time
@@ -281,27 +285,32 @@ class UnifiedIndexer:
                         chunk = chunk.copy()
                         chunk['concept_name'] = chunk['concept_name'].str.lower()
                     
-                    # Generate embeddings
+                    # Generate embeddings (GPU batch)
                     embeddings = None
                     if self.include_embeddings and self.embedder:
                         names = chunk['concept_name'].fillna('').tolist()
                         embeddings = self.embedder.encode(names, show_progress=False)
                     
-                    # Convert and index
+                    # Convert and index (refresh only on last chunk for speed)
                     docs = self.data_source.to_es_concept_small(
                         chunk,
                         embeddings=embeddings,
                         include_embeddings=self.include_embeddings
                     )
                     
-                    if indexer.index_documents(docs, show_progress=False):
+                    is_last_chunk = (processed + len(chunk)) >= actual_max
+                    if indexer.index_documents(
+                        docs,
+                        show_progress=False,
+                        refresh=is_last_chunk
+                    ):
                         indexed += len(docs)
                     
                     processed += len(chunk)
                     pbar.update(len(chunk))
                     
-                    # Clear GPU memory
-                    if torch.cuda.is_available():
+                    # Clear GPU cache only periodically to avoid slowdown
+                    if torch.cuda.is_available() and processed % 100000 == 0 and processed > 0:
                         torch.cuda.empty_cache()
             
             elapsed = time.time() - start_time
@@ -372,8 +381,12 @@ class UnifiedIndexer:
                         continue
                     
                     docs = self.data_source.to_es_relationships(chunk)
-                    
-                    if indexer.index_documents(docs, show_progress=False):
+                    is_last = (processed + len(chunk)) >= actual_max
+                    if indexer.index_documents(
+                        docs,
+                        show_progress=False,
+                        refresh=is_last
+                    ):
                         indexed += len(docs)
                     
                     processed += len(chunk)
@@ -448,15 +461,18 @@ class UnifiedIndexer:
                     if len(chunk) == 0:
                         continue
                     
-                    # 테이블 그대로 인덱싱 (임베딩 없음)
                     docs = self.data_source.to_es_synonyms(
                         chunk,
                         embeddings=None,
                         include_embeddings=False,
                         lowercase=False
                     )
-                    
-                    if indexer.index_documents(docs, show_progress=False):
+                    is_last = (processed + len(chunk)) >= actual_max
+                    if indexer.index_documents(
+                        docs,
+                        show_progress=False,
+                        refresh=is_last
+                    ):
                         indexed += len(docs)
                     
                     processed += len(chunk)
