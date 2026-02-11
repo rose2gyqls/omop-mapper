@@ -111,7 +111,7 @@ def parse_args():
     parser.add_argument('--max-rows', type=int, default=None,
         help='최대 처리 행 수 (테스트용)')
     parser.add_argument('--resume', action='store_true',
-        help='기존 인덱스 유지 (삭제 안함)')
+        help='끊긴 부분부터 재개: 기존 인덱스 유지 후, 이미 인덱싱된 행 수만큼 건너뛰고 이어서 인덱싱')
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE,
         help=f'임베딩 배치 크기 (기본: {DEFAULT_BATCH_SIZE})')
     parser.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE,

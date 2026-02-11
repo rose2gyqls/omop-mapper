@@ -129,6 +129,22 @@ class UnifiedIndexer:
         
         return self._es_indexers[index_type]
     
+    def _get_resume_skip_rows(self, index_type: str) -> int:
+        """
+        재개 모드에서 사용할 skip_rows: 기존 인덱스의 document 개수.
+        인덱스가 없거나 조회 실패 시 0 반환.
+        """
+        try:
+            indexer = self._get_indexer(index_type)
+            stats = indexer.get_stats()
+            count = stats.get("document_count", 0) or 0
+            if count > 0:
+                self.logger.info(f"Resume: {index_type} already has {count:,} docs, skipping that many rows")
+            return count
+        except Exception as e:
+            self.logger.warning(f"Could not get doc count for {index_type}: {e}, resuming from 0")
+            return 0
+    
     def index_concepts(
         self,
         delete_existing: bool = True,
@@ -519,21 +535,29 @@ class UnifiedIndexer:
             # 기본값: concept-small, relationship, synonym 인덱싱
             tables = ['concept-small', 'relationship', 'synonym']
         
+        # 재개 모드: 기존 인덱스 doc 수만큼 skip
+        def skip_for(table: str) -> int:
+            return self._get_resume_skip_rows(table) if not delete_existing else 0
+        
         results = {}
         
         # concept (원본 concept 테이블만 인덱싱)
         if 'concept' in tables:
-            results['concept'] = self.index_concepts(delete_existing, max_rows)
+            results['concept'] = self.index_concepts(
+                delete_existing, max_rows, skip_rows=skip_for('concept'))
         
         # concept-small (concept + synonym merged)
         if 'concept-small' in tables:
-            results['concept-small'] = self.index_concept_small(delete_existing, max_rows)
+            results['concept-small'] = self.index_concept_small(
+                delete_existing, max_rows, skip_rows=skip_for('concept-small'))
         
         if 'relationship' in tables:
-            results['relationship'] = self.index_relationships(delete_existing, max_rows)
+            results['relationship'] = self.index_relationships(
+                delete_existing, max_rows, skip_rows=skip_for('relationship'))
         
         if 'synonym' in tables:
-            results['synonym'] = self.index_synonyms(delete_existing, max_rows)
+            results['synonym'] = self.index_synonyms(
+                delete_existing, max_rows, skip_rows=skip_for('synonym'))
         
         self.logger.info("=" * 60)
         self.logger.info(f"Indexing complete: {results}")
