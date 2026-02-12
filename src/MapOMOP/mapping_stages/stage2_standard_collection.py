@@ -373,7 +373,10 @@ class Stage2StandardCollection:
             return []
         
         try:
-            must_conditions = [{"terms": {"concept_id": concept_ids}}]
+            must_conditions = [
+                {"terms": {"concept_id": concept_ids}},
+                {"term": {"name_type": "Original"}}
+            ]
             
             if require_standard:
                 must_conditions.append({"terms": {"standard_concept": ["S", "C"]}})
@@ -384,7 +387,7 @@ class Stage2StandardCollection:
                         "must": must_conditions
                     }
                 },
-                "size": len(concept_ids) * 2  # Buffer for potential duplicates
+                "size": len(concept_ids)
             }
             
             response = self.es_client.es_client.search(

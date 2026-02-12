@@ -110,8 +110,8 @@ class ElasticsearchIndexer:
     
     # Common index settings
     INDEX_SETTINGS = {
-                        "number_of_shards": 3,
-                        "number_of_replicas": 5,
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0,
                         "refresh_interval": "30s",
                         "index.write.wait_for_active_shards": "1",
                         "index.max_result_window": 50000,
@@ -249,7 +249,7 @@ class ElasticsearchIndexer:
             if "synonym" not in index_lower and "relationship" not in index_lower:
                 embedding_field = {
                     "type": "dense_vector",
-                    "dims": 768,
+                    "dims": 128,
                     "index": True,
                     "similarity": "cosine"
                 }

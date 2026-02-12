@@ -351,73 +351,79 @@ class EntityMappingAPI:
                 vocabulary_id=entity_input.vocabulary_id
             )
             
-            mapping_result = self._create_final_result(domain_entity_input, stage3_candidates)
-            
-            # Validation
+            # Validation: try top 3 candidates by score (highest first)
             logger.info(f"\n{'=' * 60}")
-            logger.info("Validation step")
+            logger.info("Validation step (top 3 by score)")
             logger.info('=' * 60)
-            
-            # Track original LLM top pick before validation
-            llm_top_concept_id = stage3_candidates[0]['concept'].get('concept_id') if stage3_candidates else None
-            llm_top_concept_name = stage3_candidates[0]['concept'].get('concept_name') if stage3_candidates else None
-            
-            is_valid = self.validator.validate_mapping(
-                entity_name=entity_name,
-                concept_id=mapping_result.mapped_concept_id,
-                concept_name=mapping_result.mapped_concept_name,
-                synonyms=None
-            )
             
             # Keep original stage3_candidates for logging (sorted by LLM score)
             final_stage3_candidates = stage3_candidates
             
-            if not is_valid:
-                logger.warning(f"[{domain_str}] Validation failed: {mapping_result.mapped_concept_name}")
-                logger.info("Trying alternative candidates...")
+            MAX_VALIDATION_ATTEMPTS = 3
+            validation_candidates = stage3_candidates[:MAX_VALIDATION_ATTEMPTS]
+            
+            validated_candidate = None
+            validated_idx = None
+            
+            for idx, candidate in enumerate(validation_candidates):
+                concept = candidate.get('concept', {})
+                concept_id = str(concept.get('concept_id', ''))
+                concept_name = concept.get('concept_name', '')
+                candidate_score = candidate.get('final_score', 0.0)
                 
-                validated = self.validator.validate_candidates_sequentially(
+                logger.info(f"  [{idx + 1}/{len(validation_candidates)}] Validating: "
+                           f"{concept_name} (ID: {concept_id}, score: {candidate_score:.2f})")
+                
+                is_valid = self.validator.validate_mapping(
                     entity_name=entity_name,
-                    candidates=stage3_candidates,
-                    max_candidates=10
+                    concept_id=concept_id,
+                    concept_name=concept_name,
+                    synonyms=None
                 )
                 
-                if validated:
-                    validated_concept_name = validated['concept'].get('concept_name')
-                    logger.info(f"Alternative found: {validated_concept_name}")
-                    logger.info(f"  [!] LLM top pick was: {llm_top_concept_name} (ID: {llm_top_concept_id})")
-                    logger.info(f"  [!] Changed to: {validated_concept_name} due to validation")
-                    
-                    # Reorder candidates - but keep the original stage3 order for logging
-                    for idx, c in enumerate(stage3_candidates):
-                        if c['concept'].get('concept_id') == validated['concept'].get('concept_id'):
-                            reordered = [stage3_candidates[idx]] + \
-                                       [x for i, x in enumerate(stage3_candidates) if i != idx]
-                            break
-                    else:
-                        reordered = stage3_candidates
-                    
-                    mapping_result = self._create_final_result(domain_entity_input, reordered)
-                    stage_results['validation_status'] = 'validated_alternative'
-                    stage_results['llm_top_pick'] = {
-                        'concept_id': str(llm_top_concept_id),
-                        'concept_name': llm_top_concept_name
-                    }
-                    stage_results['validation_changed_result'] = True
+                if is_valid:
+                    logger.info(f"  Validated: {concept_name}")
+                    validated_candidate = candidate
+                    validated_idx = idx
+                    break
                 else:
-                    logger.error(f"[{domain_str}] All candidates failed validation")
-                    stage_results['validation_status'] = 'failed'
-                    # Store candidates even on failure
-                    stage_results['candidates'] = {
-                        'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
-                        'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
-                        'stage3': [self._format_stage3_candidate(c) for c in stage3_candidates]
-                    }
-                    return None, stage_results
-            else:
-                logger.info(f"[{domain_str}] Validation passed: {mapping_result.mapped_concept_name}")
+                    logger.info(f"  Failed: {concept_name}")
+            
+            if validated_candidate is None:
+                logger.error(f"[{domain_str}] Top {len(validation_candidates)} candidates all failed validation")
+                stage_results['validation_status'] = 'failed'
+                stage_results['candidates'] = {
+                    'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
+                    'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
+                    'stage3': [self._format_stage3_candidate(c) for c in stage3_candidates]
+                }
+                return None, stage_results
+            
+            # Build final result from validated candidate
+            if validated_idx == 0:
+                # Top scored candidate passed validation
+                mapping_result = self._create_final_result(domain_entity_input, stage3_candidates)
                 stage_results['validation_status'] = 'validated'
                 stage_results['validation_changed_result'] = False
+                logger.info(f"[{domain_str}] Top candidate validated: {validated_candidate['concept'].get('concept_name')}")
+            else:
+                # Alternative candidate passed validation - reorder
+                llm_top_name = stage3_candidates[0]['concept'].get('concept_name')
+                llm_top_id = stage3_candidates[0]['concept'].get('concept_id')
+                validated_name = validated_candidate['concept'].get('concept_name')
+                
+                logger.info(f"  [!] LLM top pick was: {llm_top_name} (ID: {llm_top_id})")
+                logger.info(f"  [!] Changed to: {validated_name} due to validation")
+                
+                reordered = [stage3_candidates[validated_idx]] + \
+                           [x for i, x in enumerate(stage3_candidates) if i != validated_idx]
+                mapping_result = self._create_final_result(domain_entity_input, reordered)
+                stage_results['validation_status'] = 'validated_alternative'
+                stage_results['llm_top_pick'] = {
+                    'concept_id': str(llm_top_id),
+                    'concept_name': llm_top_name
+                }
+                stage_results['validation_changed_result'] = True
             
             stage_results['result_domain'] = mapping_result.domain_id
             
@@ -562,7 +568,7 @@ class EntityMappingAPI:
         return result
     
     def _get_embedding(self, text: str):
-        """Generate SapBERT embedding for text."""
+        """Generate SapBERT embedding for text (with dimension reduction)."""
         try:
             if self._sapbert_model is None:
                 self._initialize_sapbert_model()
@@ -585,7 +591,13 @@ class EntityMappingAPI:
                 outputs = self._sapbert_model(**inputs)
                 embedding = outputs.last_hidden_state[:, 0, :].cpu().numpy()
             
-            return embedding.flatten()
+            embedding = embedding.flatten()
+            
+            # Apply same dimension reduction as indexing (768 → 128)
+            from .utils import reduce_embedding_dim
+            embedding = reduce_embedding_dim(embedding)
+            
+            return embedding
             
         except Exception as e:
             logger.warning(f"Embedding generation failed: {e}")

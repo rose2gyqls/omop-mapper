@@ -456,13 +456,25 @@ class UnifiedIndexer:
             self.logger.error(traceback.format_exc())
             return False
     
+    # 인덱싱할 relationship_id 필터 (이 값만 인덱싱)
+    ALLOWED_RELATIONSHIP_IDS = {
+        'Maps to',
+        'Concept alt_to to',
+        'Concept poss_eq to',
+        'Concept same_as to',
+        'Marketed form of',
+        'Tradename of',
+        'Box of',
+        'Has quantified form',
+    }
+    
     def index_relationships(
         self,
         delete_existing: bool = True,
         max_rows: Optional[int] = None,
         skip_rows: int = 0
     ) -> bool:
-        """Index CONCEPT_RELATIONSHIP data."""
+        """Index CONCEPT_RELATIONSHIP data (특정 relationship_id만 필터링)."""
         table_key = 'relationship'
         
         self.logger.info("=" * 60)
@@ -488,9 +500,11 @@ class UnifiedIndexer:
             
             self.logger.info(f"Total records: {total:,}")
             self.logger.info(f"Processing: {actual_max:,} (skip: {skip_rows:,})")
+            self.logger.info(f"Filtering relationship_id: {self.ALLOWED_RELATIONSHIP_IDS}")
             
             processed = 0
             indexed = 0
+            filtered_out = 0
             
             # Use larger chunks for relationships (no embeddings)
             rel_chunk_size = self.chunk_size * 10
@@ -504,8 +518,18 @@ class UnifiedIndexer:
                     if len(chunk) == 0:
                         continue
                     
+                    # 허용된 relationship_id만 필터링
+                    orig_len = len(chunk)
+                    chunk = chunk[chunk['relationship_id'].isin(self.ALLOWED_RELATIONSHIP_IDS)]
+                    filtered_out += (orig_len - len(chunk))
+                    if len(chunk) == 0:
+                        processed += orig_len
+                        pbar.update(orig_len)
+                        self._save_checkpoint(table_key, skip_rows + processed)
+                        continue
+                    
                     docs = self.data_source.to_es_relationships(chunk)
-                    is_last = (processed + len(chunk)) >= actual_max
+                    is_last = (processed + orig_len) >= actual_max
                     if indexer.index_documents(
                         docs,
                         show_progress=False,
@@ -513,8 +537,8 @@ class UnifiedIndexer:
                         bulk_delay_sec=self.bulk_delay_sec
                     ):
                         indexed += len(docs)
-                        processed += len(chunk)
-                        pbar.update(len(chunk))
+                        processed += orig_len
+                        pbar.update(orig_len)
                         self._save_checkpoint(table_key, skip_rows + processed)
                     else:
                         self.logger.error(
@@ -526,10 +550,11 @@ class UnifiedIndexer:
             elapsed = time.time() - start_time
             
             self.logger.info(f"CONCEPT_RELATIONSHIP indexing complete")
-            self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}")
+            self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}, Filtered out: {filtered_out:,}")
             self.logger.info(f"Time: {elapsed/60:.1f} min, Speed: {processed/elapsed:.1f} rows/sec")
             
-            self._verify_count(indexer, total, table_key)
+            # relationship은 필터링된 건수로 검증 (indexed가 맞는 기준)
+            self._verify_count(indexer, indexed, table_key)
             self._clear_checkpoint(table_key)
             
             return True

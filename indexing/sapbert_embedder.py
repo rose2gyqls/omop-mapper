@@ -3,15 +3,23 @@ SapBERT Embedder Module
 
 Generates embeddings for medical entity names using the SapBERT model.
 SapBERT is specifically designed for biomedical entity representation.
+
+Supports dimension reduction via fixed random projection (768 → 128).
 """
 
 import logging
+import sys
+from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 import torch
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, AutoModel
+
+# Import shared projection utilities
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+from MapOMOP.utils import reduce_embedding_dim, EMBEDDING_OUTPUT_DIM
 
 
 class SapBERTEmbedder:
@@ -25,7 +33,8 @@ class SapBERTEmbedder:
         device: Optional[str] = None,
         max_length: int = 25,
         batch_size: int = 512,
-        use_fp16: bool = True
+        use_fp16: bool = True,
+        output_dim: int = EMBEDDING_OUTPUT_DIM
     ):
         """
         Initialize SapBERT embedder.
@@ -36,11 +45,13 @@ class SapBERTEmbedder:
             max_length: Maximum token length for tokenization
             batch_size: Batch size for encoding (use 512-1024 on GPU for throughput)
             use_fp16: Use half precision on GPU for ~2x speed (ignored on CPU)
+            output_dim: Output embedding dimension (128 by default, None to skip reduction)
         """
         self.model_name = model_name or self.DEFAULT_MODEL
         self.max_length = max_length
         self.batch_size = batch_size
         self.use_fp16 = use_fp16
+        self.output_dim = output_dim
         self.logger = logging.getLogger(self.__class__.__name__)
         
         # Set device
@@ -55,6 +66,8 @@ class SapBERTEmbedder:
         
         self.logger.info(f"Loading SapBERT model: {self.model_name}")
         self.logger.info(f"Device: {self.device}, batch_size: {batch_size}, fp16: {use_fp16 and self._is_cuda}")
+        if self.output_dim:
+            self.logger.info(f"Dimension reduction: 768 → {self.output_dim}")
         
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -68,7 +81,9 @@ class SapBERTEmbedder:
     
     @property
     def embedding_dim(self) -> int:
-        """Get embedding dimension."""
+        """Get output embedding dimension (after projection if enabled)."""
+        if self.output_dim:
+            return self.output_dim
         return self.model.config.hidden_size
     
     def encode(
@@ -103,6 +118,10 @@ class SapBERTEmbedder:
                 all_embeddings.append(batch_embeddings)
         
         embeddings = np.concatenate(all_embeddings, axis=0)
+        
+        # Apply dimension reduction if configured
+        if self.output_dim and self.output_dim < embeddings.shape[1]:
+            embeddings = reduce_embedding_dim(embeddings, self.output_dim)
         
         if show_progress:
             self.logger.info(f"Generated embeddings: {embeddings.shape}")

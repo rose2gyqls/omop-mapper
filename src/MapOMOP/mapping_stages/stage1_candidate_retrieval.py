@@ -60,6 +60,9 @@ class Stage1CandidateRetrieval:
         Returns:
             List of candidate hits with _search_type field (all converted to Original)
         """
+        # Lowercase entity name to match index (indexed with lowercase=True)
+        entity_name = entity_name.lower().strip()
+        
         logger.info("=" * 60)
         logger.info("Stage 1: Candidate Retrieval (Lexical + Semantic + Combined)")
         logger.info(f"  Entity: {entity_name}")

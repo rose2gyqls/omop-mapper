@@ -35,7 +35,7 @@ except ImportError:
 # Prompt Templates (easily customizable)
 # =============================================================================
 
-SYSTEM_PROMPT = """You are given an entity and several candidate OMOP CDM concepts. Your task is to select EXACTLY ONE best concept."""
+SYSTEM_PROMPT = """You are given an entity and several candidate OMOP CDM concepts. Your task is to score EACH candidate on a scale of 0-5 based on how well it matches the entity."""
 
 USER_PROMPT_TEMPLATE = """
 If a candidate is SEMANTICALLY EQUIVALENT(i.e., it has the same clinical meaning, even if the wording is different) or EXACT MATCH to the entity
@@ -65,14 +65,20 @@ Decision process (follow strictly):
 {candidates_json}
 {score_hint}
 
+**Scoring Guide** (use decimal scores from 0.0 to 5.0):
+- 5.0: EXACT MATCH or SEMANTICALLY EQUIVALENT (same clinical meaning)
+- 4.0~4.9: Very close match (minor wording difference, clinically identical)
+- 3.0~3.9: Acceptable generalization (broader concept that preserves meaning)
+- 2.0~2.9: Partial match (related but loses some meaning)
+- 1.0~1.9: Weak match (loosely related)
+- 0.0~0.9: No match (different meaning or adds new meaning)
+
+CRITICAL: Every candidate MUST have a UNIQUE score. No two candidates may share the same score. Use decimal precision (e.g., 4.8, 4.3, 3.5) to differentiate candidates.
+
 **Output Format** (JSON only):
 {{
-  "best_match": {{
-    "concept_id": "best concept ID",
-    "reasoning": "brief reason"
-  }},
   "rankings": [
-    {{"concept_id": "ID", "rank": 1, "score": 0-5, "reasoning": "reason"}},
+    {{"concept_id": "ID", "score": 0.0-5.0, "reasoning": "reason"}},
     ...
   ]
 }}
@@ -437,20 +443,23 @@ class Stage3HybridScoring:
             parsed = json.loads(text)
             result = {}
             
-            if 'best_match' in parsed and 'rankings' in parsed:
-                best_id = str(parsed['best_match'].get('concept_id', ''))
-                
-                for item in parsed['rankings']:
-                    cid = str(item.get('concept_id', ''))
-                    if cid:
-                        result[cid] = {
-                            'score': float(item.get('score', 0.0)),
-                            'rank': int(item.get('rank', 999)),
-                            'reasoning': item.get('reasoning', ''),
-                            'is_best_match': cid == best_id
-                        }
-                
-                logger.info(f"LLM selected best match: {best_id}")
+            rankings = parsed.get('rankings', [])
+            
+            # Sort by score descending and assign ranks
+            rankings_sorted = sorted(rankings, key=lambda x: float(x.get('score', 0)), reverse=True)
+            
+            for rank, item in enumerate(rankings_sorted, 1):
+                cid = str(item.get('concept_id', ''))
+                if cid:
+                    result[cid] = {
+                        'score': float(item.get('score', 0.0)),
+                        'rank': rank,
+                        'reasoning': item.get('reasoning', '')
+                    }
+            
+            if result:
+                best = max(result.items(), key=lambda x: x[1]['score'])
+                logger.info(f"LLM top scored: {best[0]} (score: {best[1]['score']})")
             
             # Ensure all candidates are in result
             for c in candidates:
