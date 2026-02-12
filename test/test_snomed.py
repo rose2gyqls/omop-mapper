@@ -702,7 +702,7 @@ def main():
     NUM_TEST_RUNS = 1  # 반복 횟수 (1: 단일 테스트, 5: 5회 반복)
     
     # 샘플 옵션 (True: 3개 빠른 테스트, False: 전체 2000개)
-    USE_3_ENTITIES_TEST = True
+    USE_3_ENTITIES_TEST = False
     
     sample_config = SAMPLE_PER_DOMAIN_3_ENTITIES if USE_3_ENTITIES_TEST else SAMPLE_PER_DOMAIN
     
