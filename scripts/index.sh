@@ -1,26 +1,36 @@
 #!/bin/bash
 # OMOP CDM 인덱싱 스크립트
 #
-# Usage:
+# ── 기본 사용법 ──
 #   ./scripts/index.sh                                    # 기본 설정 (local_csv, concept-small/relationship/synonym)
-#   ./scripts/index.sh local_csv                           # Local CSV 인덱싱
-#   ./scripts/index.sh postgres                            # PostgreSQL 인덱싱
-#   ./scripts/index.sh --prepare-only                      # CONCEPT_SMALL.csv 생성만
+#   ./scripts/index.sh local_csv                          # Local CSV 인덱싱
+#   ./scripts/index.sh postgres                           # PostgreSQL 인덱싱
+#   ./scripts/index.sh --prepare-only                     # CONCEPT_SMALL.csv 생성만
 #
-# 테이블 지정 (복수 가능):
+# ── 테이블 지정 (복수 가능) ──
 #   ./scripts/index.sh local_csv --tables concept-small synonym
-#   ./scripts/index.sh local_csv --tables concept-small    # concept-small만
+#   ./scripts/index.sh local_csv --tables concept-small   # concept-small만
 #
-# 끊긴 뒤 재시작 (이미 인덱싱된 행 건너뛰고 이어서):
-#   ./scripts/index.sh local_csv --resume
+# ── 끊긴 뒤 재시작 (Checkpoint 기반) ──
+#   ./scripts/index.sh local_csv --resume                 # Checkpoint에서 마지막 성공 위치 읽어서 재개
 #   ./scripts/index.sh local_csv --resume --tables synonym
 #
-# 테스트 (일부 행만):
+# ── 429 완화 (bulk 요청 간 대기) ──
+#   ./scripts/index.sh local_csv --resume --bulk-delay 1
+#
+# ── 테스트 (일부 행만) ──
 #   ./scripts/index.sh local_csv --max-rows 10000
 #
-# 데이터 폴더 지정:
+# ── 데이터 폴더 지정 ──
 #   DATA_FOLDER=/path/to/csv ./scripts/index.sh local_csv
 #   ./scripts/index.sh local_csv --data-folder /path/to/csv
+#
+# ── 안전성 보장 ──
+#   - 멱등한 _id: 같은 데이터 재전송 시 덮어쓰기 (중복 없음)
+#   - Checkpoint: 청크 단위로 진행 상황 기록, 실패 시 해당 청크부터 재시작
+#   - 429 백오프: 5~300초 지수 백오프 재시도 (최대 7회)
+#   - 개별 실패: bulk 응답 내 실패 문서 자동 재시도 (최대 3회)
+#   - 검증: 완료 후 ES 문서 수 vs 원본 행 수 비교
 
 set -e
 

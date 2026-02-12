@@ -3,11 +3,17 @@ Elasticsearch Indexer Module
 
 Provides functionality to index OMOP CDM data into Elasticsearch.
 Supports CONCEPT, CONCEPT_RELATIONSHIP, and CONCEPT_SYNONYM tables.
+
+Robust indexing:
+    - 429 Too Many Requests → 지수 백오프 재시도 (5~300초, 최대 7회)
+    - Bulk 응답 내 개별 실패 문서 → 자동 재시도 (최대 3회)
+    - Idempotent _id 기반 → 재전송 시 덮어쓰기 (중복 없음)
 """
 
 import logging
 import hashlib
-from typing import Dict, List, Optional, Any
+import time
+from typing import Dict, List, Optional, Any, Tuple
 
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
@@ -15,6 +21,12 @@ from elasticsearch.helpers import bulk
 
 class ElasticsearchIndexer:
     """Elasticsearch indexer for OMOP CDM data."""
+    
+    # 429 재시도 설정
+    MAX_429_RETRIES = 7          # 429 최대 재시도 횟수
+    INITIAL_BACKOFF_SEC = 5      # 첫 백오프 대기 시간 (5, 10, 20, 40, 80, 160, 300초)
+    MAX_BACKOFF_SEC = 300        # 최대 백오프 대기 시간 (5분)
+    MAX_ITEM_RETRIES = 3         # 개별 실패 문서 최대 재시도 횟수
     
     # Index mapping configurations
     MAPPINGS = {
@@ -157,9 +169,8 @@ class ElasticsearchIndexer:
         # Create Elasticsearch client
         self.es = self._create_client(host, port, scheme, username, password)
         
-        # Test connection
-        if not self.es.ping():
-            raise ConnectionError(f"Failed to connect to Elasticsearch at {host}:{port}")
+        # Test connection (with 429 retry)
+        self._ping_with_retry()
         
         self.logger.info(f"Connected to Elasticsearch at {host}:{port}")
     
@@ -194,6 +205,22 @@ class ElasticsearchIndexer:
                 return Elasticsearch([f"{scheme}://{host}:{port}"])
             except Exception as e2:
                 raise ConnectionError(f"Failed to create ES client: {e}, fallback failed: {e2}")
+    
+    def _ping_with_retry(self):
+        """Ping Elasticsearch with 429 retry."""
+        for attempt in range(self.MAX_429_RETRIES + 1):
+            try:
+                if self.es.ping():
+                    return
+                raise ConnectionError("Elasticsearch ping failed")
+            except Exception as e:
+                status = getattr(e, 'status_code', None)
+                if status == 429 and attempt < self.MAX_429_RETRIES:
+                    wait = min(self.INITIAL_BACKOFF_SEC * (2 ** attempt), self.MAX_BACKOFF_SEC)
+                    self.logger.warning(f"429 on ping, waiting {wait}s (retry {attempt+1}/{self.MAX_429_RETRIES})")
+                    time.sleep(wait)
+                else:
+                    raise
     
     def _get_index_mapping(self) -> Dict:
         """Get appropriate mapping for the index type."""
@@ -232,7 +259,7 @@ class ElasticsearchIndexer:
     
     def create_index(self, delete_if_exists: bool = False) -> bool:
         """
-        Create Elasticsearch index.
+        Create Elasticsearch index with 429 retry.
         
         Args:
             delete_if_exists: Delete existing index if it exists
@@ -240,43 +267,54 @@ class ElasticsearchIndexer:
         Returns:
             True if index was created successfully
         """
-        try:
-            # Check if index exists
-            if self.es.indices.exists(index=self.index_name):
-                if delete_if_exists:
-                    self.logger.info(f"Deleting existing index: {self.index_name}")
-                    self.es.indices.delete(index=self.index_name)
-                else:
-                    self.logger.info(f"Index already exists: {self.index_name}")
-                    return True
-            
-            # Create index with mapping
-            mapping = self._get_index_mapping()
-            self.es.indices.create(index=self.index_name, body=mapping)
-            self.logger.info(f"Index created: {self.index_name}")
-            
-            # Wait for index to be ready
-            import time
-            time.sleep(2)
-            
+        for attempt in range(self.MAX_429_RETRIES + 1):
             try:
-                health = self.es.cluster.health(
-                    index=self.index_name, 
-                    wait_for_status="yellow", 
-                    timeout="10s"
-                )
-                self.logger.info(f"Index health: {health['status']}")
+                # Check if index exists
+                if self.es.indices.exists(index=self.index_name):
+                    if delete_if_exists:
+                        self.logger.info(f"Deleting existing index: {self.index_name}")
+                        self.es.indices.delete(index=self.index_name)
+                    else:
+                        self.logger.info(f"Index already exists: {self.index_name}")
+                        return True
+                
+                # Create index with mapping
+                mapping = self._get_index_mapping()
+                self.es.indices.create(index=self.index_name, body=mapping)
+                self.logger.info(f"Index created: {self.index_name}")
+                
+                # Wait for index to be ready
+                time.sleep(2)
+                
+                try:
+                    health = self.es.cluster.health(
+                        index=self.index_name, 
+                        wait_for_status="yellow", 
+                        timeout="10s"
+                    )
+                    self.logger.info(f"Index health: {health['status']}")
+                except Exception as e:
+                    self.logger.warning(f"Could not verify index health: {e}")
+                
+                return True
+                
             except Exception as e:
-                self.logger.warning(f"Could not verify index health: {e}")
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create index: {e}")
-            return False
+                status = getattr(e, 'status_code', None)
+                if status == 429 and attempt < self.MAX_429_RETRIES:
+                    wait = min(self.INITIAL_BACKOFF_SEC * (2 ** attempt), self.MAX_BACKOFF_SEC)
+                    self.logger.warning(
+                        f"429 on create_index, waiting {wait}s "
+                        f"(retry {attempt+1}/{self.MAX_429_RETRIES})"
+                    )
+                    time.sleep(wait)
+                else:
+                    self.logger.error(f"Failed to create index: {e}")
+                    return False
+        
+        return False
     
     def _generate_doc_id(self, doc: Dict) -> str:
-        """Generate document ID based on index type."""
+        """Generate deterministic document ID based on index type (멱등성 보장)."""
         index_lower = self.index_name.lower()
         
         if "relationship" in index_lower:
@@ -292,91 +330,195 @@ class ElasticsearchIndexer:
         else:
             return str(doc.get("concept_id", ""))
     
+    def _prepare_actions(self, documents: List[Dict[str, Any]]) -> List[Dict]:
+        """Prepare bulk actions from documents."""
+        actions = []
+        for doc in documents:
+            if not self.include_embeddings:
+                doc = doc.copy()
+                doc.pop("concept_embedding", None)
+                doc.pop("concept_synonym_embedding", None)
+            
+            actions.append({
+                "_index": self.index_name,
+                "_id": self._generate_doc_id(doc),
+                "_source": doc
+            })
+        return actions
+    
+    def _send_bulk_with_retry(
+        self,
+        actions: List[Dict],
+    ) -> Tuple[int, int]:
+        """
+        Send bulk request with robust retry logic.
+        
+        1. 429 → 지수 백오프로 전체 배치 재시도 (5, 10, 20, 40, 80, 160, 300초)
+        2. 응답 내 개별 실패 문서 → 실패한 문서만 재시도 (최대 3회)
+        
+        Returns:
+            (success_count, failed_count)
+        """
+        for attempt in range(self.MAX_429_RETRIES + 1):
+            try:
+                success, failed_items = bulk(
+                    client=self.es,
+                    actions=actions,
+                    chunk_size=min(len(actions), 500),
+                    request_timeout=600,
+                    raise_on_error=False,
+                    raise_on_exception=True,
+                    max_retries=0,
+                    refresh=False
+                )
+                
+                if not failed_items:
+                    return (success, 0)
+                
+                # ── 개별 실패 문서 재시도 ──
+                self.logger.warning(f"{len(failed_items)} items failed in bulk response")
+                
+                # 실패한 _id 추출
+                failed_ids = set()
+                for item in failed_items:
+                    for action_type, info in item.items():
+                        fid = info.get('_id', '')
+                        failed_ids.add(fid)
+                        err = info.get('error', {})
+                        self.logger.debug(
+                            f"Failed: _id={fid}, status={info.get('status')}, "
+                            f"error={err.get('type', 'unknown')}: {err.get('reason', '')}"
+                        )
+                
+                retry_actions = [a for a in actions if a.get('_id') in failed_ids]
+                recovered = 0
+                
+                for item_attempt in range(self.MAX_ITEM_RETRIES):
+                    if not retry_actions:
+                        break
+                    
+                    wait = min(2 * (2 ** item_attempt), 30)  # 2, 4, 8초 (최대 30초)
+                    time.sleep(wait)
+                    self.logger.info(
+                        f"Retrying {len(retry_actions)} failed items "
+                        f"(attempt {item_attempt+1}/{self.MAX_ITEM_RETRIES})"
+                    )
+                    
+                    try:
+                        r_success, r_failed = bulk(
+                            client=self.es,
+                            actions=retry_actions,
+                            chunk_size=min(len(retry_actions), 200),
+                            request_timeout=600,
+                            raise_on_error=False,
+                            raise_on_exception=True,
+                            max_retries=0,
+                            refresh=False
+                        )
+                        recovered += r_success
+                        
+                        if not r_failed:
+                            retry_actions = []
+                            break
+                        
+                        # 여전히 실패한 것만 다시 추출
+                        still_failed_ids = set()
+                        for item in r_failed:
+                            for at, info in item.items():
+                                still_failed_ids.add(info.get('_id', ''))
+                        retry_actions = [a for a in retry_actions if a.get('_id') in still_failed_ids]
+                        
+                    except Exception as re:
+                        self.logger.warning(f"Item retry error: {re}")
+                        if getattr(re, 'status_code', None) == 429:
+                            time.sleep(30)
+                
+                final_failed = len(retry_actions)
+                if final_failed > 0:
+                    self.logger.error(f"{final_failed} items failed permanently")
+                    for a in retry_actions[:5]:
+                        self.logger.error(f"  Failed doc _id: {a.get('_id')}")
+                
+                return (success + recovered, final_failed)
+                
+            except Exception as e:
+                status = getattr(e, 'status_code', None)
+                if status == 429 and attempt < self.MAX_429_RETRIES:
+                    wait = min(self.INITIAL_BACKOFF_SEC * (2 ** attempt), self.MAX_BACKOFF_SEC)
+                    self.logger.warning(
+                        f"429 Too Many Requests, waiting {wait}s "
+                        f"(retry {attempt+1}/{self.MAX_429_RETRIES})"
+                    )
+                    time.sleep(wait)
+                else:
+                    self.logger.error(f"Bulk indexing failed: {e}")
+                    return (0, len(actions))
+        
+        return (0, len(actions))
+    
     def index_documents(
         self,
         documents: List[Dict[str, Any]],
         batch_size: int = 2000,
         show_progress: bool = False,
-        refresh: bool = False
+        refresh: bool = False,
+        bulk_delay_sec: float = 0.0
     ) -> bool:
         """
-        Index documents into Elasticsearch.
+        Index documents into Elasticsearch with robust retry.
+        
+        - 429 → 지수 백오프 재시도 (최대 7회, 5~300초 대기)
+        - Bulk 응답 내 개별 실패 → 자동 재시도 (최대 3회)
+        - 모든 문서가 성공해야 True 반환 (Checkpoint 기반 재개의 안전성 보장)
+        - Idempotent _id → 재전송 시 덮어쓰기 (중복 없음)
         
         Args:
             documents: List of documents to index
-            batch_size: Batch size for bulk indexing (larger = fewer round-trips)
+            batch_size: Batch size for bulk indexing
             show_progress: Whether to show progress logs
-            refresh: If True, refresh index after indexing (set False during bulk load for speed)
+            refresh: If True, refresh index after indexing
+            bulk_delay_sec: Bulk 요청 간 대기 시간(초, 429 완화용)
             
         Returns:
-            True if indexing was successful (>80% success rate)
+            True if ALL documents were indexed successfully
         """
         if not documents:
             self.logger.warning("No documents to index")
             return True
         
-        try:
-            total_indexed = 0
-            failed_count = 0
+        total_indexed = 0
+        total_failed = 0
+        
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i + batch_size]
             
-            for i in range(0, len(documents), batch_size):
-                batch = documents[i:i + batch_size]
-                
-                # Prepare bulk actions
-                actions = []
-                for doc in batch:
-                    # Remove embedding field if disabled
-                    if not self.include_embeddings:
-                        doc = doc.copy()
-                        doc.pop("concept_embedding", None)
-                        doc.pop("concept_synonym_embedding", None)
-                    
-                    actions.append({
-                        "_index": self.index_name,
-                        "_id": self._generate_doc_id(doc),
-                        "_source": doc
-                    })
-                
-                # Execute bulk indexing (refresh=False during bulk for throughput)
-                try:
-                    success, failed = bulk(
-                        client=self.es,
-                        actions=actions,
-                        index=self.index_name,
-                        chunk_size=min(batch_size, 500),
-                        request_timeout=600,
-                        raise_on_error=False,
-                        raise_on_exception=False,
-                        max_retries=3,
-                        refresh=refresh
-                    )
-                    total_indexed += success
-                    
-                    if failed:
-                        failed_count += len(failed)
-                        if show_progress:
-                            self.logger.warning(f"Batch failed: {len(failed)} documents")
-                            
-                except Exception as e:
-                    self.logger.error(f"Bulk indexing error: {e}")
-                    failed_count += len(batch)
-                
-                if show_progress:
-                    progress = (i + len(batch)) / len(documents) * 100
-                    self.logger.info(f"Progress: {progress:.1f}% ({total_indexed}/{len(documents)})")
+            # Bulk 요청 간 대기 (429 완화)
+            if bulk_delay_sec > 0 and i > 0:
+                time.sleep(bulk_delay_sec)
             
-            if refresh:
+            actions = self._prepare_actions(batch)
+            batch_indexed, batch_failed = self._send_bulk_with_retry(actions)
+            total_indexed += batch_indexed
+            total_failed += batch_failed
+            
+            if show_progress:
+                progress = (i + len(batch)) / len(documents) * 100
+                self.logger.info(f"Progress: {progress:.1f}% ({total_indexed}/{len(documents)})")
+        
+        # Refresh (마지막에만)
+        if refresh:
+            try:
                 self.es.indices.refresh(index=self.index_name)
-            
-            self.logger.info(f"Indexing complete: {total_indexed} documents indexed, {failed_count} failed")
-            
-            # Consider success if >80% indexed
-            success_rate = total_indexed / len(documents) if documents else 1.0
-            return success_rate >= 0.8
-            
-        except Exception as e:
-            self.logger.error(f"Indexing error: {e}")
-            return False
+            except Exception as e:
+                self.logger.warning(f"Refresh failed (non-critical): {e}")
+        
+        self.logger.info(
+            f"Batch result: {total_indexed} indexed, {total_failed} failed "
+            f"/ {len(documents)} total"
+        )
+        
+        # 모든 문서가 성공한 경우에만 True (Checkpoint 진행 조건)
+        return total_failed == 0
     
     def search_by_embedding(
         self,
@@ -481,17 +623,25 @@ class ElasticsearchIndexer:
             return []
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get index statistics."""
-        try:
-            stats = self.es.indices.stats(index=self.index_name)
-            return {
-                "document_count": stats["indices"][self.index_name]["total"]["docs"]["count"],
-                "store_size_bytes": stats["indices"][self.index_name]["total"]["store"]["size_in_bytes"],
-                "index_name": self.index_name
-            }
-        except Exception as e:
-            self.logger.error(f"Failed to get stats: {e}")
-            return {}
+        """Get index statistics with 429 retry."""
+        for attempt in range(self.MAX_429_RETRIES + 1):
+            try:
+                stats = self.es.indices.stats(index=self.index_name)
+                return {
+                    "document_count": stats["indices"][self.index_name]["total"]["docs"]["count"],
+                    "store_size_bytes": stats["indices"][self.index_name]["total"]["store"]["size_in_bytes"],
+                    "index_name": self.index_name
+                }
+            except Exception as e:
+                status = getattr(e, 'status_code', None)
+                if status == 429 and attempt < self.MAX_429_RETRIES:
+                    wait = min(self.INITIAL_BACKOFF_SEC * (2 ** attempt), self.MAX_BACKOFF_SEC)
+                    self.logger.warning(f"429 on get_stats, waiting {wait}s")
+                    time.sleep(wait)
+                else:
+                    self.logger.error(f"Failed to get stats: {e}")
+                    return {}
+        return {}
     
     def delete_index(self) -> bool:
         """Delete the index."""

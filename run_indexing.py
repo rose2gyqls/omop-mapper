@@ -5,7 +5,7 @@ OMOP CDM 인덱싱 스크립트
 설정값을 수정하고 실행하거나, CLI 옵션으로 오버라이드할 수 있습니다.
 
 Usage:
-    # 기본 설정으로 실행
+    # 기본 설정으로 실행 (concept-small, synonym, relationship)
     python run_indexing.py
     
     # CLI 옵션으로 실행
@@ -14,6 +14,13 @@ Usage:
     
     # 테스트 (일부 데이터만)
     python run_indexing.py local_csv --max-rows 10000
+    
+    # 끊긴 부분부터 재개 (Checkpoint 기반)
+    python run_indexing.py local_csv --resume
+    python run_indexing.py local_csv --resume --tables synonym
+    
+    # 429 완화 (bulk 요청 간 대기)
+    python run_indexing.py local_csv --resume --bulk-delay 1
 """
 
 import sys
@@ -111,11 +118,15 @@ def parse_args():
     parser.add_argument('--max-rows', type=int, default=None,
         help='최대 처리 행 수 (테스트용)')
     parser.add_argument('--resume', action='store_true',
-        help='끊긴 부분부터 재개: 기존 인덱스 유지 후, 이미 인덱싱된 행 수만큼 건너뛰고 이어서 인덱싱')
+        help='끊긴 부분부터 재개: Checkpoint 파일(.indexing_checkpoint.json)에서 '
+             '마지막 성공 위치를 읽고, 그 다음 행부터 이어서 인덱싱. '
+             '기존 인덱스 유지, 멱등한 _id로 중복 없음.')
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE,
         help=f'임베딩 배치 크기 (기본: {DEFAULT_BATCH_SIZE})')
     parser.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE,
         help=f'데이터 청크 크기 (기본: {DEFAULT_CHUNK_SIZE})')
+    parser.add_argument('--bulk-delay', type=float, default=0.0,
+        help='Bulk 요청 간 대기 시간(초). ES 429 발생 시 사용 (기본: 0)')
     
     # Elasticsearch 옵션
     parser.add_argument('--es-host', default=DEFAULT_ES_HOST,
@@ -166,6 +177,12 @@ def main():
     print(f"Elasticsearch: {args.es_host}:{args.es_port}")
     print(f"GPU: {args.gpu}")
     print(f"임베딩: {'비활성화' if args.no_embeddings else '활성화'}")
+    if args.resume:
+        print(f"모드: RESUME (Checkpoint 기반 재개)")
+    else:
+        print(f"모드: FRESH (새로 인덱싱)")
+    if args.bulk_delay > 0:
+        print(f"Bulk 지연: {args.bulk_delay}s (429 완화)")
     print(f"로그: {log_file}")
     print("=" * 70)
     
@@ -220,7 +237,8 @@ def main():
             batch_size=args.batch_size,
             chunk_size=args.chunk_size,
             include_embeddings=not args.no_embeddings,
-            lowercase=not args.no_lowercase
+            lowercase=not args.no_lowercase,
+            bulk_delay_sec=args.bulk_delay
         )
         
         results = indexer.index_all(
@@ -240,10 +258,10 @@ def main():
         indexer.cleanup()
         
         if all(results.values()):
-            print("\n완료!")
+            print("\n완료! 데이터 누락 없이 인덱싱 성공.")
             return 0
         else:
-            print("\n일부 실패. 로그 확인 필요.")
+            print("\n일부 실패. --resume 로 재시작하면 실패한 부분부터 재개됩니다.")
             return 1
             
     except ImportError as e:
@@ -261,6 +279,7 @@ def main():
         import traceback
         logger.error(traceback.format_exc())
         print(f"\n오류: {e}")
+        print("--resume 로 재시작하면 실패한 부분부터 재개됩니다.")
         return 1
 
 
