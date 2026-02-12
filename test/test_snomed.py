@@ -316,31 +316,12 @@ class RealDataEntityMappingTester:
                 'stage3_candidates': []
             }
     
-    def run_test_with_real_data(self, csv_path: str, sample_size: int = 10000, use_random: bool = False, filter_domains: list = None, sample_per_domain: dict = None):
-        """실제 데이터로 테스트 실행
-        
-        Args:
-            csv_path: CSV 파일 경로
-            sample_size: 샘플 크기 (sample_per_domain이 None일 때만 사용)
-            use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
-            filter_domains: 필터링할 도메인 리스트 (예: ['Condition', 'Measurement']) - sample_per_domain이 None일 때만 사용
-            sample_per_domain: 도메인별 샘플 크기 딕셔너리 (예: {'Condition': 500, 'Procedure': 500})
-        """
-        self.logger.info("=" * 100)
-        self.logger.info("🚀 실제 데이터 Entity Mapping 테스트 시작")
-        self.logger.info("=" * 100)
-        
-        start_time = time.time()
-        
-        # 데이터 로딩 및 샘플링
-        test_data = self.load_and_sample_data(csv_path, sample_size, use_random=use_random, filter_domains=filter_domains, sample_per_domain=sample_per_domain)
-        
-        # 테스트 결과 저장
+    def _run_single_test_iteration(self, test_data: pd.DataFrame) -> list:
+        """단일 테스트 반복 실행 (고정된 test_data 사용)"""
         test_results = []
         successful_mappings = 0
         correct_mappings = 0
         
-        # tqdm으로 진행 상황 표시
         for idx, row in tqdm(test_data.iterrows(), total=len(test_data), desc="엔티티 매핑 테스트"):
             try:
                 entity_input = self.create_entity_input(row)
@@ -353,15 +334,12 @@ class RealDataEntityMappingTester:
                     successful_mappings += 1
                     if result['mapping_correct']:
                         correct_mappings += 1
-                        # 정답인 경우 로그 (처음 10개만)
                         if idx < 10:
                             self.logger.info(f"✅ #{idx + 1} 정답! {entity_input.entity_name}: GT={ground_truth} → Best={result.get('best_concept_id')}")
                     else:
-                        # 오답인 경우 로그 (처음 10개만)
                         if idx < 10:
                             self.logger.info(f"❌ #{idx + 1} 오답: {entity_input.entity_name}: GT={ground_truth} → Best={result.get('best_concept_id')}")
                 else:
-                    # 매핑 실패 (처음 10개만)
                     if idx < 10:
                         self.logger.info(f"⚠️ #{idx + 1} 매핑 실패: {entity_input.entity_name}")
                         
@@ -369,25 +347,85 @@ class RealDataEntityMappingTester:
                 self.logger.error(f"테스트 #{idx + 1} 처리 오류: {str(e)}")
                 continue
         
+        total_tests = len(test_results)
+        success_rate = (successful_mappings / total_tests * 100) if total_tests > 0 else 0
+        accuracy = (correct_mappings / total_tests * 100) if total_tests > 0 else 0
+        
+        self.logger.info(f"  매핑 성공: {successful_mappings:,}개 ({success_rate:.2f}%), "
+                        f"정답: {correct_mappings:,}개 ({accuracy:.2f}%)")
+        
+        return test_results
+    
+    def run_test_with_real_data(
+        self,
+        csv_path: str,
+        sample_size: int = 10000,
+        use_random: bool = False,
+        filter_domains: list = None,
+        sample_per_domain: dict = None,
+        fixed_test_data: pd.DataFrame = None,
+        num_test_runs: int = 1
+    ):
+        """실제 데이터로 테스트 실행
+        
+        Args:
+            csv_path: CSV 파일 경로
+            sample_size: 샘플 크기 (sample_per_domain이 None일 때만 사용)
+            use_random: True면 랜덤 샘플링, False면 순서대로 (기본값: False)
+            filter_domains: 필터링할 도메인 리스트 - sample_per_domain이 None일 때만 사용
+            sample_per_domain: 도메인별 샘플 크기 딕셔너리 (예: {'Condition': 500, 'Procedure': 500})
+            fixed_test_data: 고정된 테스트 데이터 (제공 시 로딩/샘플링 생략)
+            num_test_runs: 반복 테스트 횟수 (1이면 1회, 5면 같은 데이터로 5회)
+        """
+        self.logger.info("=" * 100)
+        self.logger.info("🚀 실제 데이터 Entity Mapping 테스트 시작")
+        self.logger.info("=" * 100)
+        
+        start_time = time.time()
+        
+        # 데이터 로딩 및 샘플링 (fixed_test_data가 없을 때만)
+        if fixed_test_data is not None:
+            test_data = fixed_test_data
+            self.logger.info(f"고정 테스트 데이터 사용: {len(test_data):,}개")
+        else:
+            test_data = self.load_and_sample_data(
+                csv_path, sample_size,
+                use_random=use_random,
+                filter_domains=filter_domains,
+                sample_per_domain=sample_per_domain
+            )
+        
+        # 반복 테스트 실행
+        all_test_results = []
+        for run_idx in range(num_test_runs):
+            if num_test_runs > 1:
+                self.logger.info(f"\n{'=' * 60}")
+                self.logger.info(f"🔄 테스트 Run {run_idx + 1}/{num_test_runs}")
+                self.logger.info('=' * 60)
+            
+            run_results = self._run_single_test_iteration(test_data)
+            all_test_results.append(run_results)
+        
         # 테스트 완료 시간
         end_time = time.time()
         elapsed_time = end_time - start_time
         
-        # 결과 요약
+        # 결과 요약 (마지막 run 기준)
+        test_results = all_test_results[-1]
         total_tests = len(test_results)
+        successful_mappings = sum(1 for r in test_results if r['success'])
+        correct_mappings = sum(1 for r in test_results if r['mapping_correct'])
         success_rate = (successful_mappings / total_tests * 100) if total_tests > 0 else 0
         accuracy = (correct_mappings / total_tests * 100) if total_tests > 0 else 0
         
         self.logger.info("\n" + "=" * 100)
         self.logger.info("📊 테스트 결과 요약")
         self.logger.info("=" * 100)
-        self.logger.info(f"총 테스트: {total_tests:,}개")
-        self.logger.info(f"매핑 성공: {successful_mappings:,}개 ({success_rate:.2f}%)")
-        self.logger.info(f"정답 매칭: {correct_mappings:,}개 ({accuracy:.2f}%)")
-        self.logger.info(f"오답 매칭: {successful_mappings - correct_mappings:,}개")
-        self.logger.info(f"매핑 실패: {total_tests - successful_mappings:,}개")
+        self.logger.info(f"총 테스트: {total_tests:,}개 x {num_test_runs}회")
+        self.logger.info(f"마지막 Run - 매핑 성공: {successful_mappings:,}개 ({success_rate:.2f}%), "
+                        f"정답: {correct_mappings:,}개 ({accuracy:.2f}%)")
         self.logger.info(f"소요 시간: {elapsed_time:.2f}초 ({elapsed_time/60:.2f}분)")
-        self.logger.info(f"평균 처리 시간: {elapsed_time/total_tests:.3f}초/엔티티")
+        self.logger.info(f"평균 처리 시간: {elapsed_time/total_tests/num_test_runs:.3f}초/엔티티")
         
         # 정답/오답 예시 출력
         correct_examples = [r for r in test_results if r['mapping_correct']]
@@ -407,24 +445,42 @@ class RealDataEntityMappingTester:
         
         self.logger.info("=" * 100)
         
-        # 결과를 XLSX로 저장
-        self.save_results_to_xlsx(test_results)
+        # 결과를 XLSX로 저장 (여러 시트)
+        self.save_results_to_xlsx(all_test_results, num_test_runs)
         
-        return test_results
+        return all_test_results
     
-    def save_results_to_xlsx(self, test_results: list):
-        """테스트 결과를 XLSX 파일로 저장 (stage 후보군 포함)"""
+    def save_results_to_xlsx(self, test_results: list, num_sheets: int = 1):
+        """테스트 결과를 XLSX 파일로 저장 (stage 후보군 포함)
+        
+        Args:
+            test_results: 단일 리스트 또는 [run1_results, run2_results, ...] 형태
+            num_sheets: 시트 개수 (num_sheets>1이면 test_results는 리스트의 리스트)
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         xlsx_file = self.log_dir / f"real_data_results_detailed_{timestamp}.xlsx"
         
         wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Detailed Results"
         
-        self._create_detailed_sheet(ws, test_results)
+        # test_results가 여러 run인 경우: [[r1,r2,...], [r1,r2,...], ...]
+        if num_sheets > 1 and test_results and isinstance(test_results[0], list):
+            for i, run_results in enumerate(test_results):
+                sheet_name = f"Test {i + 1}"
+                if i == 0:
+                    ws = wb.active
+                    ws.title = sheet_name
+                else:
+                    ws = wb.create_sheet(title=sheet_name)
+                self._create_detailed_sheet(ws, run_results)
+        else:
+            # 단일 결과
+            results = test_results[0] if (test_results and isinstance(test_results[0], list)) else test_results
+            ws = wb.active
+            ws.title = "Detailed Results"
+            self._create_detailed_sheet(ws, results)
         
         wb.save(xlsx_file)
-        self.logger.info(f"📊 테스트 결과 XLSX 저장: {xlsx_file}")
+        self.logger.info(f"📊 테스트 결과 XLSX 저장: {xlsx_file} (시트 {num_sheets}개)")
     
     def _create_detailed_sheet(self, ws, test_results):
         """상세 시트 생성"""
@@ -436,7 +492,7 @@ class RealDataEntityMappingTester:
             "Best Search Domain", "Best Result Domain", 
             "Best Concept ID", "Best Concept Name", 
             "Best Score", "Best Confidence",
-            "All Domains", "Domain Stage Paths", 
+            "All Domains",
             "Stage1 Candidates", "Stage2 Candidates", "Stage3 Candidates"
         ]
         
@@ -480,22 +536,18 @@ class RealDataEntityMappingTester:
             domain_results_text = self._format_domain_results(result.get('domain_results', []))
             ws.cell(row=row, column=13, value=domain_results_text)
             
-            # Stage 경로
-            stage_paths_text = self._format_stage_paths(result.get('domain_stage_paths', {}))
-            ws.cell(row=row, column=14, value=stage_paths_text)
-            
             # Stage 후보군
             stage1_text = self._format_candidates_for_cell(result.get('stage1_candidates', []), 'stage1')
-            ws.cell(row=row, column=15, value=stage1_text)
+            ws.cell(row=row, column=14, value=stage1_text)
             
             stage2_text = self._format_candidates_for_cell(result.get('stage2_candidates', []), 'stage2')
-            ws.cell(row=row, column=16, value=stage2_text)
+            ws.cell(row=row, column=15, value=stage2_text)
             
             stage3_text = self._format_candidates_for_cell(result.get('stage3_candidates', []), 'stage3')
-            ws.cell(row=row, column=17, value=stage3_text)
+            ws.cell(row=row, column=16, value=stage3_text)
             
             # 셀 스타일 설정
-            for col in range(13, 18):
+            for col in range(13, 17):
                 cell = ws.cell(row=row, column=col)
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
         
@@ -514,10 +566,9 @@ class RealDataEntityMappingTester:
             'K': 12,  # Best Score
             'L': 15,  # Best Confidence
             'M': 50,  # All Domains
-            'N': 45,  # Domain Stage Paths
-            'O': 70,  # Stage1 Candidates
-            'P': 70,  # Stage2 Candidates
-            'Q': 85   # Stage3 Candidates
+            'N': 70,  # Stage1 Candidates
+            'O': 70,  # Stage2 Candidates
+            'P': 85   # Stage3 Candidates
         }
         
         for col_letter, width in column_widths.items():
@@ -565,26 +616,43 @@ class RealDataEntityMappingTester:
         
         return "\n\n".join(lines)
     
+    def _sort_candidates_by_score(self, candidates, stage_type):
+        """Stage별 점수 높은 순으로 정렬"""
+        if not candidates:
+            return []
+        if stage_type == 'stage1':
+            return sorted(candidates, key=lambda x: x.get('elasticsearch_score') or 0, reverse=True)
+        elif stage_type == 'stage2':
+            return sorted(candidates, key=lambda x: x.get('elasticsearch_score') or 0, reverse=True)
+        else:  # stage3
+            return sorted(candidates, key=lambda x: x.get('final_score') or 0, reverse=True)
+    
     def _format_candidates_for_cell(self, candidates, stage_type):
-        """후보군 포맷팅"""
+        """후보군 포맷팅 (점수 높은 순 정렬)"""
         if not candidates:
             return "후보 없음"
+        
+        # 점수 높은 순 정렬
+        sorted_candidates = self._sort_candidates_by_score(candidates, stage_type)
         
         lines = []
         max_candidates = 15 if stage_type in ['stage1', 'stage2'] else 10
         
-        for i, candidate in enumerate(candidates[:max_candidates], 1):
+        for i, candidate in enumerate(sorted_candidates[:max_candidates], 1):
             if stage_type == 'stage1':
                 search_type = candidate.get('search_type', 'unknown')
+                es_score = candidate.get('elasticsearch_score') or 0
                 line = f"{i}. [{search_type}] {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
-                line += f"   ES점수: {candidate.get('elasticsearch_score', 0):.4f}, "
+                line += f"   ES점수: {es_score:.4f}, "
                 line += f"Standard: {candidate.get('standard_concept', 'N/A')}, "
                 line += f"Domain: {candidate.get('domain_id', 'N/A')}"
             elif stage_type == 'stage2':
                 search_type = candidate.get('search_type', 'unknown')
+                relation_type = candidate.get('relation_type', 'original')
                 is_std = "✓" if candidate.get('is_original_standard', True) else "→"
                 line = f"{i}. [{search_type}] {is_std} {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
-                line += f"   Standard: {candidate.get('standard_concept', 'N/A')}, "
+                line += f"   Relation: {relation_type}, "
+                line += f"Standard: {candidate.get('standard_concept', 'N/A')}, "
                 line += f"Domain: {candidate.get('domain_id', 'N/A')}"
                 if not candidate.get('is_original_standard', True):
                     original_non_std = candidate.get('original_non_standard', {})
@@ -592,10 +660,11 @@ class RealDataEntityMappingTester:
                         line += f"\n   원본 Non-std: {original_non_std.get('concept_name', 'N/A')} (ID: {original_non_std.get('concept_id', 'N/A')})"
             else:  # stage3
                 search_type = candidate.get('search_type', 'unknown')
+                semantic_sim = candidate.get('semantic_similarity') or 0
+                final_sc = candidate.get('final_score') or 0
                 line = f"{i}. [{search_type}] {candidate.get('concept_name', 'N/A')} (ID: {candidate.get('concept_id', 'N/A')})\n"
-                line += f"   텍스트: {candidate.get('text_similarity', 0):.4f}, "
-                line += f"의미적: {candidate.get('semantic_similarity', 0):.4f}, "
-                line += f"최종: {candidate.get('final_score', 0):.4f}\n"
+                line += f"   의미적: {semantic_sim:.4f}, "
+                line += f"최종: {final_sc:.4f}\n"
                 line += f"   Standard: {candidate.get('standard_concept', 'N/A')}, "
                 line += f"Domain: {candidate.get('domain_id', 'N/A')}"
             
@@ -610,8 +679,8 @@ def main():
     
     tester = RealDataEntityMappingTester(scoring_mode=SCORING_MODE)
     
-    # 실제 데이터 경로
-    csv_path = "/home/work/skku/hyo/MapOMOP/data/mapping_test_snomed_no_note.csv"
+    # 실제 데이터 경로 (프로젝트 루트 기준)
+    csv_path = str(Path(__file__).parent.parent / "data" / "mapping_test_snomed_no_note.csv")
     
     # 도메인별 샘플링 설정 (각 도메인당 500개씩 랜덤 샘플)
     SAMPLE_PER_DOMAIN = {
@@ -620,16 +689,42 @@ def main():
         'Measurement': 500,
         'Observation': 500
     }
-    USE_RANDOM = True  # 랜덤 샘플링 활성화
+    
+    # 3개 엔티티 테스트 옵션 (빠른 테스트용)
+    SAMPLE_PER_DOMAIN_3_ENTITIES = {
+        'Condition': 1,
+        'Procedure': 1,
+        'Measurement': 1,
+    }
+    
+    RANDOM_STATE = 42  # 고정 시드 (동일 데이터 재현용)
+    NUM_TEST_RUNS = 1  # 반복 횟수 (1: 단일 테스트, 5: 5회 반복)
+    
+    # 샘플 옵션 (True: 3개 빠른 테스트, False: 전체 2000개)
+    USE_3_ENTITIES_TEST = False
+    
+    sample_config = SAMPLE_PER_DOMAIN_3_ENTITIES if USE_3_ENTITIES_TEST else SAMPLE_PER_DOMAIN
+    
+    # 고정 시드로 샘플링 → 동일 시드면 항상 같은 데이터
+    fixed_data = tester.load_and_sample_data(
+        csv_path,
+        use_random=True,
+        random_state=RANDOM_STATE,
+        sample_per_domain=sample_config
+    )
+    
+    tester.logger.info(f"고정 샘플 {len(fixed_data):,}개 추출 (seed={RANDOM_STATE}) → {NUM_TEST_RUNS}회 테스트")
     
     results = tester.run_test_with_real_data(
-        csv_path, 
-        use_random=USE_RANDOM,
-        sample_per_domain=SAMPLE_PER_DOMAIN
+        csv_path,
+        fixed_test_data=fixed_data,
+        num_test_runs=NUM_TEST_RUNS
     )
     
     print(f"\n✅ 테스트 완료! 결과는 {tester.log_dir} 디렉토리에 저장되었습니다.")
+    if NUM_TEST_RUNS > 1:
+        print(f"   - {NUM_TEST_RUNS}회 테스트 결과가 엑셀 시트별로 저장됨 (Test 1 ~ Test {NUM_TEST_RUNS})")
+    print(f"   - 동일 시드(seed={RANDOM_STATE})로 재실행 시 같은 데이터 사용")
 
 if __name__ == "__main__":
     main()
-

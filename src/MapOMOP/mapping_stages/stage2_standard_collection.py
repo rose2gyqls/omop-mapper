@@ -104,7 +104,8 @@ class Stage2StandardCollection:
                 'is_original_standard': source.get('standard_concept') in ['S', 'C'],
                 'original_candidate': candidate,
                 'original_non_standard': None,
-                'elasticsearch_score': candidate['_score'],
+                'relation_type': 'original',
+                'elasticsearch_score': candidate.get('_score_normalized') or candidate['_score'],
                 'search_type': search_type
             })
             
@@ -134,14 +135,14 @@ class Stage2StandardCollection:
             result.append(candidate)
             
             # Relationship 변환 시도
-            related_concepts = self._get_related_concepts(concept_id)
+            related_concepts = self._get_related_concepts_with_relation(concept_id)
             
-            for related in related_concepts:
+            for related, relation_id in related_concepts:
                 related_id = str(related.get('concept_id', ''))
                 is_std = related.get('standard_concept') in ['S', 'C']
                 
                 logger.debug(f"  {concept.get('concept_name')} -> "
-                            f"[Rel] {related.get('concept_name')} (std={is_std})")
+                            f"[{relation_id}] {related.get('concept_name')} (std={is_std})")
                 
                 if is_std:
                     # Standard concept - add directly
@@ -150,6 +151,7 @@ class Stage2StandardCollection:
                         'is_original_standard': False,
                         'original_candidate': candidate['original_candidate'],
                         'original_non_standard': concept,
+                        'relation_type': relation_id,
                         'elasticsearch_score': 0.0,
                         'search_type': candidate['search_type']
                     })
@@ -163,6 +165,7 @@ class Stage2StandardCollection:
                             'is_original_standard': False,
                             'original_candidate': candidate['original_candidate'],
                             'original_non_standard': related,
+                            'relation_type': 'Maps to',
                             'elasticsearch_score': 0.0,
                             'search_type': candidate['search_type']
                         })
@@ -194,17 +197,18 @@ class Stage2StandardCollection:
             processed_ids.add(concept_id)
             
             # Relationship 변환 시도
-            related_concepts = self._get_related_concepts(concept_id)
+            related_concepts = self._get_related_concepts_with_relation(concept_id)
             
-            for related in related_concepts:
+            for related, relation_id in related_concepts:
                 logger.debug(f"  {concept.get('concept_name')} -> "
-                            f"[Rel2] {related.get('concept_name')}")
+                            f"[{relation_id}] {related.get('concept_name')}")
                 
                 result.append({
                     'concept': related,
                     'is_original_standard': False,
                     'original_candidate': candidate['original_candidate'],
                     'original_non_standard': concept,
+                    'relation_type': relation_id,
                     'elasticsearch_score': 0.0,
                     'search_type': candidate['search_type']
                 })
@@ -243,6 +247,7 @@ class Stage2StandardCollection:
                             'is_original_standard': False,
                             'original_candidate': candidate['original_candidate'],
                             'original_non_standard': concept,
+                            'relation_type': 'Maps to',
                             'elasticsearch_score': 0.0,
                             'search_type': candidate['search_type']
                         })
@@ -252,15 +257,17 @@ class Stage2StandardCollection:
         
         return result
     
-    def _get_related_concepts(self, concept_id: str) -> List[Dict[str, Any]]:
+    def _get_related_concepts_with_relation(
+        self, concept_id: str
+    ) -> List[tuple]:
         """
-        Get related concepts via TRANSFORM_RELATIONSHIP_IDS.
+        Get related concepts via TRANSFORM_RELATIONSHIP_IDS with relationship_id.
         
         Args:
             concept_id: Source concept ID (concept_id_1)
             
         Returns:
-            List of related concepts (concept_id_2)
+            List of (concept_dict, relationship_id) tuples
         """
         try:
             query = {
@@ -280,18 +287,24 @@ class Stage2StandardCollection:
                 body=query
             )
             
-            # Collect concept_id_2s
-            related_ids = []
+            # Collect (concept_id_2, relationship_id) - first occurrence per concept_id_2
+            id_to_relation = {}
             for hit in response['hits']['hits']:
-                concept_id_2 = hit['_source'].get('concept_id_2')
-                if concept_id_2:
-                    related_ids.append(str(concept_id_2))
+                src = hit['_source']
+                concept_id_2 = src.get('concept_id_2')
+                rel_id = src.get('relationship_id', 'unknown')
+                if concept_id_2 and str(concept_id_2) not in id_to_relation:
+                    id_to_relation[str(concept_id_2)] = rel_id
             
-            if not related_ids:
+            if not id_to_relation:
                 return []
             
             # Fetch concept details
-            return self._search_concepts_by_ids(related_ids, require_standard=False)
+            concept_ids = list(id_to_relation.keys())
+            concepts = self._search_concepts_by_ids(concept_ids, require_standard=False)
+            
+            return [(c, id_to_relation.get(str(c.get('concept_id', '')), 'unknown'))
+                    for c in concepts]
             
         except Exception as e:
             logger.warning(f"Relationship lookup failed for {concept_id}: {e}")

@@ -291,9 +291,9 @@ class Stage1CandidateRetrieval:
         try:
             response = self.es_client.es_client.search(index=es_index, body=query)
             hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
-            # Add sigmoid normalized score
+            # Add sigmoid normalized score (center=15, scale=8 for BM25 with boost)
             for hit in hits:
-                hit['_score_normalized'] = sigmoid_normalize(hit['_score'], center=3.0)
+                hit['_score_normalized'] = sigmoid_normalize(hit['_score'], center=15.0, scale=8.0)
             return hits
         except Exception as e:
             logger.error(f"Lexical search failed: {e}")
@@ -321,7 +321,11 @@ class Stage1CandidateRetrieval:
         
         try:
             response = self.es_client.es_client.search(index=es_index, body=query)
-            return response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
+            # Semantic scores are already 0-1 (cosine similarity), store as normalized
+            for hit in hits:
+                hit['_score_normalized'] = hit['_score']
+            return hits
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
             return []
@@ -396,9 +400,9 @@ class Stage1CandidateRetrieval:
         try:
             response = self.es_client.es_client.search(index=es_index, body=query)
             hits = response['hits']['hits'] if response['hits']['total']['value'] > 0 else []
-            # Add sigmoid normalized score
+            # Add sigmoid normalized score (center=15, scale=8 for BM25 with boost)
             for hit in hits:
-                hit['_score_normalized'] = sigmoid_normalize(hit['_score'], center=3.0)
+                hit['_score_normalized'] = sigmoid_normalize(hit['_score'], center=15.0, scale=8.0)
             return hits
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")

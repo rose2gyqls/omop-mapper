@@ -2,11 +2,25 @@
 # OMOP CDM 인덱싱 스크립트
 #
 # Usage:
-#   ./scripts/index.sh                              # 기본 설정으로 실행
-#   ./scripts/index.sh local_csv                    # Local CSV 인덱싱
-#   ./scripts/index.sh postgres                     # PostgreSQL 인덱싱
-#   ./scripts/index.sh local_csv --max-rows 10000   # 테스트
-#   ./scripts/index.sh --prepare-only               # CONCEPT_SMALL.csv 생성만
+#   ./scripts/index.sh                                    # 기본 설정 (local_csv, concept-small/relationship/synonym)
+#   ./scripts/index.sh local_csv                           # Local CSV 인덱싱
+#   ./scripts/index.sh postgres                            # PostgreSQL 인덱싱
+#   ./scripts/index.sh --prepare-only                      # CONCEPT_SMALL.csv 생성만
+#
+# 테이블 지정 (복수 가능):
+#   ./scripts/index.sh local_csv --tables concept-small synonym
+#   ./scripts/index.sh local_csv --tables concept-small    # concept-small만
+#
+# 끊긴 뒤 재시작 (이미 인덱싱된 행 건너뛰고 이어서):
+#   ./scripts/index.sh local_csv --resume
+#   ./scripts/index.sh local_csv --resume --tables synonym
+#
+# 테스트 (일부 행만):
+#   ./scripts/index.sh local_csv --max-rows 10000
+#
+# 데이터 폴더 지정:
+#   DATA_FOLDER=/path/to/csv ./scripts/index.sh local_csv
+#   ./scripts/index.sh local_csv --data-folder /path/to/csv
 
 set -e
 
@@ -72,8 +86,8 @@ else
     echo "--------------------------------------------"
 fi
 
-# 인덱싱 실행
-python run_indexing.py "$@"
+# 인덱싱 실행 (DATA_FOLDER를 Python에 전달; 명령줄 --data-folder가 있으면 그쪽이 우선)
+python run_indexing.py --data-folder "$DATA_FOLDER" "$@"
 
 echo ""
 echo "============================================"

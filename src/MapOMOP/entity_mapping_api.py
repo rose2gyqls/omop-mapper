@@ -232,12 +232,12 @@ class EntityMappingAPI:
                     self._last_stage2_candidates = domain_candidates[best_domain].get('stage2', [])
                     self._last_rerank_candidates = domain_candidates[best_domain].get('stage3', [])
             else:
-                # Failure case: use first domain's candidates (for single domain mapping)
+                # Failure case: use domain with most candidate info (avoid overwriting with empty)
                 if domain_candidates:
-                    first_domain = list(domain_candidates.keys())[0]
-                    self._last_stage1_candidates = domain_candidates[first_domain].get('stage1', [])
-                    self._last_stage2_candidates = domain_candidates[first_domain].get('stage2', [])
-                    self._last_rerank_candidates = domain_candidates[first_domain].get('stage3', [])
+                    best_fail_domain = self._select_domain_with_most_candidates(domain_candidates)
+                    self._last_stage1_candidates = domain_candidates[best_fail_domain].get('stage1', [])
+                    self._last_stage2_candidates = domain_candidates[best_fail_domain].get('stage2', [])
+                    self._last_rerank_candidates = domain_candidates[best_fail_domain].get('stage3', [])
                     logger.info(f"Mapping failed. Stage candidates recorded for debugging.")
             
             return all_results if all_results else None
@@ -245,6 +245,30 @@ class EntityMappingAPI:
         except Exception as e:
             logger.error(f"Entity mapping error: {e}", exc_info=True)
             return None
+    
+    def _select_domain_with_most_candidates(
+        self, domain_candidates: Dict[str, Dict]
+    ) -> str:
+        """
+        Select domain with most candidate info when all domains failed.
+        Prefer: stage3 > stage2 > stage1 (more stages = more debug info).
+        """
+        def score_domain(candidates: Dict) -> int:
+            s1 = len(candidates.get('stage1', []))
+            s2 = len(candidates.get('stage2', []))
+            s3 = len(candidates.get('stage3', []))
+            return s3 * 10000 + s2 * 100 + s1
+        
+        best_domain = list(domain_candidates.keys())[0]
+        best_score = score_domain(domain_candidates[best_domain])
+        
+        for domain, candidates in domain_candidates.items():
+            s = score_domain(candidates)
+            if s > best_score:
+                best_score = s
+                best_domain = domain
+        
+        return best_domain
     
     def _map_entity_for_domain(
         self,
@@ -475,13 +499,15 @@ class EntityMappingAPI:
     def _format_stage1_candidate(self, hit: Dict) -> Dict:
         """Format Stage 1 candidate for storage."""
         src = hit['_source']
+        # 정규화 점수 사용 (0~1), 없으면 raw score 사용
+        normalized_score = hit.get('_score_normalized') or hit['_score']
         return {
             'concept_id': str(src.get('concept_id', '')),
             'concept_name': src.get('concept_name', ''),
             'domain_id': src.get('domain_id', ''),
             'vocabulary_id': src.get('vocabulary_id', ''),
             'standard_concept': src.get('standard_concept', ''),
-            'elasticsearch_score': hit['_score'],
+            'elasticsearch_score': normalized_score,
             'search_type': hit.get('_search_type', 'unknown')
         }
     
@@ -495,7 +521,9 @@ class EntityMappingAPI:
             'vocabulary_id': concept.get('vocabulary_id', ''),
             'standard_concept': concept.get('standard_concept', ''),
             'is_original_standard': c.get('is_original_standard', True),
-            'search_type': c.get('search_type', 'unknown')
+            'search_type': c.get('search_type', 'unknown'),
+            'relation_type': c.get('relation_type', 'original'),
+            'elasticsearch_score': c.get('elasticsearch_score', 0.0)
         }
         # Include original non-standard info if present
         if not c.get('is_original_standard', True) and 'original_non_standard' in c:
