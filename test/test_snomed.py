@@ -684,24 +684,25 @@ def main():
     
     # 도메인별 샘플링 설정 (각 도메인당 500개씩 랜덤 샘플)
     SAMPLE_PER_DOMAIN = {
-        'Condition': 500,
-        'Procedure': 500,
-        'Measurement': 500,
-        'Observation': 500
+        'Condition': 250,
+        'Procedure': 250,
+        'Measurement': 250,
+        'Observation': 250
     }
     
     # 3개 엔티티 테스트 옵션 (빠른 테스트용)
     SAMPLE_PER_DOMAIN_3_ENTITIES = {
-        'Condition': 1,
-        'Procedure': 1,
-        'Measurement': 1,
+        'Condition': 3,
+        'Procedure': 3,
+        'Measurement': 3,
+        'Observation': 3,
     }
     
     RANDOM_STATE = 42  # 고정 시드 (동일 데이터 재현용)
     NUM_TEST_RUNS = 1  # 반복 횟수 (1: 단일 테스트, 5: 5회 반복)
     
     # 샘플 옵션 (True: 3개 빠른 테스트, False: 전체 2000개)
-    USE_3_ENTITIES_TEST = False
+    USE_3_ENTITIES_TEST = True
     
     sample_config = SAMPLE_PER_DOMAIN_3_ENTITIES if USE_3_ENTITIES_TEST else SAMPLE_PER_DOMAIN
     

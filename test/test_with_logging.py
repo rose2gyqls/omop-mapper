@@ -644,13 +644,13 @@ def main():
     # ============================================================
     test_entities = [
         # (entity, domain) 튜플 형식 - 특정 도메인 지정
-        ('eosinophil', 'Measurement'),
-        # ('cardiac troponin', 'Measurement'),
-        # ('congenital small intestinal atresia', 'Condition'),
+        ('decompression', 'Procedure'),
+        ('procedure', 'Procedure'),
+        ('acute coronary syndrome', 'Condition'),
+        ('flexible bronchoscopic removal of trachea or bronchial foreign body', 'Procedure')
         # ('mass removal', 'Procedure'),
         # ('congenital ring syndrome', 'Condition'),
         # ('monophasic synovial sarcoma', 'Observation'),
-        # ('flexible bronchoscopic removal of trachea or bronchial foreign body', 'Procedure'),
         # ('anaplastic astrocytoma', 'Observation'),
         # ('sacroiliac joint block', 'Procedure'),
         # ('endometrial polypectomy', 'Procedure'),
