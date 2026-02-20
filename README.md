@@ -50,6 +50,24 @@ python run_unified_indexing.py postgres
 --no-embeddings                         # Disable SapBERT
 ```
 
+## Mapping (테스트/배치)
+
+데이터 소스 선택 시 기본 CSV 경로 및 전처리 자동 적용. 출력: `test_logs/mapping_{snuh|snomed}_{timestamp}.{json,log,xlsx}`
+
+```bash
+# SNUH (기본: mapping_test_snuh_top10k.csv, vocabulary=SNOMED,LOINC)
+python run_mapping.py snuh
+
+# SNOMED (기본: mapping_test_snomed_no_note.csv, domain=Condition,Measurement,Drug,Observation,Procedure)
+python run_mapping.py snomed
+
+# 도메인별 5개씩 랜덤
+python run_mapping.py snuh --sample-per-domain 5 --random
+
+# Scoring 모드 (ablation study)
+python run_mapping.py snomed --scoring semantic
+```
+
 ## Usage
 
 ```python
