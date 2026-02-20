@@ -9,11 +9,13 @@ Usage:
     python run_mapping.py snuh
     python run_mapping.py snomed
     python run_mapping.py snuh --sample-per-domain 5 --random
+    python run_mapping.py snuh --workers 4   # 병렬 처리
 """
 
 import argparse
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent
@@ -45,6 +47,87 @@ DOMAIN_MAP = {
     "Device": DomainID.DEVICE,
 }
 
+# ProcessPoolExecutor worker용 전역 (각 프로세스에서 초기화)
+_worker_api = None
+
+
+def _worker_init(scoring_mode: str):
+    """Worker 프로세스 초기화: API 인스턴스 1회 생성."""
+    global _worker_api
+    es_client = ElasticsearchClient()
+    _worker_api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
+
+
+def _map_single_task(task):
+    """단일 엔티티 매핑 (worker에서 실행, pickle 가능한 인자만 사용)."""
+    global _worker_api
+    (test_index, entity_name, domain_str, record_id, ground_truth, id_col) = task
+    domain_id = DOMAIN_MAP.get(domain_str) if domain_str else None
+    entity_input = EntityInput(
+        entity_name=entity_name,
+        domain_id=domain_id,
+        vocabulary_id=None,
+    )
+    try:
+        mapping_results = _worker_api.map_entity(entity_input)
+        stage1 = getattr(_worker_api, "_last_stage1_candidates", []) or []
+        stage2 = getattr(_worker_api, "_last_stage2_candidates", []) or []
+        stage3 = getattr(_worker_api, "_last_rerank_candidates", []) or []
+
+        best = None
+        if mapping_results:
+            best = max(mapping_results, key=lambda x: x.mapping_score)
+
+        mapping_correct = False
+        if best and ground_truth is not None:
+            try:
+                mapping_correct = int(best.mapped_concept_id) == int(ground_truth)
+            except (ValueError, TypeError):
+                pass
+
+        return (
+            test_index,
+            {
+                "test_index": test_index,
+                "id": record_id,
+                id_col: record_id,
+                "entity_name": entity_name,
+                "input_domain": domain_id.value if domain_id else "All",
+                "ground_truth_concept_id": ground_truth,
+                "success": mapping_results is not None and len(mapping_results) > 0,
+                "mapping_correct": mapping_correct,
+                "best_result_domain": best.domain_id if best else None,
+                "best_concept_id": best.mapped_concept_id if best else None,
+                "best_concept_name": best.mapped_concept_name if best else None,
+                "best_score": best.mapping_score if best else 0.0,
+                "stage1_candidates": stage1,
+                "stage2_candidates": stage2,
+                "stage3_candidates": stage3,
+            },
+        )
+    except Exception as e:
+        return (
+            test_index,
+            {
+                "test_index": test_index,
+                "id": record_id,
+                id_col: record_id,
+                "entity_name": entity_name,
+                "input_domain": "All",
+                "ground_truth_concept_id": ground_truth,
+                "success": False,
+                "mapping_correct": False,
+                "best_result_domain": None,
+                "best_concept_id": None,
+                "best_concept_name": None,
+                "best_score": 0.0,
+                "stage1_candidates": [],
+                "stage2_candidates": [],
+                "stage3_candidates": [],
+                "error": str(e),
+            },
+        )
+
 
 def run_mapping(
     data_type: str,
@@ -54,8 +137,11 @@ def run_mapping(
     random_state: int = 42,
     sample_per_domain: int | None = None,
     scoring_mode: str = "llm",
+    workers: int = 1,
 ):
-    """매핑 실행: 데이터 로드(기본 경로+전처리) → 매핑 → JSON/LOG/XLSX 출력."""
+    """매핑 실행: 데이터 로드(기본 경로+전처리) → 매핑 → JSON/LOG/XLSX 출력.
+    workers > 1 이면 ProcessPoolExecutor로 병렬 처리.
+    """
     from datetime import datetime
     from tqdm import tqdm
 
@@ -104,86 +190,135 @@ def run_mapping(
         )
         row_to_input = snomed_row_to_input
 
+    workers = max(1, int(workers))
     logger.info(f"로드된 데이터: {len(df)}행")
-
-    es_client = ElasticsearchClient()
-    api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
-    logger.info(f"Scoring mode: {scoring_mode}")
+    logger.info(f"Scoring mode: {scoring_mode}, Workers: {workers}")
 
     results = []
     start_time = time.time()
 
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
-        try:
+    # 병렬: ProcessPoolExecutor (workers > 1)
+    if workers > 1:
+        tasks = []
+        for idx, row in df.iterrows():
             entity_name, domain_id, record_id, ground_truth = row_to_input(row, DOMAIN_MAP)
-            entity_input = EntityInput(
-                entity_name=entity_name,
-                domain_id=domain_id,
-                vocabulary_id=None,
-            )
+            domain_str = domain_id.value if domain_id else None
+            tasks.append((idx + 1, entity_name, domain_str, record_id, ground_truth, id_col))
 
-            mapping_results = api.map_entity(entity_input)
-
-            stage1 = getattr(api, "_last_stage1_candidates", []) or []
-            stage2 = getattr(api, "_last_stage2_candidates", []) or []
-            stage3 = getattr(api, "_last_rerank_candidates", []) or []
-
-            best = None
-            if mapping_results:
-                best = max(mapping_results, key=lambda x: x.mapping_score)
-
-            mapping_correct = False
-            if best and ground_truth is not None:
+        completed = 0
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_worker_init,
+            initargs=(scoring_mode,),
+        ) as ex:
+            future_to_idx = {ex.submit(_map_single_task, t): t[0] for t in tasks}
+            indexed_results = [None] * len(tasks)
+            for future in as_completed(future_to_idx):
+                test_index = future_to_idx[future]
                 try:
-                    mapping_correct = int(best.mapped_concept_id) == int(ground_truth)
-                except (ValueError, TypeError):
-                    pass
+                    _, r = future.result()
+                    indexed_results[test_index - 1] = r
+                    completed += 1
+                    if completed <= 5:
+                        status = "정답" if r.get("mapping_correct") else ("오답" if r.get("success") else "실패")
+                        logger.info(f"#{test_index} {r['entity_name']}: {status}")
+                except Exception as e:
+                    logger.error(f"#{test_index} Worker 예외: {e}")
+                    task = tasks[test_index - 1]
+                    indexed_results[test_index - 1] = {
+                        "test_index": test_index,
+                        "id": task[3],
+                        id_col: task[3],
+                        "entity_name": task[1],
+                        "input_domain": task[2] or "All",
+                        "ground_truth_concept_id": task[4],
+                        "success": False,
+                        "mapping_correct": False,
+                        "best_result_domain": None,
+                        "best_concept_id": None,
+                        "best_concept_name": None,
+                        "best_score": 0.0,
+                        "stage1_candidates": [],
+                        "stage2_candidates": [],
+                        "stage3_candidates": [],
+                        "error": str(e),
+                    }
+        results = [r for r in indexed_results if r is not None]
+    else:
+        # 순차 처리 (workers == 1)
+        es_client = ElasticsearchClient()
+        api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
+        for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
+            try:
+                entity_name, domain_id, record_id, ground_truth = row_to_input(row, DOMAIN_MAP)
+                entity_input = EntityInput(
+                    entity_name=entity_name,
+                    domain_id=domain_id,
+                    vocabulary_id=None,
+                )
 
-            r = {
-                "test_index": idx + 1,
-                "id": record_id,
-                id_col: record_id,
-                "entity_name": entity_name,
-                "input_domain": domain_id.value if domain_id else "All",
-                "ground_truth_concept_id": ground_truth,
-                "success": mapping_results is not None and len(mapping_results) > 0,
-                "mapping_correct": mapping_correct,
-                "best_result_domain": best.domain_id if best else None,
-                "best_concept_id": best.mapped_concept_id if best else None,
-                "best_concept_name": best.mapped_concept_name if best else None,
-                "best_score": best.mapping_score if best else 0.0,
-                "stage1_candidates": stage1,
-                "stage2_candidates": stage2,
-                "stage3_candidates": stage3,
-            }
-            results.append(r)
+                mapping_results = api.map_entity(entity_input)
 
-            if idx < 5:
-                status = "정답" if mapping_correct else ("오답" if r["success"] else "실패")
-                logger.info(f"#{idx + 1} {entity_name}: {status}")
+                stage1 = getattr(api, "_last_stage1_candidates", []) or []
+                stage2 = getattr(api, "_last_stage2_candidates", []) or []
+                stage3 = getattr(api, "_last_rerank_candidates", []) or []
 
-        except Exception as e:
-            logger.error(f"#{idx + 1} 오류: {e}")
-            entity_col = "source_name" if data_type == "snuh" else "entity_name"
-            rid = str(row.get(id_col, "N/A"))
-            results.append({
-                "test_index": idx + 1,
-                "id": rid,
-                id_col: rid,
-                "entity_name": str(row.get(entity_col, "")),
-                "input_domain": "All",
-                "ground_truth_concept_id": None,
-                "success": False,
-                "mapping_correct": False,
-                "best_result_domain": None,
-                "best_concept_id": None,
-                "best_concept_name": None,
-                "best_score": 0.0,
-                "stage1_candidates": [],
-                "stage2_candidates": [],
-                "stage3_candidates": [],
-                "error": str(e),
-            })
+                best = None
+                if mapping_results:
+                    best = max(mapping_results, key=lambda x: x.mapping_score)
+
+                mapping_correct = False
+                if best and ground_truth is not None:
+                    try:
+                        mapping_correct = int(best.mapped_concept_id) == int(ground_truth)
+                    except (ValueError, TypeError):
+                        pass
+
+                r = {
+                    "test_index": idx + 1,
+                    "id": record_id,
+                    id_col: record_id,
+                    "entity_name": entity_name,
+                    "input_domain": domain_id.value if domain_id else "All",
+                    "ground_truth_concept_id": ground_truth,
+                    "success": mapping_results is not None and len(mapping_results) > 0,
+                    "mapping_correct": mapping_correct,
+                    "best_result_domain": best.domain_id if best else None,
+                    "best_concept_id": best.mapped_concept_id if best else None,
+                    "best_concept_name": best.mapped_concept_name if best else None,
+                    "best_score": best.mapping_score if best else 0.0,
+                    "stage1_candidates": stage1,
+                    "stage2_candidates": stage2,
+                    "stage3_candidates": stage3,
+                }
+                results.append(r)
+
+                if idx < 5:
+                    status = "정답" if mapping_correct else ("오답" if r["success"] else "실패")
+                    logger.info(f"#{idx + 1} {entity_name}: {status}")
+
+            except Exception as e:
+                logger.error(f"#{idx + 1} 오류: {e}")
+                entity_col = "source_name" if data_type == "snuh" else "entity_name"
+                rid = str(row.get(id_col, "N/A"))
+                results.append({
+                    "test_index": idx + 1,
+                    "id": rid,
+                    id_col: rid,
+                    "entity_name": str(row.get(entity_col, "")),
+                    "input_domain": "All",
+                    "ground_truth_concept_id": None,
+                    "success": False,
+                    "mapping_correct": False,
+                    "best_result_domain": None,
+                    "best_concept_id": None,
+                    "best_concept_name": None,
+                    "best_score": 0.0,
+                    "stage1_candidates": [],
+                    "stage2_candidates": [],
+                    "stage3_candidates": [],
+                    "error": str(e),
+                })
 
     elapsed = time.time() - start_time
 
@@ -229,6 +364,14 @@ def main():
         choices=["llm", "llm_with_score", "semantic", "hybrid"],
         help="Scoring mode (ablation study용)",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=1,
+        metavar="N",
+        help="병렬 워커 수 (기본: 1, 순차 처리). 4~8 권장.",
+    )
 
     args = parser.parse_args()
 
@@ -240,6 +383,7 @@ def main():
         random_state=args.seed,
         sample_per_domain=args.sample_per_domain,
         scoring_mode=args.scoring,
+        workers=args.workers,
     )
 
 

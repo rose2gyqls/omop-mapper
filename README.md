@@ -66,6 +66,9 @@ python run_mapping.py snuh --sample-per-domain 5 --random
 
 # Scoring 모드 (ablation study)
 python run_mapping.py snomed --scoring semantic
+
+# 병렬 처리 (4 워커, 1000건 이상 시 권장)
+python run_mapping.py snuh --workers 4
 ```
 
 ## Usage
