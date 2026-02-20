@@ -755,7 +755,8 @@ def create_data_source(source_type: str, **kwargs) -> BaseDataSource:
             relationship_file=kwargs.get('relationship_file', 'CONCEPT_RELATIONSHIP.csv'),
             synonym_file=kwargs.get('synonym_file', 'CONCEPT_SYNONYM.csv'),
             concept_small_file=kwargs.get('concept_small_file', 'CONCEPT_SMALL.csv'),
-            delimiter=kwargs.get('delimiter', '\t')
+            delimiter=kwargs.get('delimiter', '\t'),
+            relationship_delimiter=kwargs.get('relationship_delimiter', ',')
         )
     
     elif source_type == 'postgres':

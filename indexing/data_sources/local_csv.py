@@ -25,7 +25,8 @@ class LocalCSVDataSource(BaseDataSource):
         relationship_file: str = "CONCEPT_RELATIONSHIP.csv",
         synonym_file: str = "CONCEPT_SYNONYM.csv",
         concept_small_file: str = "CONCEPT_SMALL.csv",
-        delimiter: str = "\t"
+        delimiter: str = "\t",
+        relationship_delimiter: Optional[str] = ","
     ):
         """
         Initialize local CSV data source.
@@ -37,11 +38,14 @@ class LocalCSVDataSource(BaseDataSource):
             synonym_file: CONCEPT_SYNONYM file name
             concept_small_file: CONCEPT_SMALL file name (merged concept + synonym)
             delimiter: CSV delimiter (default: tab)
+            relationship_delimiter: Delimiter for CONCEPT_RELATIONSHIP file (default: comma).
+                Use '\t' if your relationship file is tab-separated.
         """
         super().__init__(DataSourceType.LOCAL_CSV)
         
         self.data_folder = Path(data_folder)
         self.delimiter = delimiter
+        self.relationship_delimiter = relationship_delimiter if relationship_delimiter is not None else delimiter
         
         # File paths
         self.concept_path = self.data_folder / concept_file
@@ -114,16 +118,18 @@ class LocalCSVDataSource(BaseDataSource):
         table_name: str,
         chunk_size: int,
         skip_rows: int,
-        max_rows: Optional[int]
+        max_rows: Optional[int],
+        delimiter: Optional[str] = None
     ) -> Iterator[pd.DataFrame]:
         """Generic CSV chunk reader."""
         if not file_path.exists():
             self.logger.error(f"{table_name} file not found: {file_path}")
             return
-        
+
+        sep = delimiter if delimiter is not None else self.delimiter
         try:
             params = {
-                'sep': self.delimiter,
+                'sep': sep,
                 'chunksize': chunk_size,
                 'skiprows': list(range(1, skip_rows + 1)) if skip_rows > 0 else None,
                 'nrows': max_rows,
@@ -179,7 +185,8 @@ class LocalCSVDataSource(BaseDataSource):
             "CONCEPT_RELATIONSHIP",
             chunk_size,
             skip_rows,
-            max_rows
+            max_rows,
+            delimiter=self.relationship_delimiter
         ):
             cleaned = self.clean_relationship_data(chunk)
             if len(cleaned) > 0:
