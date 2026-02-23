@@ -69,6 +69,9 @@ python run_mapping.py snomed --scoring semantic
 
 # 병렬 처리 (4 워커, 1000건 이상 시 권장)
 python run_mapping.py snuh --workers 4
+
+# 5회 반복 (일관성 검증, 현황+5개 상세 시트)
+python run_mapping.py snuh --repeat 5
 ```
 
 ## Usage

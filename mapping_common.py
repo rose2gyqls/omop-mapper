@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_SOURCES = {
     "snuh": {
-        "csv_path": str(PROJECT_ROOT / "data" / "mapping_test_snuh_top10k.csv"),
+        "csv_path": str(PROJECT_ROOT / "data" / "mapping_test_snuh.csv"),
         "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
         "domains": ["Condition", "Procedure", "Drug", "Observation", "Measurement", "Device"],
         "id_col": "snuh_id",
@@ -65,6 +65,22 @@ XLSX_HEADERS = [
     "Stage1 Candidates",
     "Stage2 Candidates",
     "Stage3 Candidates",
+]
+
+# 반복 매핑 현황 시트 헤더 (--repeat 옵션)
+SUMMARY_HEADERS = [
+    "Test Index",
+    "ID",
+    "Entity Name",
+    "Input Domain",
+    "Ground Truth Concept ID",
+    "All Same",        # N개 결과 모두 같은지 여부
+    "Correct",         # N개 결과 중 정답인 결과 개수
+    "Mapped Concept 1",
+    "Mapped Concept 2",
+    "Mapped Concept 3",
+    "Mapped Concept 4",
+    "Mapped Concept 5",
 ]
 
 
@@ -288,6 +304,131 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
 
     for rn in range(2, len(results) + 2):
         ws.row_dimensions[rn].height = 150
+
+    wb.save(out_path)
+    return out_path
+
+
+def save_xlsx_repeat(
+    all_results: List[List[Dict]],
+    output_dir: Path,
+    data_type: str,
+    timestamp: str,
+) -> Path:
+    """반복 매핑 결과 저장: 현황 시트 + 1~5번째 매핑 상세 시트."""
+    if not HAS_OPENPYXL:
+        raise ImportError("openpyxl required for XLSX output. pip install openpyxl")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"mapping_{data_type}_{timestamp}.xlsx"
+
+    num_runs = len(all_results)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center")
+
+    wb = openpyxl.Workbook()
+
+    # 시트 1: 현황 (SUMMARY_HEADERS, 최대 5개 Mapped Concept)
+    summary_headers = SUMMARY_HEADERS[: 7 + min(5, num_runs)]
+    ws_summary = wb.active
+    ws_summary.title = "현황"
+    for col, h in enumerate(summary_headers, 1):
+        cell = ws_summary.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+
+    # test_index별로 5회 결과 집계
+    by_index = {}  # test_index -> [r1, r2, r3, r4, r5]
+    for run_results in all_results:
+        for r in run_results:
+            idx = r.get("test_index")
+            if idx not in by_index:
+                by_index[idx] = []
+            by_index[idx].append(r)
+
+    for row_idx, test_index in enumerate(sorted(by_index.keys()), 2):
+        rows = by_index[test_index]
+        r0 = rows[0]
+        ws_summary.cell(row=row_idx, column=1, value=test_index)
+        ws_summary.cell(row=row_idx, column=2, value=r0.get("id", "N/A"))
+        ws_summary.cell(row=row_idx, column=3, value=r0.get("entity_name", ""))
+        ws_summary.cell(row=row_idx, column=4, value=r0.get("input_domain", "All"))
+        ws_summary.cell(row=row_idx, column=5, value=r0.get("ground_truth_concept_id", ""))
+
+        # All Same: 5개 결과의 best_concept_id가 모두 같은지
+        concept_ids = [
+            str(r.get("best_concept_id") or "") for r in rows
+        ]
+        all_same = len(set(concept_ids)) == 1 if concept_ids else False
+        ws_summary.cell(row=row_idx, column=6, value="Y" if all_same else "N")
+
+        # Correct: 5개 중 정답 개수
+        correct_count = sum(1 for r in rows if r.get("mapping_correct"))
+        ws_summary.cell(row=row_idx, column=7, value=correct_count)
+
+        # Mapped Concept 1~5: Concept_name(Concept_ID)
+        for i, r in enumerate(rows[:5]):
+            cid = r.get("best_concept_id") or "N/A"
+            cname = r.get("best_concept_name") or "N/A"
+            ws_summary.cell(row=row_idx, column=8 + i, value=f"{cname}({cid})")
+
+    # 열 너비 (현황)
+    for col_letter, w in {"A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 10, "G": 8}.items():
+        ws_summary.column_dimensions[col_letter].width = w
+    for i in range(5):
+        ws_summary.column_dimensions[openpyxl.utils.get_column_letter(8 + i)].width = 50
+
+    # 시트 2~(1+num_runs): 각 회차 상세 (기존 save_xlsx와 동일 형식)
+    for run_idx, run_results in enumerate(all_results, 1):
+        ws = wb.create_sheet(title=f"{run_idx}번째 매핑", index=run_idx)
+
+        for col, h in enumerate(XLSX_HEADERS, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+
+        for row_idx, r in enumerate(run_results, 2):
+            ws.cell(row=row_idx, column=1, value=r.get("test_index", ""))
+            ws.cell(row=row_idx, column=2, value=r.get("id", r.get("snuh_id", r.get("note_id", "N/A"))))
+            ws.cell(row=row_idx, column=3, value=r.get("entity_name", ""))
+            ws.cell(row=row_idx, column=4, value=r.get("input_domain", "All"))
+            ws.cell(row=row_idx, column=5, value=r.get("ground_truth_concept_id", ""))
+            ws.cell(row=row_idx, column=6, value="성공" if r.get("success") else "실패")
+
+            correct_cell = ws.cell(row=row_idx, column=7, value="정답" if r.get("mapping_correct") else "오답")
+            if r.get("mapping_correct"):
+                correct_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                correct_cell.font = Font(color="006100")
+            else:
+                correct_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                correct_cell.font = Font(color="9C0006")
+
+            ws.cell(row=row_idx, column=8, value=r.get("best_result_domain", "N/A"))
+            ws.cell(row=row_idx, column=9, value=r.get("best_concept_id", "N/A"))
+            ws.cell(row=row_idx, column=10, value=r.get("best_concept_name", "N/A"))
+            ws.cell(row=row_idx, column=11, value=r.get("best_score", 0.0))
+
+            stage1_text = _format_candidates_for_cell(r.get("stage1_candidates", []), "stage1")
+            ws.cell(row=row_idx, column=12, value=stage1_text)
+            stage2_text = _format_candidates_for_cell(r.get("stage2_candidates", []), "stage2")
+            ws.cell(row=row_idx, column=13, value=stage2_text)
+            stage3_text = _format_candidates_for_cell(r.get("stage3_candidates", []), "stage3")
+            ws.cell(row=row_idx, column=14, value=stage3_text)
+
+            for c in range(12, 15):
+                ws.cell(row=row_idx, column=c).alignment = Alignment(wrap_text=True, vertical="top")
+
+        widths = {
+            "A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 10, "G": 12,
+            "H": 18, "I": 15, "J": 45, "K": 12, "L": 70, "M": 70, "N": 85,
+        }
+        for letter, w in widths.items():
+            ws.column_dimensions[letter].width = w
+        for rn in range(2, len(run_results) + 2):
+            ws.row_dimensions[rn].height = 150
 
     wb.save(out_path)
     return out_path
