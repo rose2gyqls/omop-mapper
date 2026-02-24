@@ -62,7 +62,7 @@ def _worker_init(scoring_mode: str):
 def _map_single_task(task):
     """단일 엔티티 매핑 (worker에서 실행, pickle 가능한 인자만 사용)."""
     global _worker_api
-    (test_index, entity_name, domain_str, record_id, ground_truth, id_col) = task
+    (test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col) = task
     domain_id = DOMAIN_MAP.get(domain_str) if domain_str else None
     entity_input = EntityInput(
         entity_name=entity_name,
@@ -95,6 +95,7 @@ def _map_single_task(task):
                 "entity_name": entity_name,
                 "input_domain": domain_id.value if domain_id else "All",
                 "ground_truth_concept_id": ground_truth,
+                "ground_truth_concept_name": ground_truth_concept_name,
                 "success": mapping_results is not None and len(mapping_results) > 0,
                 "mapping_correct": mapping_correct,
                 "best_result_domain": best.domain_id if best else None,
@@ -116,6 +117,7 @@ def _map_single_task(task):
                 "entity_name": entity_name,
                 "input_domain": "All",
                 "ground_truth_concept_id": ground_truth,
+                "ground_truth_concept_name": ground_truth_concept_name,
                 "success": False,
                 "mapping_correct": False,
                 "best_result_domain": None,
@@ -214,9 +216,9 @@ def run_mapping(
         if workers > 1:
             tasks = []
             for idx, row in df.iterrows():
-                entity_name, domain_id, record_id, ground_truth = row_to_input(row, DOMAIN_MAP)
+                entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
                 domain_str = domain_id.value if domain_id else None
-                tasks.append((idx + 1, entity_name, domain_str, record_id, ground_truth, id_col))
+                tasks.append((idx + 1, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col))
 
             completed = 0
             with ProcessPoolExecutor(
@@ -245,6 +247,7 @@ def run_mapping(
                             "entity_name": task[1],
                             "input_domain": task[2] or "All",
                             "ground_truth_concept_id": task[4],
+                            "ground_truth_concept_name": task[5],
                             "success": False,
                             "mapping_correct": False,
                             "best_result_domain": None,
@@ -263,7 +266,7 @@ def run_mapping(
             api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
             for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
                 try:
-                    entity_name, domain_id, record_id, ground_truth = row_to_input(row, DOMAIN_MAP)
+                    entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
                     entity_input = EntityInput(
                         entity_name=entity_name,
                         domain_id=domain_id,
@@ -294,6 +297,7 @@ def run_mapping(
                         "entity_name": entity_name,
                         "input_domain": domain_id.value if domain_id else "All",
                         "ground_truth_concept_id": ground_truth,
+                        "ground_truth_concept_name": ground_truth_concept_name,
                         "success": mapping_results is not None and len(mapping_results) > 0,
                         "mapping_correct": mapping_correct,
                         "best_result_domain": best.domain_id if best else None,
@@ -321,6 +325,7 @@ def run_mapping(
                         "entity_name": str(row.get(entity_col, "")),
                         "input_domain": "All",
                         "ground_truth_concept_id": None,
+                        "ground_truth_concept_name": None,
                         "success": False,
                         "mapping_correct": False,
                         "best_result_domain": None,

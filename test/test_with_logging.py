@@ -32,7 +32,13 @@ def run_entity_list_test(
     output_dir: str = "test_logs",
     scoring_mode: str = "llm",
 ):
-    """(entity, domain) 튜플 리스트로 매핑 실행. entity만 넣으면 domain=None(전체 검색)."""
+    """엔티티 리스트로 매핑 실행.
+    입력 형식:
+      - (entity, domain)                          : domain만 지정
+      - (entity, domain, gt_concept_id)            : ground truth ID 추가
+      - (entity, domain, gt_concept_id, gt_name)   : ground truth ID, Name 추가
+      - entity (str)                               : entity만, domain=None(전체 검색)
+    """
     from tqdm import tqdm
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -47,9 +53,16 @@ def run_entity_list_test(
 
     results = []
     for idx, item in enumerate(tqdm(entity_list, desc="매핑")):
-        if isinstance(item, tuple) and len(item) == 2:
-            entity_name, domain_str = item
+        ground_truth_concept_id = None
+        ground_truth_concept_name = None
+        if isinstance(item, tuple) and len(item) >= 2:
+            entity_name = str(item[0])
+            domain_str = item[1]
             domain_id = DOMAIN_MAP.get(domain_str) if domain_str else None
+            if len(item) >= 3:
+                ground_truth_concept_id = item[2]  # int or None
+            if len(item) >= 4:
+                ground_truth_concept_name = item[3]
         else:
             entity_name = str(item)
             domain_id = None
@@ -62,14 +75,22 @@ def run_entity_list_test(
         stage3 = getattr(api, "_last_rerank_candidates", []) or []
 
         best = max(mapping_results, key=lambda x: x.mapping_score) if mapping_results else None
+        mapping_correct = False
+        if best and ground_truth_concept_id is not None:
+            try:
+                mapping_correct = int(best.mapped_concept_id) == int(ground_truth_concept_id)
+            except (ValueError, TypeError):
+                pass
+
         r = {
             "test_index": idx + 1,
             "id": f"manual_{idx + 1}",
             "entity_name": entity_name,
             "input_domain": domain_id.value if domain_id else "All",
-            "ground_truth_concept_id": None,
+            "ground_truth_concept_id": ground_truth_concept_id,
+            "ground_truth_concept_name": ground_truth_concept_name,
             "success": mapping_results is not None and len(mapping_results) > 0,
-            "mapping_correct": False,
+            "mapping_correct": mapping_correct,
             "best_result_domain": best.domain_id if best else None,
             "best_concept_id": best.mapped_concept_id if best else None,
             "best_concept_name": best.mapped_concept_name if best else None,
@@ -82,15 +103,13 @@ def run_entity_list_test(
 
     save_json(results, out_path, "manual", timestamp)
     save_xlsx(results, out_path, "manual", timestamp)
-    logger.info(f"결과: {out_path}/mapping_manual_{timestamp}.(json|xlsx)")
+    logger.info(f"결과: {out_path}/mapping_manual_{timestamp}.(json|xlsx|log)")
     return results
 
 
 if __name__ == "__main__":
     entity_list = [
-        ("decompression", "Procedure"),
-        ("acute coronary syndrome", "Condition"),
-        ("aspirin", "Drug"),
+        ("inflamed", "Condition", 4181063, "Inflammation of specific body organs")
     ]
     run_entity_list_test(entity_list, output_dir="test_logs")
     print("완료.")

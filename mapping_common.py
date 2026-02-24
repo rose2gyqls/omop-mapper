@@ -23,18 +23,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_SOURCES = {
     "snuh": {
-        "csv_path": str(PROJECT_ROOT / "data" / "mapping_test_snuh.csv"),
+        "csv_path": str(PROJECT_ROOT / "data" / "MapOMOP_test_data_coverage90_concept_id.csv"),
         "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
-        "domains": ["Condition", "Procedure", "Drug", "Observation", "Measurement", "Device"],
-        "id_col": "snuh_id",
+        "domains": ["Condition", "Procedure", "Drug", "Measurement"],
+        "id_col": "row_id",
         "loader": "load_snuh_data",
         "row_to_input": "snuh_row_to_input",
     },
     "snomed": {
-        "csv_path": str(PROJECT_ROOT / "data" / "mapping_test_snomed_no_note.csv"),
-        "filter_domains": ["Condition", "Measurement", "Drug", "Observation", "Procedure"],  # 기본 전처리
-        "domains": ["Condition", "Measurement", "Drug", "Observation", "Procedure"],
-        "id_col": "note_id",
+        "csv_path": str(PROJECT_ROOT / "data" / "snomed-mapping-data-2602.csv"),
+        "filter_domains": ["Condition", "Measurement", "Observation", "Procedure"],  # 기본 전처리
+        "domains": ["Condition", "Measurement", "Observation", "Procedure"],
+        "id_col": "note_id",  # note_id 없을 시 load_snomed_data에서 row_id 자동 생성
         "loader": "load_snomed_data",
         "row_to_input": "snomed_row_to_input",
     },
@@ -56,6 +56,7 @@ XLSX_HEADERS = [
     "Entity Name",
     "Input Domain",
     "Ground Truth Concept ID",
+    "Ground Truth Concept Name",
     "Success",
     "Mapping Correct",
     "Best Result Domain",
@@ -74,6 +75,7 @@ SUMMARY_HEADERS = [
     "Entity Name",
     "Input Domain",
     "Ground Truth Concept ID",
+    "Ground Truth Concept Name",
     "All Same",        # N개 결과 모두 같은지 여부
     "Correct",         # N개 결과 중 정답인 결과 개수
     "Mapped Concept 1",
@@ -266,9 +268,10 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
         ws.cell(row=row_idx, column=3, value=r.get("entity_name", ""))
         ws.cell(row=row_idx, column=4, value=r.get("input_domain", "All"))
         ws.cell(row=row_idx, column=5, value=r.get("ground_truth_concept_id", ""))
-        ws.cell(row=row_idx, column=6, value="성공" if r.get("success") else "실패")
+        ws.cell(row=row_idx, column=6, value=r.get("ground_truth_concept_name", ""))
+        ws.cell(row=row_idx, column=7, value="성공" if r.get("success") else "실패")
 
-        correct_cell = ws.cell(row=row_idx, column=7, value="정답" if r.get("mapping_correct") else "오답")
+        correct_cell = ws.cell(row=row_idx, column=8, value="정답" if r.get("mapping_correct") else "오답")
         if r.get("mapping_correct"):
             correct_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
             correct_cell.font = Font(color="006100")
@@ -276,28 +279,28 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
             correct_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
             correct_cell.font = Font(color="9C0006")
 
-        ws.cell(row=row_idx, column=8, value=r.get("best_result_domain", "N/A"))
-        ws.cell(row=row_idx, column=9, value=r.get("best_concept_id", "N/A"))
-        ws.cell(row=row_idx, column=10, value=r.get("best_concept_name", "N/A"))
-        ws.cell(row=row_idx, column=11, value=r.get("best_score", 0.0))
+        ws.cell(row=row_idx, column=9, value=r.get("best_result_domain", "N/A"))
+        ws.cell(row=row_idx, column=10, value=r.get("best_concept_id", "N/A"))
+        ws.cell(row=row_idx, column=11, value=r.get("best_concept_name", "N/A"))
+        ws.cell(row=row_idx, column=12, value=r.get("best_score", 0.0))
 
         # Stage1: 점수 높은 순 (lexical/semantic/combined 무관)
         stage1_text = _format_candidates_for_cell(r.get("stage1_candidates", []), "stage1")
-        ws.cell(row=row_idx, column=12, value=stage1_text)
+        ws.cell(row=row_idx, column=13, value=stage1_text)
 
         stage2_text = _format_candidates_for_cell(r.get("stage2_candidates", []), "stage2")
-        ws.cell(row=row_idx, column=13, value=stage2_text)
+        ws.cell(row=row_idx, column=14, value=stage2_text)
 
         stage3_text = _format_candidates_for_cell(r.get("stage3_candidates", []), "stage3")
-        ws.cell(row=row_idx, column=14, value=stage3_text)
+        ws.cell(row=row_idx, column=15, value=stage3_text)
 
-        for c in range(12, 15):
+        for c in range(13, 16):
             ws.cell(row=row_idx, column=c).alignment = Alignment(wrap_text=True, vertical="top")
 
     # 열 너비
     widths = {
-        "A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 10, "G": 12,
-        "H": 18, "I": 15, "J": 45, "K": 12, "L": 70, "M": 70, "N": 85,
+        "A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 12,
+        "I": 18, "J": 15, "K": 45, "L": 12, "M": 70, "N": 70, "O": 85,
     }
     for letter, w in widths.items():
         ws.column_dimensions[letter].width = w
@@ -330,7 +333,7 @@ def save_xlsx_repeat(
     wb = openpyxl.Workbook()
 
     # 시트 1: 현황 (SUMMARY_HEADERS, 최대 5개 Mapped Concept)
-    summary_headers = SUMMARY_HEADERS[: 7 + min(5, num_runs)]
+    summary_headers = SUMMARY_HEADERS[: 8 + min(5, num_runs)]
     ws_summary = wb.active
     ws_summary.title = "현황"
     for col, h in enumerate(summary_headers, 1):
@@ -356,29 +359,30 @@ def save_xlsx_repeat(
         ws_summary.cell(row=row_idx, column=3, value=r0.get("entity_name", ""))
         ws_summary.cell(row=row_idx, column=4, value=r0.get("input_domain", "All"))
         ws_summary.cell(row=row_idx, column=5, value=r0.get("ground_truth_concept_id", ""))
+        ws_summary.cell(row=row_idx, column=6, value=r0.get("ground_truth_concept_name", ""))
 
         # All Same: 5개 결과의 best_concept_id가 모두 같은지
         concept_ids = [
             str(r.get("best_concept_id") or "") for r in rows
         ]
         all_same = len(set(concept_ids)) == 1 if concept_ids else False
-        ws_summary.cell(row=row_idx, column=6, value="Y" if all_same else "N")
+        ws_summary.cell(row=row_idx, column=7, value="Y" if all_same else "N")
 
         # Correct: 5개 중 정답 개수
         correct_count = sum(1 for r in rows if r.get("mapping_correct"))
-        ws_summary.cell(row=row_idx, column=7, value=correct_count)
+        ws_summary.cell(row=row_idx, column=8, value=correct_count)
 
         # Mapped Concept 1~5: Concept_name(Concept_ID)
         for i, r in enumerate(rows[:5]):
             cid = r.get("best_concept_id") or "N/A"
             cname = r.get("best_concept_name") or "N/A"
-            ws_summary.cell(row=row_idx, column=8 + i, value=f"{cname}({cid})")
+            ws_summary.cell(row=row_idx, column=9 + i, value=f"{cname}({cid})")
 
     # 열 너비 (현황)
-    for col_letter, w in {"A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 10, "G": 8}.items():
+    for col_letter, w in {"A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 8}.items():
         ws_summary.column_dimensions[col_letter].width = w
     for i in range(5):
-        ws_summary.column_dimensions[openpyxl.utils.get_column_letter(8 + i)].width = 50
+        ws_summary.column_dimensions[openpyxl.utils.get_column_letter(9 + i)].width = 50
 
     # 시트 2~(1+num_runs): 각 회차 상세 (기존 save_xlsx와 동일 형식)
     for run_idx, run_results in enumerate(all_results, 1):
@@ -396,9 +400,10 @@ def save_xlsx_repeat(
             ws.cell(row=row_idx, column=3, value=r.get("entity_name", ""))
             ws.cell(row=row_idx, column=4, value=r.get("input_domain", "All"))
             ws.cell(row=row_idx, column=5, value=r.get("ground_truth_concept_id", ""))
-            ws.cell(row=row_idx, column=6, value="성공" if r.get("success") else "실패")
+            ws.cell(row=row_idx, column=6, value=r.get("ground_truth_concept_name", ""))
+            ws.cell(row=row_idx, column=7, value="성공" if r.get("success") else "실패")
 
-            correct_cell = ws.cell(row=row_idx, column=7, value="정답" if r.get("mapping_correct") else "오답")
+            correct_cell = ws.cell(row=row_idx, column=8, value="정답" if r.get("mapping_correct") else "오답")
             if r.get("mapping_correct"):
                 correct_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                 correct_cell.font = Font(color="006100")
@@ -406,24 +411,24 @@ def save_xlsx_repeat(
                 correct_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
                 correct_cell.font = Font(color="9C0006")
 
-            ws.cell(row=row_idx, column=8, value=r.get("best_result_domain", "N/A"))
-            ws.cell(row=row_idx, column=9, value=r.get("best_concept_id", "N/A"))
-            ws.cell(row=row_idx, column=10, value=r.get("best_concept_name", "N/A"))
-            ws.cell(row=row_idx, column=11, value=r.get("best_score", 0.0))
+            ws.cell(row=row_idx, column=9, value=r.get("best_result_domain", "N/A"))
+            ws.cell(row=row_idx, column=10, value=r.get("best_concept_id", "N/A"))
+            ws.cell(row=row_idx, column=11, value=r.get("best_concept_name", "N/A"))
+            ws.cell(row=row_idx, column=12, value=r.get("best_score", 0.0))
 
             stage1_text = _format_candidates_for_cell(r.get("stage1_candidates", []), "stage1")
-            ws.cell(row=row_idx, column=12, value=stage1_text)
+            ws.cell(row=row_idx, column=13, value=stage1_text)
             stage2_text = _format_candidates_for_cell(r.get("stage2_candidates", []), "stage2")
-            ws.cell(row=row_idx, column=13, value=stage2_text)
+            ws.cell(row=row_idx, column=14, value=stage2_text)
             stage3_text = _format_candidates_for_cell(r.get("stage3_candidates", []), "stage3")
-            ws.cell(row=row_idx, column=14, value=stage3_text)
+            ws.cell(row=row_idx, column=15, value=stage3_text)
 
-            for c in range(12, 15):
+            for c in range(13, 16):
                 ws.cell(row=row_idx, column=c).alignment = Alignment(wrap_text=True, vertical="top")
 
         widths = {
-            "A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 10, "G": 12,
-            "H": 18, "I": 15, "J": 45, "K": 12, "L": 70, "M": 70, "N": 85,
+            "A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 12,
+            "I": 18, "J": 15, "K": 45, "L": 12, "M": 70, "N": 70, "O": 85,
         }
         for letter, w in widths.items():
             ws.column_dimensions[letter].width = w
@@ -465,9 +470,10 @@ def load_snuh_data(
             df = df[df["vocabulary"].isin(vocabulary_filter)]
 
         if sample_per_domain:
+            domain_col = "domain_id" if "domain_id" in df.columns else "domain"
             sampled = []
             for domain, size in sample_per_domain.items():
-                subset = df[df["domain"] == domain]
+                subset = df[df[domain_col] == domain]
                 n = min(size, len(subset))
                 if n == 0:
                     continue
@@ -490,14 +496,18 @@ def load_snuh_data(
     return df.reset_index(drop=True)
 
 
-def snuh_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, Optional[Any], str, Optional[int]]:
-    """(entity_name, domain_id, record_id, ground_truth)"""
-    entity = str(row["source_name"]).strip()
-    domain_str = str(row["domain"]).strip() if pd.notna(row.get("domain")) else None
+def snuh_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, Optional[Any], str, Optional[int], Optional[str]]:
+    """(entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name)"""
+    entity = str(row.get("source_name", row.get("source_value", ""))).strip()
+    domain_str = str(row.get("domain", row.get("domain_id", ""))).strip()
+    domain_str = None if not domain_str or domain_str == "nan" else domain_str
     domain_id = domain_map.get(domain_str) if domain_str else None
-    rid = str(row["snuh_id"]) if pd.notna(row.get("snuh_id")) else "N/A"
-    gt = int(row["omop_concept_id"]) if pd.notna(row.get("omop_concept_id")) else None
-    return entity, domain_id, rid, gt
+    rid = str(row.get("snuh_id", row.get("row_id", row.name if row.name is not None else "N/A")))
+    rid = "N/A" if not rid or rid == "nan" else rid
+    gt_raw = row.get("omop_concept_id", row.get("concept_id"))
+    gt = int(gt_raw) if pd.notna(gt_raw) else None
+    gt_name = str(row.get("concept_name", "")).strip() if pd.notna(row.get("concept_name")) else None
+    return entity, domain_id, rid, gt, gt_name
 
 
 # --- SNOMED 데이터 로더 ---
@@ -547,14 +557,23 @@ def load_snomed_data(
         else:
             df = df.head(n)
 
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    # note_id 없을 경우 row_id(행 인덱스) 자동 생성
+    if "note_id" not in df.columns:
+        df["row_id"] = df.index.astype(str)
+    elif "row_id" not in df.columns:
+        df["row_id"] = df["note_id"].astype(str)
+    return df
 
 
-def snomed_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, Optional[Any], str, Optional[int]]:
-    """(entity_name, domain_id, record_id, ground_truth)"""
+def snomed_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, Optional[Any], str, Optional[int], Optional[str]]:
+    """(entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name)
+    record_id: row_id(자동생성) 또는 note_id 우선 사용
+    """
     entity = str(row["entity_name"]).strip()
     domain_str = str(row["domain_id"]).strip() if pd.notna(row.get("domain_id")) else None
     domain_id = domain_map.get(domain_str) if domain_str else None
-    rid = str(row["note_id"]) if pd.notna(row.get("note_id")) else "N/A"
+    rid = str(row.get("row_id", row.get("note_id", row.name if row.name is not None else "N/A")))
     gt = int(row["concept_id"]) if pd.notna(row.get("concept_id")) else None
-    return entity, domain_id, rid, gt
+    gt_name = str(row.get("concept_name", "")).strip() if pd.notna(row.get("concept_name")) else None
+    return entity, domain_id, rid, gt, gt_name

@@ -38,7 +38,7 @@ except ImportError:
 SYSTEM_PROMPT = """You are given an entity and several candidate OMOP CDM concepts. Your task is to score EACH candidate on a scale of 0-5 based on how well it matches the entity."""
 
 USER_PROMPT_TEMPLATE = """
-If a candidate is SEMANTICALLY EQUIVALENT(i.e., it has the same clinical meaning, even if the wording is different) or EXACT MATCH to the entity
+If a candidate is SEMANTICALLY EQUIVALENT(i.e., it has the same clinical meaning, even if the wording is different)
 , you MUST select it.
 
 If no semantically equivalent candidate exists, you MAY select a MORE GENERAL
@@ -50,9 +50,11 @@ IMPORTANT:
 - Do NOT guess.
 - Choosing a wrong concept with additional or different meaning is worse than choosing NONE.
 - If generalization would change the meaning, select NONE.
+- CRITICAL DEFINITION OF ADDITIONAL MEANING: Adding a specific body site, anatomical structure, severity, or underlying cause
+that is NOT present in the original entity is considered adding "new meaning" and makes the candidate an invalid sub-concept.
 
 Decision process (follow strictly):
-1. ELIMINATE any candidate that changes the core clinical meaning
+1. ELIMINATE any candidate that changes the core clinical meaning OR adds specific details (like body parts or causes) not found in the original entity.
 2. Among remaining candidates:
    a) Prefer a SEMANTICALLY EQUIVALENT concept.
    b) If none exists, prefer the MOST APPROPRIATE higher-level concept
@@ -71,7 +73,7 @@ Decision process (follow strictly):
 - 3.0~3.9: Acceptable generalization (broader concept that preserves meaning)
 - 2.0~2.9: Partial match (related but loses some meaning)
 - 1.0~1.9: Weak match (loosely related)
-- 0.0~0.9: No match (different meaning or adds new meaning)
+- 0.0~0.9: No match OR UNACCEPTABLE SUB-CONCEPT (different meaning or adds new meaning)
 
 CRITICAL: Every candidate MUST have a UNIQUE score. No two candidates may share the same score. Use decimal precision (e.g., 4.8, 4.3, 3.5) to differentiate candidates.
 
