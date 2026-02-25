@@ -86,6 +86,68 @@ def reduce_embedding_dim(
 # Score normalization
 # =============================================================================
 
+# =============================================================================
+# Candidate deduplication
+# =============================================================================
+
+
+def deduplicate_by_concept(
+    candidates: list,
+    *,
+    get_concept=None,
+    get_score=None
+):
+    """
+    Deduplicate candidates by (concept_id, concept_name), keeping the one with higher score.
+
+    Works with Stage 1 hits ({'_source': {...}}) and Stage 2/3 candidates ({'concept': {...}}).
+
+    Args:
+        candidates: List of candidate dicts
+        get_concept: (candidate) -> dict with concept_id, concept_name.
+            Default: extracts from candidate['concept'] or candidate['_source']
+        get_score: (candidate) -> float for comparison (higher is better).
+            Default: elasticsearch_score, or _score_normalized, or _score
+
+    Returns:
+        Deduplicated list (order not guaranteed)
+    """
+    if not candidates:
+        return []
+
+    def _default_get_concept(c):
+        if 'concept' in c:
+            return c['concept']
+        if '_source' in c:
+            return c['_source']
+        return c
+
+    def _default_get_score(c):
+        return (
+            c.get('elasticsearch_score') or
+            c.get('_score_normalized') or
+            c.get('_score', 0.0)
+        )
+
+    get_concept = get_concept or _default_get_concept
+    get_score = get_score or _default_get_score
+
+    unique = {}
+    for c in candidates:
+        conv = get_concept(c)
+        key = (conv.get('concept_id', ''), conv.get('concept_name', ''))
+        score = get_score(c)
+        if key not in unique or score > get_score(unique[key]):
+            unique[key] = c
+
+    return list(unique.values())
+
+
+# =============================================================================
+# Score normalization
+# =============================================================================
+
+
 def sigmoid_normalize(score: float, center: float = 3.0, scale: float = 1.0) -> float:
     """
     Normalize ES score to 0-1 range using sigmoid.

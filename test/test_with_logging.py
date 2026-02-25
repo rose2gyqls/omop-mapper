@@ -116,7 +116,8 @@ def run_entity_list_test(
 
 if __name__ == "__main__":
     entity_list = [
-        ("Mepivacaine 2% 5ml inj", "Drug", 43609283, "5 ml mepivacaine 20 mg/ml injectable solution")
+        ("Mepivacaine 2% 5ml inj", "Drug", 43609283, "5 ml mepivacaine 20 mg/ml injectable solution"),
+        ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection")
     ]
     run_entity_list_test(entity_list, output_dir="test_logs", use_validation=True)
     # use_validation=False 로 비교 테스트: run_entity_list_test(entity_list, use_validation=False)

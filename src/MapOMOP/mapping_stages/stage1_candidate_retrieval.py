@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ..utils import sigmoid_normalize
+from ..utils import deduplicate_by_concept, sigmoid_normalize
 
 logger = logging.getLogger(__name__)
 
@@ -100,14 +100,22 @@ class Stage1CandidateRetrieval:
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)
         
-        # 후보군 결과만 로깅: [lexical|semantic|combined] concept_name (concept_id) score
+        # concept_id + concept_name 기준 중복 제거 (높은 정규화 점수 유지)
+        all_candidates = deduplicate_by_concept(
+            all_candidates,
+            get_concept=lambda c: c.get('_source', {}),
+            get_score=lambda c: c.get('_score_normalized') or c.get('_score', 0.0)
+        )
+        
+        # 후보군 결과 로깅: [lexical|semantic|combined] concept_name (concept_id) ES점수 -> 정규화점수
         for hit in all_candidates:
             src = hit.get('_source', {})
             st = hit.get('_search_type', 'unknown')
             name = src.get('concept_name', 'N/A')
             cid = src.get('concept_id', 'N/A')
-            score = hit.get('_score', 0)
-            logger.info(f"  [{st}] {name} ({cid}) {score:.4f}")
+            es_score = hit.get('_score', 0)
+            norm_score = hit.get('_score_normalized', 0)
+            logger.info(f"  [{st}] {name} ({cid}) {es_score:.4f} -> {norm_score:.4f}")
         
         return all_candidates
     

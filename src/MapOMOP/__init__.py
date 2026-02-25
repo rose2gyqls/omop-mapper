@@ -35,7 +35,7 @@ from .llm_client import (
     create_llm_client,
 )
 from .mapping_stages import ScoringMode
-from .utils import sigmoid_normalize
+from .utils import deduplicate_by_concept, sigmoid_normalize
 
 __version__ = "1.0.0"
 __author__ = "rose"
@@ -56,5 +56,6 @@ __all__ = [
     # Elasticsearch
     "ElasticsearchClient",
     # Utils
+    "deduplicate_by_concept",
     "sigmoid_normalize",
 ]

@@ -2,14 +2,19 @@
 Stage 2: Standard Concept Collection
 
 Converts concepts using relationship transformations and "Maps to" relationships.
-Process:
-1. 1차 변환: Stage 1 결과 → relationship 변환 → non-std면 Maps to
-2. 2차 변환: 1차 결과 → relationship 변환
-3. 3차 변환: 2차 결과 → non-std면 Maps to → 중복 삭제
+Process (2 rounds of [relation transform → Maps to]):
+1. 1차 라운드: Stage 1 후보군 → TRANSFORM_RELATIONSHIP_IDS 관계 변환
+   → 변환된/미변환 후보 모두 non-std면 Maps to 적용
+   → std 결과들만 2차로 넘김
+2. 2차 라운드: std 결과들 → TRANSFORM_RELATIONSHIP_IDS 관계 변환
+   → 변환된/미변환 후보 모두 non-std면 Maps to 적용
+3. 1차+2차 결과 모두 합쳐서 중복 제거
 """
 
 import logging
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
+
+from ..utils import deduplicate_by_concept
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +51,9 @@ class Stage2StandardCollection:
         Convert Stage 1 candidates to standard concepts.
         
         Process:
-        1. 1차 변환: relationship 변환 후 non-std면 Maps to
-        2. 2차 변환: 1차 결과에 relationship 변환
-        3. 3차 변환: non-std면 Maps to, 중복 삭제
+        1. 1차 라운드: 관계 변환 → 변환/미변환 모두 Maps to → std만 2차로
+        2. 2차 라운드: std 결과에 대해 같은 프로세스 반복
+        3. 전체 결과 중복 제거
         
         Args:
             stage1_candidates: Candidates from Stage 1
@@ -60,14 +65,37 @@ class Stage2StandardCollection:
         logger.info("Stage 2: Standard Concept Collection")
         
         initial_candidates = self._prepare_initial_candidates(stage1_candidates)
-        first_transform = self._first_transform(initial_candidates)
-        second_transform = self._second_transform(first_transform)
-        final_candidates = self._third_transform(second_transform)
-        deduplicated = self._deduplicate(final_candidates)
         
-        self._log_candidates_detail("1차 변환 결과", first_transform)
-        self._log_candidates_detail("2차 변환 결과", second_transform)
-        self._log_candidates_detail("3차 변환 결과", final_candidates)
+        # 1차 라운드: 관계 변환 → Maps to
+        first_round_all = self._apply_transform_and_maps_to(initial_candidates)
+        first_round_dedup = deduplicate_by_concept(
+            first_round_all,
+            get_concept=lambda c: c.get('concept', {}),
+            get_score=lambda c: c.get('elasticsearch_score', 0.0)
+        )
+        
+        # 2차 라운드: std 결과만 2차 입력으로, 같은 프로세스
+        first_round_std = self._filter_std_only(first_round_dedup)
+        second_round_all = (
+            self._apply_transform_and_maps_to(first_round_std)
+            if first_round_std else []
+        )
+        second_round_dedup = deduplicate_by_concept(
+            second_round_all,
+            get_concept=lambda c: c.get('concept', {}),
+            get_score=lambda c: c.get('elasticsearch_score', 0.0)
+        ) if second_round_all else []
+        
+        # 1차 + 2차 전체 합쳐서 최종 중복 제거 후 stage3로
+        all_results = first_round_dedup + second_round_dedup
+        deduplicated = deduplicate_by_concept(
+            all_results,
+            get_concept=lambda c: c.get('concept', {}),
+            get_score=lambda c: c.get('elasticsearch_score', 0.0)
+        )
+        
+        self._log_candidates_detail("1차 라운드 결과", first_round_dedup)
+        self._log_candidates_detail("2차 라운드 결과", second_round_dedup)
         self._log_candidates_detail("중복 제거 결과", deduplicated)
         
         return deduplicated
@@ -113,135 +141,87 @@ class Stage2StandardCollection:
             else:
                 logger.info(f"    {name} ({cid}) [{rel}]")
     
-    def _first_transform(
+    def _apply_transform_and_maps_to(
         self,
         candidates: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        1차 변환: relationship 변환 후 non-std면 Maps to.
+        [관계 변환 → Maps to] 한 라운드 적용.
         
-        - Stage 1 결과를 concept_id_1에서 찾고 relationship_id에 해당하면 변환
-        - 변환된 것 중 non-std면 Maps to로 std 변환
+        - TRANSFORM_RELATIONSHIP_IDS로 지정된 관계로 변환
+        - 변환된 후보군 + 변환되지 않은 원본 모두에 대해:
+          std면 그대로 추가, non-std면 Maps to로 std 찾아서 추가
         """
         result = []
         
         for candidate in candidates:
             concept = candidate['concept']
             concept_id = str(concept.get('concept_id', ''))
-            concept_name = concept.get('concept_name', '')
             
-            # 원본 컨셉 추가
-            result.append(candidate)
+            # 1) 원본: std면 그대로, non-std면 Maps to
+            self._add_candidate_or_maps_to(
+                candidate, concept, candidate.get('original_non_standard'), 'original', result
+            )
             
-            # Relationship 변환 시도
+            # 2) Relationship 변환
             related_concepts = self._get_related_concepts_with_relation(concept_id)
-            
             for related, relation_id in related_concepts:
                 related_id = str(related.get('concept_id', ''))
-                is_std = related.get('standard_concept') in ['S', 'C']
-                
-                if is_std:
-                    # Standard concept - add directly
+                self._add_candidate_or_maps_to(
+                    {'concept': related, 'original_candidate': candidate['original_candidate'],
+                     'search_type': candidate['search_type']},
+                    related,
+                    concept,
+                    relation_id,
+                    result
+                )
+        
+        return result
+    
+    def _add_candidate_or_maps_to(
+        self,
+        candidate_data: Dict[str, Any],
+        concept: Dict[str, Any],
+        original_non_std: Optional[Dict[str, Any]],
+        relation_type: str,
+        result: List[Dict[str, Any]]
+    ) -> None:
+        """
+        std면 그대로 추가, non-std면 Maps to로 std 찾아서 추가.
+        """
+        is_std = concept.get('standard_concept') in ['S', 'C']
+        
+        if is_std:
+            result.append({
+                'concept': concept,
+                'is_original_standard': candidate_data.get('is_original_standard', False),
+                'original_candidate': candidate_data.get('original_candidate'),
+                'original_non_standard': original_non_std,
+                'relation_type': relation_type,
+                'elasticsearch_score': candidate_data.get('elasticsearch_score', 0.0),
+                'search_type': candidate_data.get('search_type', 'unknown')
+            })
+        else:
+            concept_id = str(concept.get('concept_id', ''))
+            std_concepts = self._get_standard_via_maps_to(concept_id)
+            if std_concepts:
+                for std in std_concepts:
                     result.append({
-                        'concept': related,
+                        'concept': std,
                         'is_original_standard': False,
-                        'original_candidate': candidate['original_candidate'],
+                        'original_candidate': candidate_data.get('original_candidate'),
                         'original_non_standard': concept,
-                        'relation_type': relation_id,
+                        'relation_type': 'Maps to',
                         'elasticsearch_score': 0.0,
-                        'search_type': candidate['search_type']
+                        'search_type': candidate_data.get('search_type', 'unknown')
                     })
-                else:
-                    # Non-standard - apply Maps to
-                    std_concepts = self._get_standard_via_maps_to(related_id)
-                    if std_concepts:
-                        for std in std_concepts:
-                            result.append({
-                                'concept': std,
-                                'is_original_standard': False,
-                                'original_candidate': candidate['original_candidate'],
-                                'original_non_standard': related,
-                                'relation_type': 'Maps to',
-                                'elasticsearch_score': 0.0,
-                                'search_type': candidate['search_type']
-                            })
-        
-        return result
     
-    def _second_transform(
-        self,
-        candidates: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """
-        2차 변환: relationship 변환만 (Maps to 없음).
-        
-        - 1차 변환 결과에 relationship_id에 해당하는 관계가 있으면 변환
-        """
-        result = []
-        processed_ids: Set[str] = set()
-        
-        for candidate in candidates:
-            concept = candidate['concept']
-            concept_id = str(concept.get('concept_id', ''))
-            concept_name = concept.get('concept_name', '')
-            
-            # 원본 컨셉 추가
-            result.append(candidate)
-            
-            if concept_id in processed_ids:
-                continue
-            processed_ids.add(concept_id)
-            
-            related_concepts = self._get_related_concepts_with_relation(concept_id)
-            
-            for related, relation_id in related_concepts:
-                
-                result.append({
-                    'concept': related,
-                    'is_original_standard': False,
-                    'original_candidate': candidate['original_candidate'],
-                    'original_non_standard': concept,
-                    'relation_type': relation_id,
-                    'elasticsearch_score': 0.0,
-                    'search_type': candidate['search_type']
-                })
-        
-        return result
-    
-    def _third_transform(
-        self,
-        candidates: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """
-        3차 변환: non-std면 Maps to.
-        
-        - 2차 변환 결과 중 non-std면 Maps to로 std 변환
-        """
-        result = []
-        
-        for candidate in candidates:
-            concept = candidate['concept']
-            concept_id = str(concept.get('concept_id', ''))
-            concept_name = concept.get('concept_name', '')
-            is_std = concept.get('standard_concept') in ['S', 'C']
-            
-            if is_std:
-                result.append(candidate)
-            else:
-                std_concepts = self._get_standard_via_maps_to(concept_id)
-                if std_concepts:
-                    for std in std_concepts:
-                        result.append({
-                            'concept': std,
-                            'is_original_standard': False,
-                            'original_candidate': candidate['original_candidate'],
-                            'original_non_standard': concept,
-                            'relation_type': 'Maps to',
-                            'elasticsearch_score': 0.0,
-                            'search_type': candidate['search_type']
-                        })
-        
-        return result
+    def _filter_std_only(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """std(standard_concept in S/C)인 결과만 반환."""
+        return [
+            c for c in candidates
+            if c.get('concept', {}).get('standard_concept') in ['S', 'C']
+        ]
     
     def _get_related_concepts_with_relation(
         self, concept_id: str
@@ -261,11 +241,11 @@ class Stage2StandardCollection:
                     "bool": {
                         "must": [
                             {"term": {"concept_id_1": concept_id}},
-                            {"terms": {"relationship_id.keyword": self.TRANSFORM_RELATIONSHIP_IDS}}
+                            {"terms": {"relationship_id": self.TRANSFORM_RELATIONSHIP_IDS}}
                         ]
                     }
                 },
-                "size": 20
+                "size": 50
             }
             
             response = self.es_client.es_client.search(
@@ -387,19 +367,3 @@ class Stage2StandardCollection:
             logger.warning(f"Concept search failed: {e}")
             return []
     
-    def _deduplicate(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Deduplicate candidates by concept_id + concept_name."""
-        unique = {}
-        
-        for candidate in candidates:
-            concept = candidate['concept']
-            key = (concept.get('concept_id', ''), concept.get('concept_name', ''))
-            
-            if key not in unique:
-                unique[key] = candidate
-            else:
-                # Keep higher score
-                if candidate['elasticsearch_score'] > unique[key]['elasticsearch_score']:
-                    unique[key] = candidate
-        
-        return list(unique.values())
