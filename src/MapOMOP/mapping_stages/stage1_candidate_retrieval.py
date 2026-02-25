@@ -63,22 +63,12 @@ class Stage1CandidateRetrieval:
         # Lowercase entity name to match index (indexed with lowercase=True)
         entity_name = entity_name.lower().strip()
         
-        logger.info("=" * 60)
-        logger.info("Stage 1: Candidate Retrieval (Lexical + Semantic + Combined)")
-        logger.info(f"  Entity: {entity_name}")
-        logger.info(f"  Domain: {domain_id}")
-        logger.info("=" * 60)
-        
+        logger.info("Stage 1: Candidate Retrieval")
         all_candidates = []
         
         # 1. Lexical Search
-        logger.info(f"\n[1/3] Lexical Search (threshold: {self.LEXICAL_THRESHOLD})")
         lexical_results = self._lexical_search(entity_name, domain_id, es_index, 3)
         lexical_filtered = [h for h in lexical_results if h['_score'] >= self.LEXICAL_THRESHOLD]
-        
-        logger.info(f"  Results: {len(lexical_results)} -> {len(lexical_filtered)} (passed threshold)")
-        
-        # Convert synonyms to original concepts
         lexical_converted = self._convert_synonyms_to_original(lexical_filtered, es_index)
         
         for hit in lexical_converted:
@@ -89,49 +79,35 @@ class Stage1CandidateRetrieval:
         semantic_filtered = []
         semantic_converted = []
         if entity_embedding is not None:
-            logger.info(f"\n[2/3] Semantic Search (threshold: {self.SEMANTIC_THRESHOLD})")
             semantic_results = self._vector_search(entity_embedding, domain_id, es_index, 3)
             semantic_filtered = [h for h in semantic_results if h['_score'] >= self.SEMANTIC_THRESHOLD]
-            
-            logger.info(f"  Results: {len(semantic_results)} -> {len(semantic_filtered)} (passed threshold)")
-            
-            # Convert synonyms to original concepts
             semantic_converted = self._convert_synonyms_to_original(semantic_filtered, es_index)
             
             for hit in semantic_converted:
                 hit['_search_type'] = 'semantic'
                 all_candidates.append(hit)
-        else:
-            logger.info("\n[2/3] Semantic Search - Skipped (no embedding)")
         
         # 3. Combined/Hybrid Search
-        combined_filtered = []
-        combined_converted = []
-        logger.info(f"\n[3/3] Combined Search (threshold: {self.COMBINED_THRESHOLD})")
-        
         if entity_embedding is not None:
             combined_results = self._hybrid_search(entity_name, entity_embedding, domain_id, es_index, 3)
         else:
             combined_results = lexical_filtered[:3]
         
         combined_filtered = [h for h in combined_results if h['_score'] >= self.COMBINED_THRESHOLD]
-        
-        logger.info(f"  Results: {len(combined_results)} -> {len(combined_filtered)} (passed threshold)")
-        
-        # Convert synonyms to original concepts
         combined_converted = self._convert_synonyms_to_original(combined_filtered, es_index)
         
         for hit in combined_converted:
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)
         
-        # Summary
-        logger.info("\n" + "=" * 60)
-        logger.info(f"Stage 1 Complete: {len(all_candidates)} total candidates")
-        logger.info(f"  - Lexical: {len(lexical_converted)}")
-        logger.info(f"  - Semantic: {len(semantic_converted)}")
-        logger.info(f"  - Combined: {len(combined_converted)}")
-        logger.info("=" * 60)
+        # 후보군 결과만 로깅: [lexical|semantic|combined] concept_name (concept_id) score
+        for hit in all_candidates:
+            src = hit.get('_source', {})
+            st = hit.get('_search_type', 'unknown')
+            name = src.get('concept_name', 'N/A')
+            cid = src.get('concept_id', 'N/A')
+            score = hit.get('_score', 0)
+            logger.info(f"  [{st}] {name} ({cid}) {score:.4f}")
         
         return all_candidates
     

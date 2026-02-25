@@ -57,34 +57,18 @@ class Stage2StandardCollection:
         Returns:
             Deduplicated standard candidates
         """
-        logger.info("=" * 60)
         logger.info("Stage 2: Standard Concept Collection")
-        logger.info("=" * 60)
         
-        # Prepare initial candidates
         initial_candidates = self._prepare_initial_candidates(stage1_candidates)
-        logger.info(f"Initial candidates: {len(initial_candidates)}")
-        
-        # 1차 변환: relationship 변환 → non-std면 Maps to
-        logger.info("\n--- 1차 변환: Relationship + Maps to ---")
         first_transform = self._first_transform(initial_candidates)
-        logger.info(f"After 1st transform: {len(first_transform)}")
-        
-        # 2차 변환: relationship 변환만
-        logger.info("\n--- 2차 변환: Relationship only ---")
         second_transform = self._second_transform(first_transform)
-        logger.info(f"After 2nd transform: {len(second_transform)}")
-        
-        # 3차 변환: non-std면 Maps to → 중복 삭제
-        logger.info("\n--- 3차 변환: Maps to + Dedup ---")
         final_candidates = self._third_transform(second_transform)
-        logger.info(f"After 3rd transform: {len(final_candidates)}")
-        
-        # Deduplicate
         deduplicated = self._deduplicate(final_candidates)
         
-        logger.info(f"\nFinal deduplication: {len(final_candidates)} -> {len(deduplicated)}")
-        logger.info("=" * 60)
+        self._log_candidates_detail("1차 변환 결과", first_transform)
+        self._log_candidates_detail("2차 변환 결과", second_transform)
+        self._log_candidates_detail("3차 변환 결과", final_candidates)
+        self._log_candidates_detail("중복 제거 결과", deduplicated)
         
         return deduplicated
     
@@ -108,12 +92,26 @@ class Stage2StandardCollection:
                 'elasticsearch_score': candidate.get('_score_normalized') or candidate['_score'],
                 'search_type': search_type
             })
-            
-            std_label = "S" if source.get('standard_concept') in ['S', 'C'] else "N"
-            logger.debug(f"  [{std_label}] {source.get('concept_name')} "
-                        f"(ID: {source.get('concept_id')}) [{search_type}]")
         
         return candidates
+    
+    def _log_candidates_detail(self, title: str, candidates: List[Dict[str, Any]]):
+        """변환 결과 로깅: concept_name (concept_id) [relation_type] ← from 원본 (변환 관계 파악 가능)"""
+        logger.info(f"  [{title}]")
+        if not candidates:
+            logger.info("    (없음)")
+            return
+        for c in candidates:
+            concept = c.get('concept', {})
+            name = concept.get('concept_name', 'N/A')
+            cid = concept.get('concept_id', 'N/A')
+            rel = c.get('relation_type', 'original')
+            ons = c.get('original_non_standard')
+            if ons:
+                from_name = ons.get('concept_name', 'N/A')
+                logger.info(f"    {name} ({cid}) [{rel}] ← {from_name}")
+            else:
+                logger.info(f"    {name} ({cid}) [{rel}]")
     
     def _first_transform(
         self,
@@ -130,6 +128,7 @@ class Stage2StandardCollection:
         for candidate in candidates:
             concept = candidate['concept']
             concept_id = str(concept.get('concept_id', ''))
+            concept_name = concept.get('concept_name', '')
             
             # 원본 컨셉 추가
             result.append(candidate)
@@ -140,9 +139,6 @@ class Stage2StandardCollection:
             for related, relation_id in related_concepts:
                 related_id = str(related.get('concept_id', ''))
                 is_std = related.get('standard_concept') in ['S', 'C']
-                
-                logger.debug(f"  {concept.get('concept_name')} -> "
-                            f"[{relation_id}] {related.get('concept_name')} (std={is_std})")
                 
                 if is_std:
                     # Standard concept - add directly
@@ -158,17 +154,17 @@ class Stage2StandardCollection:
                 else:
                     # Non-standard - apply Maps to
                     std_concepts = self._get_standard_via_maps_to(related_id)
-                    for std in std_concepts:
-                        logger.debug(f"    -> [Maps to] {std.get('concept_name')}")
-                        result.append({
-                            'concept': std,
-                            'is_original_standard': False,
-                            'original_candidate': candidate['original_candidate'],
-                            'original_non_standard': related,
-                            'relation_type': 'Maps to',
-                            'elasticsearch_score': 0.0,
-                            'search_type': candidate['search_type']
-                        })
+                    if std_concepts:
+                        for std in std_concepts:
+                            result.append({
+                                'concept': std,
+                                'is_original_standard': False,
+                                'original_candidate': candidate['original_candidate'],
+                                'original_non_standard': related,
+                                'relation_type': 'Maps to',
+                                'elasticsearch_score': 0.0,
+                                'search_type': candidate['search_type']
+                            })
         
         return result
     
@@ -187,21 +183,18 @@ class Stage2StandardCollection:
         for candidate in candidates:
             concept = candidate['concept']
             concept_id = str(concept.get('concept_id', ''))
+            concept_name = concept.get('concept_name', '')
             
             # 원본 컨셉 추가
             result.append(candidate)
             
-            # 이미 처리한 concept_id는 스킵 (중복 relationship 조회 방지)
             if concept_id in processed_ids:
                 continue
             processed_ids.add(concept_id)
             
-            # Relationship 변환 시도
             related_concepts = self._get_related_concepts_with_relation(concept_id)
             
             for related, relation_id in related_concepts:
-                logger.debug(f"  {concept.get('concept_name')} -> "
-                            f"[{relation_id}] {related.get('concept_name')}")
                 
                 result.append({
                     'concept': related,
@@ -229,19 +222,15 @@ class Stage2StandardCollection:
         for candidate in candidates:
             concept = candidate['concept']
             concept_id = str(concept.get('concept_id', ''))
+            concept_name = concept.get('concept_name', '')
             is_std = concept.get('standard_concept') in ['S', 'C']
             
             if is_std:
-                # Standard - add directly
                 result.append(candidate)
             else:
-                # Non-standard - apply Maps to
                 std_concepts = self._get_standard_via_maps_to(concept_id)
-                
                 if std_concepts:
                     for std in std_concepts:
-                        logger.debug(f"  [3rd] {concept.get('concept_name')} -> "
-                                    f"[Maps to] {std.get('concept_name')}")
                         result.append({
                             'concept': std,
                             'is_original_standard': False,
@@ -251,9 +240,6 @@ class Stage2StandardCollection:
                             'elasticsearch_score': 0.0,
                             'search_type': candidate['search_type']
                         })
-                else:
-                    # No Maps to found - keep original if needed
-                    logger.debug(f"  [3rd] {concept.get('concept_name')} - no Maps to found")
         
         return result
     

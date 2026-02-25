@@ -211,10 +211,6 @@ class Stage3HybridScoring:
             ScoringMode.SEMANTIC: 'Semantic'
         }
         
-        logger.info("=" * 60)
-        logger.info(f"Stage 3: {mode_display_names.get(self.scoring_mode, self.scoring_mode)} Scoring")
-        logger.info("=" * 60)
-        
         if not stage2_candidates:
             logger.warning("No candidates to score")
             return []
@@ -459,10 +455,6 @@ class Stage3HybridScoring:
                         'reasoning': item.get('reasoning', '')
                     }
             
-            if result:
-                best = max(result.items(), key=lambda x: x[1]['score'])
-                logger.info(f"LLM top scored: {best[0]} (score: {best[1]['score']})")
-            
             # Ensure all candidates are in result
             for c in candidates:
                 cid = str(c['concept'].get('concept_id', ''))
@@ -476,19 +468,14 @@ class Stage3HybridScoring:
             return {}
     
     def _log_results(self, mode: str, results: List[Dict[str, Any]]):
-        """Log scoring results."""
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"Stage 3 {mode} Results:")
-        logger.info("=" * 60)
-        
-        for i, r in enumerate(results[:10], 1):
+        """Log scoring results: concept_name (concept_id) score, reasoning."""
+        logger.info("Stage 3: Scoring Results")
+        for r in results[:15]:
             concept = r['concept']
             name = concept.get('concept_name', 'N/A')
             cid = concept.get('concept_id', 'N/A')
             score = r.get('final_score', 0.0)
-            search_type = r.get('search_type', 'unknown')
-            
-            logger.info(f"  {i}. {name} (ID: {cid}) [{search_type}]")
-            logger.info(f"     Final Score: {score:.4f}")
-        
-        logger.info("=" * 60)
+            logger.info(f"  {name} ({cid}) {score:.4f}")
+            reasoning = r.get('llm_reasoning', '')
+            if reasoning:
+                logger.info(f"    → {reasoning}")
