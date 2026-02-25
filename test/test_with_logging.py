@@ -31,8 +31,10 @@ def run_entity_list_test(
     entity_list: list,
     output_dir: str = "test_logs",
     scoring_mode: str = "llm",
+    use_validation: bool = True,
 ):
     """엔티티 리스트로 매핑 실행.
+    use_validation=False 이면 LLM validation 스킵, 출력: mapping_manual_noval_{timestamp}.*
     입력 형식:
       - (entity, domain)                          : domain만 지정
       - (entity, domain, gt_concept_id)            : ground truth ID 추가
@@ -44,12 +46,17 @@ def run_entity_list_test(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    logger, _ = setup_logging(out_path, "manual", timestamp)
+    data_type_out = "manual_noval" if not use_validation else "manual"
+    logger, _ = setup_logging(out_path, data_type_out, timestamp)
 
     es_client = ElasticsearchClient()
     es_client.concept_index = "concept-small"
     es_client.concept_synonym_index = "concept-synonym"
-    api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
+    api = EntityMappingAPI(
+        es_client=es_client,
+        scoring_mode=scoring_mode,
+        use_validation=use_validation,
+    )
 
     results = []
     for idx, item in enumerate(tqdm(entity_list, desc="매핑")):
@@ -101,9 +108,9 @@ def run_entity_list_test(
         }
         results.append(r)
 
-    save_json(results, out_path, "manual", timestamp)
-    save_xlsx(results, out_path, "manual", timestamp)
-    logger.info(f"결과: {out_path}/mapping_manual_{timestamp}.(json|xlsx|log)")
+    save_json(results, out_path, data_type_out, timestamp)
+    save_xlsx(results, out_path, data_type_out, timestamp)
+    logger.info(f"결과: {out_path}/mapping_{data_type_out}_{timestamp}.(json|xlsx|log)")
     return results
 
 
@@ -111,5 +118,6 @@ if __name__ == "__main__":
     entity_list = [
         ("inflamed", "Condition", 4181063, "Inflammation of specific body organs")
     ]
-    run_entity_list_test(entity_list, output_dir="test_logs")
+    run_entity_list_test(entity_list, output_dir="test_logs", use_validation=True)
+    # use_validation=False 로 비교 테스트: run_entity_list_test(entity_list, use_validation=False)
     print("완료.")

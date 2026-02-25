@@ -89,7 +89,8 @@ class EntityMappingAPI:
         es_client: Optional[ElasticsearchClient] = None,
         confidence_threshold: float = 0.5,
         scoring_mode: str = ScoringMode.LLM,
-        include_non_std_info: bool = False
+        include_non_std_info: bool = False,
+        use_validation: bool = True,
     ):
         """
         Initialize mapping API.
@@ -102,11 +103,13 @@ class EntityMappingAPI:
                 - 'llm_with_score': LLM with semantic score in prompt
                 - 'semantic': Semantic similarity only
             include_non_std_info: Include non-std concept info in LLM prompt
+            use_validation: If True, validate top 3 candidates with LLM; if False, use top score as-is
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
         self.scoring_mode = scoring_mode
         self.include_non_std_info = include_non_std_info
+        self.use_validation = use_validation
         
         # SapBERT model (lazy loading)
         self._sapbert_model = None
@@ -351,79 +354,86 @@ class EntityMappingAPI:
                 vocabulary_id=entity_input.vocabulary_id
             )
             
-            # Validation: try top 3 candidates by score (highest first)
-            logger.info(f"\n{'=' * 60}")
-            logger.info("Validation step (top 3 by score)")
-            logger.info('=' * 60)
-            
             # Keep original stage3_candidates for logging (sorted by LLM score)
             final_stage3_candidates = stage3_candidates
-            
-            MAX_VALIDATION_ATTEMPTS = 3
-            validation_candidates = stage3_candidates[:MAX_VALIDATION_ATTEMPTS]
-            
-            validated_candidate = None
-            validated_idx = None
-            
-            for idx, candidate in enumerate(validation_candidates):
-                concept = candidate.get('concept', {})
-                concept_id = str(concept.get('concept_id', ''))
-                concept_name = concept.get('concept_name', '')
-                candidate_score = candidate.get('final_score', 0.0)
+
+            if self.use_validation:
+                # Validation: try top 3 candidates by score (highest first)
+                logger.info(f"\n{'=' * 60}")
+                logger.info("Validation step (top 3 by score)")
+                logger.info('=' * 60)
                 
-                logger.info(f"  [{idx + 1}/{len(validation_candidates)}] Validating: "
-                           f"{concept_name} (ID: {concept_id}, score: {candidate_score:.2f})")
+                MAX_VALIDATION_ATTEMPTS = 3
+                validation_candidates = stage3_candidates[:MAX_VALIDATION_ATTEMPTS]
                 
-                is_valid = self.validator.validate_mapping(
-                    entity_name=entity_name,
-                    concept_id=concept_id,
-                    concept_name=concept_name,
-                    synonyms=None
-                )
+                validated_candidate = None
+                validated_idx = None
                 
-                if is_valid:
-                    logger.info(f"  Validated: {concept_name}")
-                    validated_candidate = candidate
-                    validated_idx = idx
-                    break
+                for idx, candidate in enumerate(validation_candidates):
+                    concept = candidate.get('concept', {})
+                    concept_id = str(concept.get('concept_id', ''))
+                    concept_name = concept.get('concept_name', '')
+                    candidate_score = candidate.get('final_score', 0.0)
+                    
+                    logger.info(f"  [{idx + 1}/{len(validation_candidates)}] Validating: "
+                               f"{concept_name} (ID: {concept_id}, score: {candidate_score:.2f})")
+                    
+                    is_valid = self.validator.validate_mapping(
+                        entity_name=entity_name,
+                        concept_id=concept_id,
+                        concept_name=concept_name,
+                        synonyms=None
+                    )
+                    
+                    if is_valid:
+                        logger.info(f"  Validated: {concept_name}")
+                        validated_candidate = candidate
+                        validated_idx = idx
+                        break
+                    else:
+                        logger.info(f"  Failed: {concept_name}")
+                
+                if validated_candidate is None:
+                    logger.error(f"[{domain_str}] Top {len(validation_candidates)} candidates all failed validation")
+                    stage_results['validation_status'] = 'failed'
+                    stage_results['candidates'] = {
+                        'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
+                        'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
+                        'stage3': [self._format_stage3_candidate(c) for c in stage3_candidates]
+                    }
+                    return None, stage_results
+                
+                # Build final result from validated candidate
+                if validated_idx == 0:
+                    # Top scored candidate passed validation
+                    mapping_result = self._create_final_result(domain_entity_input, stage3_candidates)
+                    stage_results['validation_status'] = 'validated'
+                    stage_results['validation_changed_result'] = False
+                    logger.info(f"[{domain_str}] Top candidate validated: {validated_candidate['concept'].get('concept_name')}")
                 else:
-                    logger.info(f"  Failed: {concept_name}")
-            
-            if validated_candidate is None:
-                logger.error(f"[{domain_str}] Top {len(validation_candidates)} candidates all failed validation")
-                stage_results['validation_status'] = 'failed'
-                stage_results['candidates'] = {
-                    'stage1': [self._format_stage1_candidate(h) for h in stage1_candidates],
-                    'stage2': [self._format_stage2_candidate(c) for c in stage2_candidates],
-                    'stage3': [self._format_stage3_candidate(c) for c in stage3_candidates]
-                }
-                return None, stage_results
-            
-            # Build final result from validated candidate
-            if validated_idx == 0:
-                # Top scored candidate passed validation
-                mapping_result = self._create_final_result(domain_entity_input, stage3_candidates)
-                stage_results['validation_status'] = 'validated'
-                stage_results['validation_changed_result'] = False
-                logger.info(f"[{domain_str}] Top candidate validated: {validated_candidate['concept'].get('concept_name')}")
+                    # Alternative candidate passed validation - reorder
+                    llm_top_name = stage3_candidates[0]['concept'].get('concept_name')
+                    llm_top_id = stage3_candidates[0]['concept'].get('concept_id')
+                    validated_name = validated_candidate['concept'].get('concept_name')
+                    
+                    logger.info(f"  [!] LLM top pick was: {llm_top_name} (ID: {llm_top_id})")
+                    logger.info(f"  [!] Changed to: {validated_name} due to validation")
+                    
+                    reordered = [stage3_candidates[validated_idx]] + \
+                               [x for i, x in enumerate(stage3_candidates) if i != validated_idx]
+                    mapping_result = self._create_final_result(domain_entity_input, reordered)
+                    stage_results['validation_status'] = 'validated_alternative'
+                    stage_results['llm_top_pick'] = {
+                        'concept_id': str(llm_top_id),
+                        'concept_name': llm_top_name
+                    }
+                    stage_results['validation_changed_result'] = True
             else:
-                # Alternative candidate passed validation - reorder
-                llm_top_name = stage3_candidates[0]['concept'].get('concept_name')
-                llm_top_id = stage3_candidates[0]['concept'].get('concept_id')
-                validated_name = validated_candidate['concept'].get('concept_name')
-                
-                logger.info(f"  [!] LLM top pick was: {llm_top_name} (ID: {llm_top_id})")
-                logger.info(f"  [!] Changed to: {validated_name} due to validation")
-                
-                reordered = [stage3_candidates[validated_idx]] + \
-                           [x for i, x in enumerate(stage3_candidates) if i != validated_idx]
-                mapping_result = self._create_final_result(domain_entity_input, reordered)
-                stage_results['validation_status'] = 'validated_alternative'
-                stage_results['llm_top_pick'] = {
-                    'concept_id': str(llm_top_id),
-                    'concept_name': llm_top_name
-                }
-                stage_results['validation_changed_result'] = True
+                # Skip validation: use top scored candidate as-is
+                logger.info(f"\n[{domain_str}] Validation disabled - using top scored candidate")
+                mapping_result = self._create_final_result(domain_entity_input, stage3_candidates)
+                stage_results['validation_status'] = 'skipped'
+                stage_results['validation_changed_result'] = False
             
             stage_results['result_domain'] = mapping_result.domain_id
             

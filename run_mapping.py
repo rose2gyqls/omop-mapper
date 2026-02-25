@@ -52,11 +52,15 @@ DOMAIN_MAP = {
 _worker_api = None
 
 
-def _worker_init(scoring_mode: str):
+def _worker_init(scoring_mode: str, use_validation: bool = True):
     """Worker 프로세스 초기화: API 인스턴스 1회 생성."""
     global _worker_api
     es_client = ElasticsearchClient()
-    _worker_api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
+    _worker_api = EntityMappingAPI(
+        es_client=es_client,
+        scoring_mode=scoring_mode,
+        use_validation=use_validation,
+    )
 
 
 def _map_single_task(task):
@@ -142,10 +146,12 @@ def run_mapping(
     scoring_mode: str = "llm",
     workers: int = 1,
     num_runs: int = 1,
+    use_validation: bool = True,
 ):
     """매핑 실행: 데이터 로드(기본 경로+전처리) → 매핑 → JSON/LOG/XLSX 출력.
     workers > 1 이면 ProcessPoolExecutor로 병렬 처리.
     num_runs > 1 이면 동일 데이터로 N회 반복 (일관성 검증용).
+    use_validation=False 이면 validation 스킵, 출력 파일명에 _noval 붙음.
     """
     from datetime import datetime
     from tqdm import tqdm
@@ -166,7 +172,8 @@ def run_mapping(
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    logger, _ = setup_logging(out_path, data_type, timestamp)
+    data_type_out = f"{data_type}_noval" if not use_validation else data_type
+    logger, _ = setup_logging(out_path, data_type_out, timestamp)
     logger.info("=" * 80)
     logger.info(f"매핑 시작: data={data_type}, csv={csv_path}")
     logger.info(f"전처리: {config.get('vocabulary_filter', config.get('filter_domains', '없음'))}")
@@ -198,7 +205,7 @@ def run_mapping(
     workers = max(1, int(workers))
     num_runs = max(1, int(num_runs))
     logger.info(f"로드된 데이터: {len(df)}행")
-    logger.info(f"Scoring mode: {scoring_mode}, Workers: {workers}, Runs: {num_runs}")
+    logger.info(f"Scoring mode: {scoring_mode}, Workers: {workers}, Runs: {num_runs}, Validation: {'on' if use_validation else 'off'}")
 
     all_results = []  # num_runs > 1 일 때 [run1_results, run2_results, ...]
     start_time = time.time()
@@ -223,8 +230,8 @@ def run_mapping(
             completed = 0
             with ProcessPoolExecutor(
                 max_workers=workers,
-                initializer=_worker_init,
-                initargs=(scoring_mode,),
+        initializer=_worker_init,
+        initargs=(scoring_mode, use_validation),
             ) as ex:
                 future_to_idx = {ex.submit(_map_single_task, t): t[0] for t in tasks}
                 indexed_results = [None] * len(tasks)
@@ -263,7 +270,11 @@ def run_mapping(
         else:
             # 순차 처리 (workers == 1)
             es_client = ElasticsearchClient()
-            api = EntityMappingAPI(es_client=es_client, scoring_mode=scoring_mode)
+            api = EntityMappingAPI(
+                es_client=es_client,
+                scoring_mode=scoring_mode,
+                use_validation=use_validation,
+            )
             for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
                 try:
                     entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
@@ -367,11 +378,11 @@ def run_mapping(
         logger.info(f"{num_runs}회 동일 결과: {all_same_count}/{total}개 ({100 * all_same_count / total:.2f}%)")
 
     if num_runs > 1:
-        json_path = save_json({"num_runs": num_runs, "runs": all_results}, out_path, data_type, timestamp)
-        xlsx_path = save_xlsx_repeat(all_results, out_path, data_type, timestamp)
+        json_path = save_json({"num_runs": num_runs, "runs": all_results}, out_path, data_type_out, timestamp)
+        xlsx_path = save_xlsx_repeat(all_results, out_path, data_type_out, timestamp)
     else:
-        json_path = save_json(results, out_path, data_type, timestamp)
-        xlsx_path = save_xlsx(results, out_path, data_type, timestamp)
+        json_path = save_json(results, out_path, data_type_out, timestamp)
+        xlsx_path = save_xlsx(results, out_path, data_type_out, timestamp)
     logger.info(f"JSON: {json_path}")
     logger.info(f"XLSX: {xlsx_path}")
 
@@ -417,6 +428,11 @@ def main():
         metavar="N",
         help="동일 데이터로 N회 매핑 반복 (일관성 검증용). 5 입력 시 현황+5개 상세 시트 생성.",
     )
+    parser.add_argument(
+        "--no-validation",
+        action="store_true",
+        help="Validation 스킵 (LLM validation 미사용). top score 결과 그대로 사용. 출력: mapping_{snuh|snomed}_noval_{timestamp}.*",
+    )
 
     args = parser.parse_args()
 
@@ -430,6 +446,7 @@ def main():
         scoring_mode=args.scoring,
         workers=args.workers,
         num_runs=args.repeat,
+        use_validation=not args.no_validation,
     )
 
 

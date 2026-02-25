@@ -34,6 +34,10 @@
 # [반복 매핑] (일관성 검증)
 #   -r, --repeat N   : 동일 데이터로 N회 매핑 (기본: 1). 5 입력 시 현황+5개 상세 시트 생성.
 #
+# [Validation]
+#   --no-validation   : LLM validation 스킵. top score 결과 그대로 사용.
+#                       출력: mapping_{snuh|snomed}_noval_{timestamp}.* (with/without 비교용)
+#
 # ============================================================================
 # 사용 예시
 # ============================================================================
@@ -55,6 +59,9 @@
 #
 # 5회 반복 (일관성 검증, 현황+5개 상세 시트):
 #   ./scripts/run_mapping.sh snuh --repeat 5
+#
+# Validation 없이 실행 (with/without 비교용):
+#   ./scripts/run_mapping.sh snuh --no-validation
 #
 
 set -e
