@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import functools
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -26,12 +27,15 @@ from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient
 
 from mapping_common import (
+    API_LOGGER_NAMES,
     DATA_SOURCES,
     load_snuh_data,
     load_snomed_data,
     snuh_row_to_input,
     snomed_row_to_input,
     setup_logging,
+    setup_worker_logging,
+    capture_entity_logs,
     save_json,
     save_xlsx,
     save_xlsx_repeat,
@@ -52,9 +56,18 @@ DOMAIN_MAP = {
 _worker_api = None
 
 
-def _worker_init(scoring_mode: str, use_validation: bool = False):
-    """Worker 프로세스 초기화: API 인스턴스 1회 생성."""
+def _worker_init(
+    scoring_mode: str,
+    use_validation: bool = False,
+    log_file_path: str | None = None,
+    capture_only: bool = False,
+):
+    """Worker 프로세스 초기화: API 인스턴스 1회 생성 + 로깅 설정.
+    capture_only=True: 로그를 캡처 모드로 (멀티 워커 시 엔티티별로 묶어서 출력).
+    """
     global _worker_api
+    if log_file_path:
+        setup_worker_logging(log_file_path, capture_only=capture_only)
     es_client = ElasticsearchClient()
     _worker_api = EntityMappingAPI(
         es_client=es_client,
@@ -63,8 +76,10 @@ def _worker_init(scoring_mode: str, use_validation: bool = False):
     )
 
 
-def _map_single_task(task):
-    """단일 엔티티 매핑 (worker에서 실행, pickle 가능한 인자만 사용)."""
+def _map_single_task(task, capture_logs: bool = False):
+    """단일 엔티티 매핑 (worker에서 실행, pickle 가능한 인자만 사용).
+    capture_logs=True: API 로그를 캡처해 (test_index, result, log_lines) 반환.
+    """
     global _worker_api
     (test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col) = task
     domain_id = DOMAIN_MAP.get(domain_str) if domain_str else None
@@ -73,6 +88,12 @@ def _map_single_task(task):
         domain_id=domain_id,
         vocabulary_id=None,
     )
+
+    handlers_added = []
+    log_lines: list[str] = []
+    if capture_logs:
+        handlers_added, log_lines = capture_entity_logs(API_LOGGER_NAMES)
+
     try:
         mapping_results = _worker_api.map_entity(entity_input)
         stage1 = getattr(_worker_api, "_last_stage1_candidates", []) or []
@@ -90,9 +111,7 @@ def _map_single_task(task):
             except (ValueError, TypeError):
                 pass
 
-        return (
-            test_index,
-            {
+        result = {
                 "test_index": test_index,
                 "id": record_id,
                 id_col: record_id,
@@ -109,12 +128,20 @@ def _map_single_task(task):
                 "stage1_candidates": stage1,
                 "stage2_candidates": stage2,
                 "stage3_candidates": stage3,
-            },
-        )
+            }
+        if capture_logs:
+            h = handlers_added[0][1]
+            for log, _ in handlers_added:
+                log.removeHandler(h)
+        if capture_logs:
+            return (test_index, result, log_lines)
+        return (test_index, result)
     except Exception as e:
-        return (
-            test_index,
-            {
+        if capture_logs:
+            h = handlers_added[0][1]
+            for log, _ in handlers_added:
+                log.removeHandler(h)
+        result = {
                 "test_index": test_index,
                 "id": record_id,
                 id_col: record_id,
@@ -132,14 +159,16 @@ def _map_single_task(task):
                 "stage2_candidates": [],
                 "stage3_candidates": [],
                 "error": str(e),
-            },
-        )
+            }
+        if capture_logs:
+            return (test_index, result, log_lines)
+        return (test_index, result)
 
 
 def run_mapping(
     data_type: str,
     output_dir: str = "test_logs",
-    sample_size: int = 10000,
+    sample_size: int | None = None,
     use_random: bool = False,
     random_state: int = 42,
     sample_per_domain: int | None = None,
@@ -174,7 +203,8 @@ def run_mapping(
     out_path.mkdir(parents=True, exist_ok=True)
 
     data_type_out = f"{data_type}_withval" if use_validation else data_type
-    logger, _ = setup_logging(out_path, data_type_out, timestamp)
+    # workers > 1: 터미널에는 tqdm 진행률만, 상세로그는 파일로
+    logger, log_file = setup_logging(out_path, data_type_out, timestamp, console=(workers == 1))
     logger.info("=" * 80)
     logger.info(f"매핑 시작: data={data_type}, csv={csv_path}")
     logger.info(f"전처리: {config.get('vocabulary_filter', config.get('filter_domains', '없음'))}")
@@ -229,44 +259,56 @@ def run_mapping(
                 tasks.append((idx + 1, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col))
 
             completed = 0
+            map_task = functools.partial(_map_single_task, capture_logs=True)
             with ProcessPoolExecutor(
                 max_workers=workers,
-        initializer=_worker_init,
-        initargs=(scoring_mode, use_validation),
+                initializer=_worker_init,
+                initargs=(scoring_mode, use_validation, str(log_file), True),
             ) as ex:
-                future_to_idx = {ex.submit(_map_single_task, t): t[0] for t in tasks}
+                future_to_idx = {ex.submit(map_task, t): t[0] for t in tasks}
                 indexed_results = [None] * len(tasks)
-                for future in as_completed(future_to_idx):
-                    test_index = future_to_idx[future]
-                    try:
-                        _, r = future.result()
-                        indexed_results[test_index - 1] = r
-                        completed += 1
-                        if completed <= 5:
-                            status = "정답" if r.get("mapping_correct") else ("오답" if r.get("success") else "실패")
-                            logger.info(f"#{test_index} {r['entity_name']}: {status}")
-                    except Exception as e:
-                        logger.error(f"#{test_index} Worker 예외: {e}")
-                        task = tasks[test_index - 1]
-                        indexed_results[test_index - 1] = {
-                            "test_index": test_index,
-                            "id": task[3],
-                            id_col: task[3],
-                            "entity_name": task[1],
-                            "input_domain": task[2] or "All",
-                            "ground_truth_concept_id": task[4],
-                            "ground_truth_concept_name": task[5],
-                            "success": False,
-                            "mapping_correct": False,
-                            "best_result_domain": None,
-                            "best_concept_id": None,
-                            "best_concept_name": None,
-                            "best_score": 0.0,
-                            "stage1_candidates": [],
-                            "stage2_candidates": [],
-                            "stage3_candidates": [],
-                            "error": str(e),
-                        }
+                with tqdm(total=len(tasks), desc="매핑", unit="건") as pbar:
+                    for future in as_completed(future_to_idx):
+                        test_index = future_to_idx[future]
+                        try:
+                            ret = future.result()
+                            if len(ret) == 3:
+                                _, r, log_lines = ret
+                                if log_lines:
+                                    with open(log_file, "a", encoding="utf-8") as f:
+                                        for line in log_lines:
+                                            f.write(line + "\n")
+                            else:
+                                _, r = ret
+                            indexed_results[test_index - 1] = r
+                            completed += 1
+                            if completed <= 5:
+                                status = "정답" if r.get("mapping_correct") else ("오답" if r.get("success") else "실패")
+                                logger.info(f"#{test_index} {r['entity_name']}: {status}")
+                            pbar.update(1)
+                        except Exception as e:
+                            logger.error(f"#{test_index} Worker 예외: {e}")
+                            task = tasks[test_index - 1]
+                            indexed_results[test_index - 1] = {
+                                "test_index": test_index,
+                                "id": task[3],
+                                id_col: task[3],
+                                "entity_name": task[1],
+                                "input_domain": task[2] or "All",
+                                "ground_truth_concept_id": task[4],
+                                "ground_truth_concept_name": task[5],
+                                "success": False,
+                                "mapping_correct": False,
+                                "best_result_domain": None,
+                                "best_concept_id": None,
+                                "best_concept_name": None,
+                                "best_score": 0.0,
+                                "stage1_candidates": [],
+                                "stage2_candidates": [],
+                                "stage3_candidates": [],
+                                "error": str(e),
+                            }
+                            pbar.update(1)
             results = [r for r in indexed_results if r is not None]
         else:
             # 순차 처리 (workers == 1)
@@ -367,6 +409,9 @@ def run_mapping(
     logger.info(f"총: {total}개, 성공: {success_count}개 ({100 * success_count / total:.2f}%), 정답: {correct_count}개 ({100 * correct_count / total:.2f}%)")
     logger.info(f"소요: {elapsed:.2f}초 ({elapsed / 60:.2f}분)")
 
+    if workers > 1:
+        print(f"\n총 {total}건, 성공 {success_count}건 ({100 * success_count / total:.1f}%), 정답 {correct_count}건 | 소요 {elapsed / 60:.1f}분")
+
     if num_runs > 1:
         all_same_count = 0
         for row_idx in range(total):
@@ -397,7 +442,7 @@ def main():
         choices=list(DATA_SOURCES.keys()),
         help=f"데이터 소스 (기본 CSV 및 전처리 자동 적용). 사용 가능: {list(DATA_SOURCES.keys())}",
     )
-    parser.add_argument("--sample-size", "-n", type=int, default=10000, help="샘플 크기 (sample-per-domain 미사용 시)")
+    parser.add_argument("--sample-size", "-n", type=int, default=None, help="샘플 크기 (-n 미지정 시 전체 데이터, sample-per-domain 미사용 시 적용)")
     parser.add_argument("--random", action="store_true", help="랜덤 샘플링")
     parser.add_argument("--seed", type=int, default=42, help="랜덤 시드")
     parser.add_argument(

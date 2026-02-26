@@ -86,8 +86,12 @@ SUMMARY_HEADERS = [
 ]
 
 
-def setup_logging(output_dir: Path, data_type: str, timestamp: str) -> tuple[logging.Logger, Path]:
-    """통합 로깅 설정. 동일 timestamp 사용."""
+def setup_logging(
+    output_dir: Path, data_type: str, timestamp: str, console: bool = True
+) -> tuple[logging.Logger, Path]:
+    """통합 로깅 설정. 동일 timestamp 사용.
+    console=False: 터미널 출력 비활성화 (파일만 기록, 병렬 실행 시 진행률만 터미널에 표시).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / f"mapping_{data_type}_{timestamp}.log"
 
@@ -98,32 +102,125 @@ def setup_logging(output_dir: Path, data_type: str, timestamp: str) -> tuple[log
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.INFO)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    if console:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
-    # MapOMOP API 로거들도 동일 파일에 기록
+    # MapOMOP API 로거들: 파일에는 기록, 콘솔은 console 인자에 따름 (병렬 시 상세로그는 파일만)
     for name in [
         "MapOMOP.entity_mapping_api",
         "MapOMOP.mapping_stages.stage1_candidate_retrieval",
         "MapOMOP.mapping_stages.stage2_standard_collection",
         "MapOMOP.mapping_stages.stage3_hybrid_scoring",
+        "MapOMOP.mapping_validation",
     ]:
         api_log = logging.getLogger(name)
         api_log.setLevel(logging.INFO)
+        api_log.handlers.clear()
         api_log.addHandler(file_handler)
+        if console:
+            api_log.addHandler(console_handler)
 
     logger.info(f"로그 파일: {log_file}")
     return logger, log_file
+
+
+def setup_worker_logging(log_file_path: str, capture_only: bool = False) -> None:
+    """Worker 프로세스용 로깅 설정.
+
+    capture_only=True: 로그를 파일/콘솔에 쓰지 않음. _map_single_task에서 캡처 후 반환.
+    capture_only=False: 기존처럼 파일+콘솔에 실시간 기록 (workers=1 시 사용 안 함).
+    """
+    _API_LOGGER_NAMES = [
+        "MapOMOP.entity_mapping_api",
+        "MapOMOP.mapping_stages.stage1_candidate_retrieval",
+        "MapOMOP.mapping_stages.stage2_standard_collection",
+        "MapOMOP.mapping_stages.stage3_hybrid_scoring",
+        "MapOMOP.mapping_validation",
+    ]
+    if capture_only:
+        for name in _API_LOGGER_NAMES:
+            api_log = logging.getLogger(name)
+            api_log.setLevel(logging.INFO)
+            api_log.handlers.clear()
+            api_log.propagate = False
+        return
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+
+    for name in _API_LOGGER_NAMES:
+        api_log = logging.getLogger(name)
+        api_log.setLevel(logging.INFO)
+        api_log.handlers.clear()
+        api_log.addHandler(file_handler)
+        api_log.addHandler(console_handler)
+
+
+class LogCaptureHandler(logging.Handler):
+    """로그 레코드를 리스트에 포맷된 문자열로 수집."""
+
+    def __init__(self, log_list: list):
+        super().__init__()
+        self.log_list = log_list
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.formatter.format(record) if self.formatter else record.getMessage()
+            self.log_list.append(msg)
+        except Exception:
+            self.handleError(record)
+
+
+API_LOGGER_NAMES = [
+    "MapOMOP.entity_mapping_api",
+    "MapOMOP.mapping_stages.stage1_candidate_retrieval",
+    "MapOMOP.mapping_stages.stage2_standard_collection",
+    "MapOMOP.mapping_stages.stage3_hybrid_scoring",
+    "MapOMOP.mapping_validation",
+]
+
+
+def capture_entity_logs(logger_names: Optional[list[str]] = None, formatter: Optional[logging.Formatter] = None) -> tuple[list, list]:
+    """해당 로거들에 LogCaptureHandler를 붙이고, (handlers_added, log_list) 반환.
+    호출자가 작업 후 handlers를 제거하고 log_list를 반환 값에 포함시킴.
+    """
+    if logger_names is None:
+        logger_names = API_LOGGER_NAMES
+    if formatter is None:
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    log_list: list[str] = []
+    handler = LogCaptureHandler(log_list)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(formatter)
+
+    handlers_added = []
+    for name in logger_names:
+        logger = logging.getLogger(name)
+        logger.addHandler(handler)
+        handlers_added.append((logger, handler))
+
+    return handlers_added, log_list
 
 
 def save_json(results: List[Dict], output_dir: Path, data_type: str, timestamp: str) -> Path:
@@ -442,7 +539,7 @@ def save_xlsx_repeat(
 # --- SNUH 데이터 로더 ---
 def load_snuh_data(
     csv_path: str,
-    sample_size: int = 10000,
+    sample_size: Optional[int] = None,
     use_random: bool = False,
     random_state: int = 42,
     sample_per_domain: Optional[Dict[str, int]] = None,
@@ -485,13 +582,16 @@ def load_snuh_data(
             if use_random:
                 df = df.sample(frac=1, random_state=random_state).reset_index(drop=True)
         else:
-            n = min(sample_size, len(df))
+            n = len(df) if sample_size is None else min(sample_size, len(df))
             if use_random:
                 df = df.sample(n=n, random_state=random_state)
             else:
                 df = df.head(n)
     else:
-        df = pd.read_csv(csv_path, nrows=sample_size)
+        if sample_size is None:
+            df = pd.read_csv(csv_path)
+        else:
+            df = pd.read_csv(csv_path, nrows=sample_size)
 
     return df.reset_index(drop=True)
 
@@ -513,7 +613,7 @@ def snuh_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, 
 # --- SNOMED 데이터 로더 ---
 def load_snomed_data(
     csv_path: str,
-    sample_size: int = 10000,
+    sample_size: Optional[int] = None,
     use_random: bool = False,
     random_state: int = 42,
     sample_per_domain: Optional[Dict[str, int]] = None,
@@ -551,7 +651,7 @@ def load_snomed_data(
         if use_random:
             df = df.sample(frac=1, random_state=random_state).reset_index(drop=True)
     else:
-        n = min(sample_size, len(df))
+        n = len(df) if sample_size is None else min(sample_size, len(df))
         if use_random:
             df = df.sample(n=n, random_state=random_state)
         else:

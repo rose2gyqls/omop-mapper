@@ -16,7 +16,7 @@
 #            전처리: domain_id IN (Condition, Measurement, Drug, Observation, Procedure)
 #
 # [샘플링]
-#   -n, --sample-size N   : 사용할 최대 샘플 수 (기본: 10000). sample-per-domain 미사용 시 적용
+#   -n, --sample-size N   : 사용할 최대 샘플 수 (-n 미지정 시 전체 데이터). sample-per-domain 미사용 시 적용
 #   --sample-per-domain N : 도메인별 N개씩 샘플. 예: --sample-per-domain 5
 #   --random              : 랜덤 샘플링
 #   --seed N              : 랜덤 시드 (기본: 42)
@@ -42,13 +42,13 @@
 # 사용 예시
 # ============================================================================
 #
-# SNUH 기본 (처음 10000개):
+# SNUH 기본 (전체 데이터):
 #   ./scripts/run_mapping.sh snuh
 #
 # SNUH 도메인별 5개씩 랜덤:
 #   ./scripts/run_mapping.sh snuh --sample-per-domain 5 --random
 #
-# SNOMED 기본:
+# SNOMED 기본 (전체 데이터):
 #   ./scripts/run_mapping.sh snomed
 #
 # SNOMED 도메인별 10개씩, semantic 모드:
@@ -70,6 +70,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
+
+# 실시간 로그 출력 (버퍼링 비활성화)
+export PYTHONUNBUFFERED=1
 
 echo "============================================"
 echo "OMOP 매핑 실행"
