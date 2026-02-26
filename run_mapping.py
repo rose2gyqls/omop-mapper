@@ -52,7 +52,7 @@ DOMAIN_MAP = {
 _worker_api = None
 
 
-def _worker_init(scoring_mode: str, use_validation: bool = True):
+def _worker_init(scoring_mode: str, use_validation: bool = False):
     """Worker 프로세스 초기화: API 인스턴스 1회 생성."""
     global _worker_api
     es_client = ElasticsearchClient()
@@ -146,12 +146,13 @@ def run_mapping(
     scoring_mode: str = "llm",
     workers: int = 1,
     num_runs: int = 1,
-    use_validation: bool = True,
+    use_validation: bool = False,
 ):
     """매핑 실행: 데이터 로드(기본 경로+전처리) → 매핑 → JSON/LOG/XLSX 출력.
     workers > 1 이면 ProcessPoolExecutor로 병렬 처리.
     num_runs > 1 이면 동일 데이터로 N회 반복 (일관성 검증용).
-    use_validation=False 이면 validation 스킵, 출력 파일명에 _noval 붙음.
+    use_validation=False(기본): stage 1~3 점수 기반 최고 점수 매핑만 사용.
+    use_validation=True: LLM validation 모듈 포함. 출력 파일명에 _withval 붙음.
     """
     from datetime import datetime
     from tqdm import tqdm
@@ -172,7 +173,7 @@ def run_mapping(
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    data_type_out = f"{data_type}_noval" if not use_validation else data_type
+    data_type_out = f"{data_type}_withval" if use_validation else data_type
     logger, _ = setup_logging(out_path, data_type_out, timestamp)
     logger.info("=" * 80)
     logger.info(f"매핑 시작: data={data_type}, csv={csv_path}")
@@ -429,9 +430,9 @@ def main():
         help="동일 데이터로 N회 매핑 반복 (일관성 검증용). 5 입력 시 현황+5개 상세 시트 생성.",
     )
     parser.add_argument(
-        "--no-validation",
+        "--validation",
         action="store_true",
-        help="Validation 스킵 (LLM validation 미사용). top score 결과 그대로 사용. 출력: mapping_{snuh|snomed}_noval_{timestamp}.*",
+        help="LLM validation 모듈 포함 (기본: stage 1~3 점수 기반 최고 점수만 사용). 출력: mapping_{snuh|snomed}_withval_{timestamp}.*",
     )
 
     args = parser.parse_args()
@@ -446,7 +447,7 @@ def main():
         scoring_mode=args.scoring,
         workers=args.workers,
         num_runs=args.repeat,
-        use_validation=not args.no_validation,
+        use_validation=args.validation,
     )
 
 

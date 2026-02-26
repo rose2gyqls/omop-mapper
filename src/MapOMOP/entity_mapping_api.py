@@ -90,7 +90,7 @@ class EntityMappingAPI:
         confidence_threshold: float = 0.5,
         scoring_mode: str = ScoringMode.LLM,
         include_non_std_info: bool = False,
-        use_validation: bool = True,
+        use_validation: bool = False,
     ):
         """
         Initialize mapping API.
@@ -103,7 +103,7 @@ class EntityMappingAPI:
                 - 'llm_with_score': LLM with semantic score in prompt
                 - 'semantic': Semantic similarity only
             include_non_std_info: Include non-std concept info in LLM prompt
-            use_validation: If True, validate top 3 candidates with LLM; if False, use top score as-is
+            use_validation: If True, validate top 3 candidates with LLM; if False (default), use top score as-is
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold

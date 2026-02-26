@@ -31,10 +31,11 @@ def run_entity_list_test(
     entity_list: list,
     output_dir: str = "test_logs",
     scoring_mode: str = "llm",
-    use_validation: bool = True,
+    use_validation: bool = False,
 ):
     """엔티티 리스트로 매핑 실행.
-    use_validation=False 이면 LLM validation 스킵, 출력: mapping_manual_noval_{timestamp}.*
+    use_validation=False(기본): stage 1~3 점수 기반 최고 점수만 사용.
+    use_validation=True: LLM validation 포함, 출력: mapping_manual_withval_{timestamp}.*
     입력 형식:
       - (entity, domain)                          : domain만 지정
       - (entity, domain, gt_concept_id)            : ground truth ID 추가
@@ -46,7 +47,7 @@ def run_entity_list_test(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    data_type_out = "manual_noval" if not use_validation else "manual"
+    data_type_out = "manual_withval" if use_validation else "manual"
     logger, _ = setup_logging(out_path, data_type_out, timestamp)
 
     es_client = ElasticsearchClient()
@@ -117,8 +118,11 @@ def run_entity_list_test(
 if __name__ == "__main__":
     entity_list = [
         ("Mepivacaine 2% 5ml inj", "Drug", 43609283, "5 ml mepivacaine 20 mg/ml injectable solution"),
-        ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection")
+        ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
+        ("inflamed", "Condition", 4181063, "Inflammation of specific body organs"),
+        ("Pseudomyxoma peritonei", "Condition", 4146018, "pseudomyxoma peritonei"),
+        ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate")
     ]
-    run_entity_list_test(entity_list, output_dir="test_logs", use_validation=True)
-    # use_validation=False 로 비교 테스트: run_entity_list_test(entity_list, use_validation=False)
+    run_entity_list_test(entity_list, output_dir="test_logs")  # 기본: stage 1~3 점수만
+    # validation 포함: run_entity_list_test(entity_list, use_validation=True)
     print("완료.")

@@ -228,7 +228,7 @@ def _format_candidates_for_cell(candidates: List[Dict], stage_type: str) -> str:
             fin = float(c.get("final_score") or 0)
             sem = c.get("semantic_similarity")
             line = f"{i}. [{st}] {name} (ID: {cid})\n"
-            line += f"   최종: {fin:.4f}"
+            line += f"   최종: {fin:.1f}"
             if sem is not None:
                 line += f", 의미적: {sem:.4f}"
             line += f", Standard: {c.get('standard_concept', 'N/A')}, Domain: {c.get('domain_id', 'N/A')}"

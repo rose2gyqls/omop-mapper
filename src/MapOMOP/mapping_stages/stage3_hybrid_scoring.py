@@ -35,31 +35,57 @@ except ImportError:
 # Prompt Templates (easily customizable)
 # =============================================================================
 
-SYSTEM_PROMPT = """You are given an entity and several candidate OMOP CDM concepts. Your task is to score EACH candidate on a scale of 0-5 based on how well it matches the entity."""
+SYSTEM_PROMPT = """You are a clinical terminology expert. You are given an entity and several candidate OMOP CDM concepts.
+Your task is to score EACH candidate on a scale of 0.0-5.0 based on how well it matches the entity."""
 
 USER_PROMPT_TEMPLATE = """
-If a candidate is SEMANTICALLY EQUIVALENT(i.e., it has the same clinical meaning, even if the wording is different)
-, you MUST select it.
+### Mapping Rules
+1. Semantic Equivalence First
+- If a candidate has the SAME clinical meaning as the entity (even if wording differs), you MUST select it.
 
-If no semantically equivalent candidate exists, you MAY select a MORE GENERAL
-(higher-level) concept ONLY IF it fully preserves the clinical meaning and does
-NOT introduce any additional or different meaning.
+2. Parent (Broader) Concept — Allowed
+- If no semantically equivalent candidate exists, you MAY select a MORE GENERAL (higher-level) concept
+  ONLY IF it fully preserves the clinical meaning without introducing any additional or different meaning.
 
-IMPORTANT:
-- Semantic equivalence is based on clinical meaning, NOT on string similarity.
-- Do NOT guess.
-- Choosing a wrong concept with additional or different meaning is worse than choosing NONE.
-- If generalization would change the meaning, select NONE.
-- CRITICAL DEFINITION OF ADDITIONAL MEANING: Adding a specific body site, anatomical structure, severity, or underlying cause
-that is NOT present in the original entity is considered adding "new meaning" and makes the candidate an invalid sub-concept.
+3. Child (Narrower) Concept — STRICTLY FORBIDDEN
+- A "child" concept is more specific than the entity (e.g., adding a body site, anatomical structure, severity, or underlying cause NOT present in the entity).
+- The entity MUST NEVER be mapped to a child concept.
+- Such candidates introduce new meaning and are always invalid.
 
-Decision process (follow strictly):
-1. ELIMINATE any candidate that changes the core clinical meaning OR adds specific details (like body parts or causes) not found in the original entity.
-2. Among remaining candidates:
-   a) Prefer a SEMANTICALLY EQUIVALENT concept.
-   b) If none exists, prefer the MOST APPROPRIATE higher-level concept
-      that fully contains the entity meaning without adding new meaning.
-3. NEVER select a more specific sub-concept.
+### IMPORTANT RULES
+- Do NOT guess: Choosing a wrong concept with additional or different meaning is worse than choosing none.
+- Semantic over Lexical: Scoring is based on clinical meaning, NOT string similarity.
+- Original_concept_name: Some candidates include an original non-standard concept name (mapped to the standard concept via "Maps to").
+  a) If this original name is semantically equivalent or lexically identical to the entity,
+     the candidate MUST receive a score ≥ 4.5 (unless the standard concept itself introduces
+     a clear meaning change that cannot be justified). Do NOT ignore this field.
+- Drug / Measurement Concepts:
+  - CRITICAL: Before ANY comparison, you MUST normalize the entity's strength expression:
+    * 4 mg/2 ml → 2 mg/ml (divide dose by volume)
+    * 2% → 20 mg/ml (percentage x 10)
+    After normalization, use ONLY the normalized values for all subsequent comparisons.
+    "Ondansetron 4mg/2ml" and "ondansetron 2 mg/ml" are THE SAME STRENGTH — treat them as identical.
+  a) FIRST, normalize equivalent expressions before comparing:
+    percentage concentrations and mg/ml are interchangeable (e.g., 2% = 20 mg/ml),
+    total dose / volume = concentration (e.g., 4 mg/2 ml = 2 mg/ml).
+    After normalization, if values are equal, they MUST be treated as identical — not penalized.
+  b) THEN, compare active ingredient + normalized strength + form + volume.
+  c) A candidate matching ALL specifications (ingredient + strength + form + volume)
+    MUST score higher than one that omits volume (omitting = broader/parent).
+  d) Manufacturer/brand names and packaging info (e.g., "by Hospira", "box of 5")
+    are ADDITIONAL details. A candidate with such extras MUST score LOWER than
+    the equivalent unbranded/unpackaged candidate.
+    Prefer the generic (unbranded, no packaging info) candidate when core specs are identical.
+  e) Only penalize genuinely different values after normalization (e.g., 5 ml vs 2 ml).
+
+### Decision Process (follow strictly)
+1. Eliminate: Discard any candidate that changes the core clinical meaning OR adds specific details
+   (body parts, causes, dose/unit mismatches) not found in the entity.
+2. Rank remaining candidates:
+   a) Prefer a semantically equivalent concept.
+   b) If none exists, prefer the most appropriate parent concept that fully contains the entity meaning without adding new meaning.
+3. If no valid match exists: All candidates should receive scores ≤ 2.0.
+   This signals that no acceptable mapping was found.
 
 **Entity**: {entity_name}
 
@@ -67,20 +93,18 @@ Decision process (follow strictly):
 {candidates_json}
 {score_hint}
 
-**Scoring Guide** (use decimal scores from 0.0 to 5.0):
-- 5.0: EXACT MATCH or SEMANTICALLY EQUIVALENT (same clinical meaning)
-- 4.0~4.9: Very close match (minor wording difference, clinically identical)
-- 3.0~3.9: Acceptable generalization (broader concept that preserves meaning)
-- 2.0~2.9: Partial match (related but loses some meaning)
-- 1.0~1.9: Weak match (loosely related)
-- 0.0~0.9: No match OR UNACCEPTABLE SUB-CONCEPT (different meaning or adds new meaning)
-
-CRITICAL: Every candidate MUST have a UNIQUE score. No two candidates may share the same score. Use decimal precision (e.g., 4.8, 4.3, 3.5) to differentiate candidates.
+### Output Requirements
+- Every candidate MUST receive a score.
+- Every candidate MUST have a UNIQUE score using decimal precision (e.g., 4.8, 5.0, 2.3, 0.0).
+- Output valid JSON only.
 
 **Output Format** (JSON only):
 {{
   "rankings": [
-    {{"concept_id": "ID", "score": 0.0-5.0, "reasoning": "reason"}},
+    {{
+        "concept_id": "ID",
+        "reasoning": "[Step-by-step logic addressing whether it is Equivalent, Parent, or Child, explicitly mentioning added/missing info]",
+        "score": 0.0-5.0}},
     ...
   ]
 }}
@@ -287,6 +311,7 @@ class Stage3HybridScoring:
                 'is_original_standard': candidate.get('is_original_standard', True),
                 'original_candidate': candidate.get('original_candidate', {}),
                 'original_non_standard': candidate.get('original_non_standard'),
+                'relation_type': candidate.get('relation_type', 'original'),
                 'elasticsearch_score': es_score,
                 'elasticsearch_score_normalized': es_score_normalized,
                 'search_type': candidate.get('search_type', 'unknown')
@@ -387,7 +412,13 @@ class Stage3HybridScoring:
             return None
     
     def _build_prompt(self, entity_name: str, candidates: List[Dict[str, Any]]) -> str:
-        """Build LLM prompt from template."""
+        """Build LLM prompt from template.
+        
+        Each candidate has:
+        - index, concept_id, concept_name, domain_id (always)
+        - original_concept: only when Maps-to transformed (original_non_standard exists)
+        - semantic_similarity: only when llm_with_score mode
+        """
         candidates_info = []
         for i, c in enumerate(candidates, 1):
             concept = c['concept']
@@ -406,8 +437,17 @@ class Stage3HybridScoring:
                 'index': i,
                 'concept_id': str(concept.get('concept_id', '')),
                 'concept_name': concept_name,
-                'domain_id': concept.get('domain_id', '')
+                # 'domain_id': concept.get('domain_id', ''),
             }
+            
+            # Maps-to transformed only: include original concept for reference
+            if c.get('relation_type') == 'Maps to':
+                original_non_std = c.get('original_non_standard')
+                if original_non_std:
+                    info['original_concept'] = {
+                        'concept_id': str(original_non_std.get('concept_id', '')),
+                        'concept_name': original_non_std.get('concept_name', ''),
+                    }
             
             # Add semantic similarity if mode requires it
             if self.include_scores_in_prompt and 'semantic_similarity' in c:
