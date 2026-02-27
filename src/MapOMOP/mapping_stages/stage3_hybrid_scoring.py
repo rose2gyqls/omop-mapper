@@ -42,6 +42,7 @@ USER_PROMPT_TEMPLATE = """
 ### Mapping Rules
 1. Semantic Equivalence First
 - If a candidate has the SAME clinical meaning as the entity (even if wording differs), you MUST select it.
+- A semantically equivalent candidate MUST ALWAYS score higher than any parent (broader) concept. No parent concept may outrank an equivalent one.
 
 2. Parent (Broader) Concept — Allowed
 - If no semantically equivalent candidate exists, you MAY select a MORE GENERAL (higher-level) concept
