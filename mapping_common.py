@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_SOURCES = {
     "snuh": {
-        "csv_path": str(PROJECT_ROOT / "data" / "MapOMOP_test_data_coverage90_concept_id.csv"),
+        "csv_path": str(PROJECT_ROOT / "data" / "snuh-baseline-mapping-data.csv"),
         "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
         "domains": ["Condition", "Procedure", "Drug", "Measurement"],
         "id_col": "row_id",

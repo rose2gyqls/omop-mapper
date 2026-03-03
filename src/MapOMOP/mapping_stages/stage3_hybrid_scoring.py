@@ -35,18 +35,18 @@ except ImportError:
 # Prompt Templates (easily customizable)
 # =============================================================================
 
-SYSTEM_PROMPT = """You are a clinical terminology expert. You are given an entity and several candidate OMOP CDM concepts.
-Your task is to score EACH candidate on a scale of 0.0-5.0 based on how well it matches the entity."""
+SYSTEM_PROMPT = """You are a clinical terminology and ontology expert. You are given one entity and several candidate OMOP CDM concepts.
+Your task is to evaluate semantic equivalence using strict hierarchy logic.
+Never select a broader (parent) concept when a semantically equivalent candidate exists.
+Score EACH candidate on a scale of 0.0-5.0 based strictly on clinical meaning, not wording similarity."""
 
 USER_PROMPT_TEMPLATE = """
 ### Mapping Rules
 1. Semantic Equivalence First
-- If a candidate has the SAME clinical meaning as the entity (even if wording differs), you MUST select it.
-- A semantically equivalent candidate MUST ALWAYS score higher than any parent (broader) concept. No parent concept may outrank an equivalent one.
+- If a candidate has the SAME clinical meaning as the entity (even if wording differs), you MUST select it and score 5.
 
-2. Parent (Broader) Concept — Allowed
-- If no semantically equivalent candidate exists, you MAY select a MORE GENERAL (higher-level) concept
-  ONLY IF it fully preserves the clinical meaning without introducing any additional or different meaning.
+2. Parent (Broader) Concept — Allowed IF AND ONLY IF there is NO semantic equivalence candidate
+- If no semantically equivalent candidate exists, you MAY select a MORE GENERAL (higher-level, fully contains the entity meaning) concept.
 
 3. Child (Narrower) Concept — STRICTLY FORBIDDEN
 - A "child" concept is more specific than the entity (e.g., adding a body site, anatomical structure, severity, or underlying cause NOT present in the entity).
@@ -57,40 +57,54 @@ USER_PROMPT_TEMPLATE = """
 - Do NOT guess: Choosing a wrong concept with additional or different meaning is worse than choosing none.
 - Semantic over Lexical: Scoring is based on clinical meaning, NOT string similarity.
 - Original_concept_name: Some candidates include an original non-standard concept name (mapped to the standard concept via "Maps to").
-  a) If this original name is semantically equivalent or lexically identical to the entity,
-     the candidate MUST receive a score ≥ 4.5 (unless the standard concept itself introduces
+  a) If this original name is semantically equivalent to the entity,
+     that candidate MUST receive a score ≥ 4.5 (unless the standard concept itself introduces
      a clear meaning change that cannot be justified). Do NOT ignore this field.
-- Drug / Measurement Concepts:
-  - CRITICAL: Before ANY comparison, you MUST normalize the entity's strength expression:
-    * 4 mg/2 ml → 2 mg/ml (divide dose by volume)
-    * 2% → 20 mg/ml (percentage x 10)
-    After normalization, use ONLY the normalized values for all subsequent comparisons.
-    "Ondansetron 4mg/2ml" and "ondansetron 2 mg/ml" are THE SAME STRENGTH — treat them as identical.
-  a) FIRST, normalize equivalent expressions before comparing:
-    percentage concentrations and mg/ml are interchangeable (e.g., 2% = 20 mg/ml),
+- Drug / Measurement / Procedure Concepts:
+  a) FIRST, normalize equivalent expressions before comparing(MANDATORY MATHEMATICAL CONVERSION):
+    percentage concentrations and mg/ml are interchangeable using explicit mathematical conversion:
+    1% = 1 g / 100 ml = 10 mg/ml
+    therefore X% = X x 10 mg/ml (e.g., 2% = 20 mg/ml),
     total dose / volume = concentration (e.g., 4 mg/2 ml = 2 mg/ml).
-    After normalization, if values are equal, they MUST be treated as identical — not penalized.
-  b) THEN, compare active ingredient + normalized strength + form + volume.
-  c) A candidate matching ALL specifications (ingredient + strength + form + volume)
-    MUST score higher than one that omits volume (omitting = broader/parent).
+    After normalization, if quantitative meaning is identical, they MUST be treated as Equivalent. Do NOT compare raw numeric strings without unit conversion.
+  b) THEN, compare ALL specifications
+    eg. active ingredient + normalized strength + form + volume.
+    eg. anotomic site + view
+  c) A candidate matching ALL specifications to entity MUST score higher than one that omits volume (omitting = broader/parent).
   d) Manufacturer/brand names and packaging info (e.g., "by Hospira", "box of 5")
-    are ADDITIONAL details. A candidate with such extras MUST score LOWER than
+    are ADDITIONAL details. A candidate with such extras is a child candidate and MUST score LOWER than
     the equivalent unbranded/unpackaged candidate.
-    Prefer the generic (unbranded, no packaging info) candidate when core specs are identical.
-  e) Only penalize genuinely different values after normalization (e.g., 5 ml vs 2 ml).
+    Prefer the candidate WITHOUT brand or packaging information when core specifications are identical (branded versions are child concepts due to added attributes).
+    e) Compare quantitative MEANING after normalization — not raw numbers.
+     Same number IS NOT same meaning (e.g., 2% IS NOT 2 mL).
+     Convert to comparable units (e.g., %, mg/mL) and check if the clinical quantity is identical.
 
-### Decision Process (follow strictly)
-1. Eliminate: Discard any candidate that changes the core clinical meaning OR adds specific details
-   (body parts, causes, dose/unit mismatches) not found in the entity.
-2. Rank remaining candidates:
-   a) Prefer a semantically equivalent concept.
-   b) If none exists, prefer the most appropriate parent concept that fully contains the entity meaning without adding new meaning.
-3. If no valid match exists: All candidates should receive scores ≤ 2.0.
-   This signals that no acceptable mapping was found.
+### Decision Process (STRICT HIERARCHY LOCK)
+1. FIRST: Classify EVERY candidate explicitly as one of:
+   - Equivalent
+   - Parent (Broader)
+   - Child (Narrower)
+   - Meaning-changed
 
-**Entity**: {entity_name}
+   Do NOT discard any candidate. Classification comes before scoring.
 
-**Candidates**:
+2. If ONE OR MORE Equivalent candidates exist:
+   - The best Equivalent MUST receive the highest score (5.0).
+   - ALL Parent concepts MUST score strictly lower than the Equivalent.
+   - Selecting a Parent when an Equivalent exists is ALWAYS incorrect.
+
+3. If NO Equivalent exists:
+   - Evaluate valid Parent concepts.
+   - Parent concepts must fully contain the entity meaning and must NOT omit
+     ingredient, strength, volume, form, site, severity, or any defining attribute.
+
+4. Child or Meaning-changed concepts:
+   - MUST receive low scores (≤ 1.5).
+   - They are never valid mappings.
+
+Entity: {entity_name}
+
+Candidates:
 {candidates_json}
 {score_hint}
 
@@ -99,7 +113,7 @@ USER_PROMPT_TEMPLATE = """
 - Every candidate MUST have a UNIQUE score using decimal precision (e.g., 4.8, 5.0, 2.3, 0.0).
 - Output valid JSON only.
 
-**Output Format** (JSON only):
+Output Format (JSON only):
 {{
   "rankings": [
     {{

@@ -121,7 +121,14 @@ if __name__ == "__main__":
         ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
         ("inflamed", "Condition", 4181063, "Inflammation of specific body organs"),
         ("Pseudomyxoma peritonei", "Condition", 4146018, "pseudomyxoma peritonei"),
-        ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate")
+        ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate"),
+        ("Osteochondroma", "Condition", 40480080, "osteochondroma"),
+        ("Esomeprazole 40mg tab", "Drug", 19101745, "esomeprazole 40 mg oral tablet"),
+        ("Chlorpheniramine 4mg/2mL inj", "Drug", 42922061, "2 ml chlorpheniramine 2 mg/ml injectable solution"),
+        ("Pituitary adenoma, nonfunctioning", "Condition", 4112967, "functionless pituitary adenoma"),
+        ("Diclofenac 0.1% 5ml oph", "Drug", 21068327, "5 ml diclofenac 1 mg/ml ophthalmic solution"),
+        ("Chest PA", "Procedure", 36713260, "plain x-ray of chest, posteroanterior"),
+        ("advanced gastric cancer, adenocarcinoma", "Condition", 4248802, "adenocarcinoma of stomach")
     ]
     run_entity_list_test(entity_list, output_dir="test_logs")  # 기본: stage 1~3 점수만
     # validation 포함: run_entity_list_test(entity_list, use_validation=True)
