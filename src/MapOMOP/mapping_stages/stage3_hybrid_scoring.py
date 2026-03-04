@@ -79,27 +79,50 @@ USER_PROMPT_TEMPLATE = """
      Same number IS NOT same meaning (e.g., 2% IS NOT 2 mL).
      Convert to comparable units (e.g., %, mg/mL) and check if the clinical quantity is identical.
 
-### Decision Process (STRICT HIERARCHY LOCK)
-1. FIRST: Classify EVERY candidate explicitly as one of:
-   - Equivalent
-   - Parent (Broader)
-   - Child (Narrower)
-   - Meaning-changed
+### Decision Process (STRICT HIERARCHY LOCK — ENHANCED)
 
-   Do NOT discard any candidate. Classification comes before scoring.
+0. Mandatory Equivalence Check (Pre-Classification)
+   BEFORE classification and scoring, the model MUST determine
+   whether a fully Equivalent candidate exists.
+
+   - Equivalent requires matching ALL defining attributes after normalization
+     (ingredient, strength, concentration, total volume, dose, form, route,
+      anatomic site, severity, histologic subtype, and intent when applicable).
+   - Omission of a defining attribute disqualifies equivalence.
+   - Alteration of a defining attribute disqualifies equivalence.
+
+   Hard constraints:
+   - 2 mL vs 1 mL = Meaning-changed (NOT Parent, NOT Child).
+   - Any explicit numeric mismatch (volume, dose, strength, concentration,
+     drawn/withdrawn amount) = Meaning-changed.
+   - If 5 mL (or any volume) is specified in the Entity and omitted in candidate
+     → Parent at best, NEVER Equivalent.
+   - adenocarcinoma ≠ carcinoma.
+     carcinoma is Parent of adenocarcinoma.
+     carcinoma MUST NOT be treated as Equivalent to adenocarcinoma.
+
+1. FIRST: Classify EVERY candidate explicitly as one of:
+   - fully Equivalent with entity
+   - Parent (Broader) of entity
+   - Child (Narrower) of entity
+   - Meaning-changed with entity
+
+   Do NOT discard any candidate.
+   Classification MUST precede scoring.
 
 2. If ONE OR MORE Equivalent candidates exist:
    - The best Equivalent MUST receive the highest score (5.0).
    - ALL Parent concepts MUST score strictly lower than the Equivalent.
-   - Selecting a Parent when an Equivalent exists is ALWAYS incorrect.
+   - Parent concepts become invalid for final selection in this scenario.
+   - Selecting a Parent when an Equivalent exists is a hierarchy violation.
 
 3. If NO Equivalent exists:
    - Evaluate valid Parent concepts.
-   - Parent concepts must fully contain the entity meaning and must NOT omit
-     ingredient, strength, volume, form, site, severity, or any defining attribute.
+   - Parent must fully contain the entity meaning without contradiction.
+   - Parent may omit attributes but MUST NOT alter subtype or quantitative values.
 
 4. Child or Meaning-changed concepts:
-   - MUST receive low scores (≤ 1.5).
+   - MUST receive ≤ 1.5.
    - They are never valid mappings.
 
 Entity: {entity_name}

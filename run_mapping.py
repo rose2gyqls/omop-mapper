@@ -394,6 +394,13 @@ def run_mapping(
 
         all_results.append(results)
 
+        # num_runs > 1: 각 run 완료 시마다 JSON/XLSX 즉시 저장 (전체 완료 대기 불필요)
+        if num_runs > 1:
+            completed_runs = len(all_results)
+            save_json({"num_runs": completed_runs, "runs": all_results}, out_path, data_type_out, timestamp)
+            save_xlsx_repeat(all_results, out_path, data_type_out, timestamp)
+            logger.info(f"Run {completed_runs}/{num_runs} 완료 → JSON/XLSX 저장됨")
+
     elapsed = time.time() - start_time
 
     # 요약: 마지막 run 기준 (단일 run과 동일 포맷)
@@ -422,10 +429,9 @@ def run_mapping(
             if len(set(concept_ids)) == 1:
                 all_same_count += 1
         logger.info(f"{num_runs}회 동일 결과: {all_same_count}/{total}개 ({100 * all_same_count / total:.2f}%)")
-
-    if num_runs > 1:
-        json_path = save_json({"num_runs": num_runs, "runs": all_results}, out_path, data_type_out, timestamp)
-        xlsx_path = save_xlsx_repeat(all_results, out_path, data_type_out, timestamp)
+        # 이미 각 run 완료 시 저장됨. 최종 경로만 로깅
+        json_path = out_path / f"mapping_{data_type_out}_{timestamp}.json"
+        xlsx_path = out_path / f"mapping_{data_type_out}_{timestamp}.xlsx"
     else:
         json_path = save_json(results, out_path, data_type_out, timestamp)
         xlsx_path = save_xlsx(results, out_path, data_type_out, timestamp)
