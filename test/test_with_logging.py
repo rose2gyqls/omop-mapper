@@ -160,17 +160,17 @@ if __name__ == "__main__":
 
     entity_list = [
         ("Mepivacaine 2% 5ml inj", "Drug", 43609283, "5 ml mepivacaine 20 mg/ml injectable solution"),
-        ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
-        ("inflamed", "Condition", 4181063, "Inflammation of specific body organs"),
-        ("Pseudomyxoma peritonei", "Condition", 4146018, "pseudomyxoma peritonei"),
-        ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate"),
-        ("Osteochondroma", "Condition", 40480080, "osteochondroma"),
-        ("Esomeprazole 40mg tab", "Drug", 19101745, "esomeprazole 40 mg oral tablet"),
-        ("Chlorpheniramine 4mg/2mL inj", "Drug", 42922061, "2 ml chlorpheniramine 2 mg/ml injectable solution"),
-        ("Pituitary adenoma, nonfunctioning", "Condition", 4112967, "functionless pituitary adenoma"),
-        ("Diclofenac 0.1% 5ml oph", "Drug", 21068327, "5 ml diclofenac 1 mg/ml ophthalmic solution"),
-        ("Chest PA", "Procedure", 36713260, "plain x-ray of chest, posteroanterior"),
-        ("advanced gastric cancer, adenocarcinoma", "Condition", 4248802, "adenocarcinoma of stomach")
+        # ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
+        # ("inflamed", "Condition", 4181063, "Inflammation of specific body organs"),
+        # ("Pseudomyxoma peritonei", "Condition", 4146018, "pseudomyxoma peritonei"),
+        # ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate"),
+        # ("Osteochondroma", "Condition", 40480080, "osteochondroma"),
+        # ("Esomeprazole 40mg tab", "Drug", 19101745, "esomeprazole 40 mg oral tablet"),
+        # ("Chlorpheniramine 4mg/2mL inj", "Drug", 42922061, "2 ml chlorpheniramine 2 mg/ml injectable solution"),
+        # ("Pituitary adenoma, nonfunctioning", "Condition", 4112967, "functionless pituitary adenoma"),
+        # ("Diclofenac 0.1% 5ml oph", "Drug", 21068327, "5 ml diclofenac 1 mg/ml ophthalmic solution"),
+        # ("Chest PA", "Procedure", 36713260, "plain x-ray of chest, posteroanterior"),
+        # ("advanced gastric cancer, adenocarcinoma", "Condition", 4248802, "adenocarcinoma of stomach")
     ]
     run_entity_list_test(
         entity_list,

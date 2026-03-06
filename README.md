@@ -24,9 +24,6 @@ git clone https://github.com/yourusername/omop-mapper.git
 cd omop-mapper
 
 pip install -r requirements.txt
-
-# Or with Poetry
-poetry install
 ```
 
 ## Configuration
