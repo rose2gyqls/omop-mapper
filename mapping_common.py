@@ -69,8 +69,9 @@ XLSX_HEADERS = [
     "Stage3 Candidates",
 ]
 
-# 반복 매핑 현황 시트 헤더 (--repeat 옵션)
-SUMMARY_HEADERS = [
+# 반복 매핑 현황 시트 기본 헤더 (--repeat 옵션)
+# Mapped Concept 1~N은 save_xlsx_repeat에서 num_runs에 따라 동적 생성
+SUMMARY_BASE_HEADERS = [
     "Test Index",
     "ID",
     "Entity Name",
@@ -79,11 +80,6 @@ SUMMARY_HEADERS = [
     "Ground Truth Concept Name",
     "All Same",        # N개 결과 모두 같은지 여부
     "Correct",         # N개 결과 중 정답인 결과 개수
-    "Mapped Concept 1",
-    "Mapped Concept 2",
-    "Mapped Concept 3",
-    "Mapped Concept 4",
-    "Mapped Concept 5",
 ]
 
 
@@ -430,8 +426,10 @@ def save_xlsx_repeat(
 
     wb = openpyxl.Workbook()
 
-    # 시트 1: 현황 (SUMMARY_HEADERS, 최대 5개 Mapped Concept)
-    summary_headers = SUMMARY_HEADERS[: 8 + min(5, num_runs)]
+    # 시트 1: 현황 (num_runs만큼 Mapped Concept 1~N 동적 생성)
+    summary_headers = SUMMARY_BASE_HEADERS + [
+        f"Mapped Concept {i}" for i in range(1, num_runs + 1)
+    ]
     ws_summary = wb.active
     ws_summary.title = "현황"
     for col, h in enumerate(summary_headers, 1):
@@ -440,8 +438,8 @@ def save_xlsx_repeat(
         cell.fill = header_fill
         cell.alignment = header_align
 
-    # test_index별로 5회 결과 집계
-    by_index = {}  # test_index -> [r1, r2, r3, r4, r5]
+    # test_index별로 N회 결과 집계
+    by_index = {}  # test_index -> [r1, r2, ..., rN]
     for run_results in all_results:
         for r in run_results:
             idx = r.get("test_index")
@@ -466,20 +464,20 @@ def save_xlsx_repeat(
         all_same = len(set(concept_ids)) == 1 if concept_ids else False
         ws_summary.cell(row=row_idx, column=7, value="Y" if all_same else "N")
 
-        # Correct: 5개 중 정답 개수
+        # Correct: N개 중 정답 개수
         correct_count = sum(1 for r in rows if r.get("mapping_correct"))
         ws_summary.cell(row=row_idx, column=8, value=correct_count)
 
-        # Mapped Concept 1~5: Concept_name(Concept_ID)
-        for i, r in enumerate(rows[:5]):
+        # Mapped Concept 1~N: Concept_name(Concept_ID) - 모든 회차 결과 표시
+        for i, r in enumerate(rows[:num_runs]):
             cid = r.get("best_concept_id") or "N/A"
             cname = r.get("best_concept_name") or "N/A"
             ws_summary.cell(row=row_idx, column=9 + i, value=f"{cname}({cid})")
 
-    # 열 너비 (현황)
+    # 열 너비 (현황) - Mapped Concept 열은 num_runs만큼 동적 설정
     for col_letter, w in {"A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 8}.items():
         ws_summary.column_dimensions[col_letter].width = w
-    for i in range(5):
+    for i in range(num_runs):
         ws_summary.column_dimensions[openpyxl.utils.get_column_letter(9 + i)].width = 50
 
     # 시트 2~(1+num_runs): 각 회차 상세 (기존 save_xlsx와 동일 형식)

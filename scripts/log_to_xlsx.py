@@ -38,7 +38,7 @@ except ImportError:
 from mapping_common import (
     DATA_SOURCES,
     XLSX_HEADERS,
-    SUMMARY_HEADERS,
+    SUMMARY_BASE_HEADERS,
     save_xlsx,
     save_xlsx_repeat,
 )
@@ -353,7 +353,9 @@ def save_xlsx_from_log(
 
     wb = openpyxl.Workbook()
     num_runs = len(all_results)
-    summary_headers = SUMMARY_HEADERS[: 8 + min(5, num_runs)]
+    summary_headers = SUMMARY_BASE_HEADERS + [
+        f"Mapped Concept {i}" for i in range(1, num_runs + 1)
+    ]
     ws_summary = wb.active
     ws_summary.title = "현황"
     for col, h in enumerate(summary_headers, 1):
@@ -386,14 +388,14 @@ def save_xlsx_from_log(
         correct_count = sum(1 for r in rows if r.get("mapping_correct"))
         correct_display = "Y" if (len(rows) == 1 and correct_count == 1) else ("N" if (len(rows) == 1 and correct_count == 0) else correct_count)
         ws_summary.cell(row=row_idx, column=8, value=correct_display)
-        for i, r in enumerate(rows[:5]):
+        for i, r in enumerate(rows[:num_runs]):
             cid = r.get("best_concept_id") or "N/A"
             cname = r.get("best_concept_name") or "N/A"
             ws_summary.cell(row=row_idx, column=9 + i, value=f"{cname}({cid})")
 
     for col_letter, w in {"A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 8}.items():
         ws_summary.column_dimensions[col_letter].width = w
-    for i in range(5):
+    for i in range(num_runs):
         ws_summary.column_dimensions[openpyxl.utils.get_column_letter(9 + i)].width = 50
 
     for run_idx, run_results in enumerate(all_results, 1):
