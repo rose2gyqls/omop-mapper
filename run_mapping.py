@@ -220,6 +220,7 @@ def run_mapping(
             random_state=random_state,
             sample_per_domain=sample_per_domain_dict,
             vocabulary_filter=config.get("vocabulary_filter"),
+            filter_domains=config.get("filter_domains"),
         )
         row_to_input = snuh_row_to_input
     else:

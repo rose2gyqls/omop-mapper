@@ -160,7 +160,7 @@ if __name__ == "__main__":
 
     entity_list = [
         ("Mepivacaine 2% 5ml inj", "Drug", 43609283, "5 ml mepivacaine 20 mg/ml injectable solution"),
-        # ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
+        ("Ondansetron 4mg/2ml inj", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
         # ("inflamed", "Condition", 4181063, "Inflammation of specific body organs"),
         # ("Pseudomyxoma peritonei", "Condition", 4146018, "pseudomyxoma peritonei"),
         # ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate"),

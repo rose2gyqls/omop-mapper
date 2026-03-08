@@ -23,9 +23,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 DATA_SOURCES = {
     "snuh": {
-        "csv_path": str(PROJECT_ROOT / "data" / "snuh-baseline-mapping-data.csv"),
+        "csv_path": str(PROJECT_ROOT / "data" / "MapOMOP_test_data_coverage90_final.csv"),
         "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
-        "domains": ["Condition", "Procedure", "Drug", "Measurement"],
+        "filter_domains": ["Condition"],  # 이 도메인만 로드 (domains와 동일하게 설정)
+        "domains": ["Condition"],
         "id_col": "row_id",
         "loader": "load_snuh_data",
         "row_to_input": "snuh_row_to_input",
@@ -544,6 +545,7 @@ def load_snuh_data(
     random_state: int = 42,
     sample_per_domain: Optional[Dict[str, int]] = None,
     vocabulary_filter: Optional[List[str]] = None,
+    filter_domains: Optional[List[str]] = None,
     chunk_size: int = 100000,
 ) -> pd.DataFrame:
     """SNUH CSV 로드. entity=source_name, domain=domain, gt=omop_concept_id, id=snuh_id.
@@ -565,6 +567,11 @@ def load_snuh_data(
 
         if vocabulary_filter and "vocabulary" in df.columns:
             df = df[df["vocabulary"].isin(vocabulary_filter)]
+
+        if filter_domains:
+            domain_col = "domain_id" if "domain_id" in df.columns else "domain"
+            if domain_col in df.columns:
+                df = df[df[domain_col].isin(filter_domains)]
 
         if sample_per_domain:
             domain_col = "domain_id" if "domain_id" in df.columns else "domain"
