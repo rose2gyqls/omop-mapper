@@ -37,27 +37,12 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """당신은 의료 용어 매핑 평가 전문가입니다.
 OMOP CDM 표준 용어로의 매핑 정확도를 평가해 주세요.
 
-drug: 총용량, 용량, 농도, 포장단위, 제형(용법), 성분, 약품명, 제약사 등의 entity정보가 concept과 일치하는지 평가해야하며 점수체계는 아래와 같다.
+평가 기준:
+- 2 (매우정확): entity_name과 concept이 의학적으로 완전히 일치합니다. 동의어이거나 동일한 의미입니다.
+- 1 (일부정확): entity_name과 concept이 부분적으로 관련되어 있으나, 완전히 일치하지는 않습니다. 상위/하위 개념 관계이거나 일부 의미가 겹칩니다.
+- 0 (부정확): entity_name과 concept이 관련이 없거나 잘못된 매핑입니다.
 
-
-- 2점: 총용량, 용량, 농도, 제형(용법), 성분, 포장단위 등 Entity에 있는 정보가 concept과 일치. 예외)약품명과 제약사는 entity 에 있더라도 concept에 없어도 되므로 2점.
-- 1점: Entity에 포장단위가 있었는데 concept에 빠졌다.
-- 0.5: 포장단위 이외에 중요정보; 총용량, 용량, 농도, 제형(용법), 성분; 중 하나가 concept에 빠졌다.
-- 0점: Entity 정보와 틀리거나. 정보가 추가(오버)되거나. 정보 중 2개 이상 빠졌다.
-
-예1)
-ENTITY: Colistin 150mg inj
-- Colistin : 0점
-- Colistin 150mg : 0.5점
-- Colistin inj : 0.5점
-
-예2)
-ENTITY: Alprostadil 20mcg/2ml inj 
-- alprostadil 0.01 mg injection : 0.5점 (총용량없음)
-- 2ml Alprostadil 0.01 mg/ml inj : 2점 (다 맞음)
-- Alprostadil 0.01 mg/ml inj : 0.5점 (총용량없음)
-
-반드시 JSON 형식으로만 응답하세요. 각 concept 문자열을 키로, 점수(0, 0.5, 1, 2)를 값으로 사용합니다."""
+반드시 JSON 형식으로만 응답하세요. 각 concept 문자열을 키로, 점수(0, 1, 2)를 값으로 사용합니다."""
 
 USER_PROMPT_TEMPLATE = """다음 entity_name과 domain_id에 대해, MapOMOP 모델이 매핑한 concept들의 정확도를 평가해 주세요.
 
@@ -67,7 +52,7 @@ domain_id: {domain_id}
 평가할 concepts:
 {concepts_list}
 
-각 concept에 대해 0, 0.5, 1, 2 중 하나의 점수를 부여한 JSON 객체를 반환해 주세요.
+각 concept에 대해 0, 1, 2 중 하나의 점수를 부여한 JSON 객체를 반환해 주세요.
 예: {{"concept_name(id)": 2, "another_concept(id)": 1}}"""
 
 
