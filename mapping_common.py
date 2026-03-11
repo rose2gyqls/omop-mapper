@@ -25,17 +25,17 @@ DATA_SOURCES = {
     "snuh": {
         "csv_path": str(PROJECT_ROOT / "data" / "snuh-baseline-mapping-data.csv"),
         "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
-        "filter_domains": ["Measurement"],  # 이 도메인만 로드 (domains와 동일하게 설정)
-        "domains": ["Measurement"],
+        "filter_domains": ["Procedure"],  # 이 도메인만 로드 (domains와 동일하게 설정)
+        "domains": ["Procedure"],
         "id_col": "row_id",
         "loader": "load_snuh_data",
         "row_to_input": "snuh_row_to_input",
     },
     "snomed": {
-        "csv_path": str(PROJECT_ROOT / "data" / "snomed-mapping-data-2602.csv"),
+        "csv_path": str(PROJECT_ROOT / "data" / "snomed-mapping-data-1000.csv"),
         "filter_domains": ["Condition", "Measurement", "Observation", "Procedure"],  # 기본 전처리
         "domains": ["Condition", "Measurement", "Observation", "Procedure"],
-        "id_col": "note_id",  # note_id 없을 시 load_snomed_data에서 row_id 자동 생성
+        "id_col": "test_index",  # note_id 없을 시 load_snomed_data에서 row_id 자동 생성
         "loader": "load_snomed_data",
         "row_to_input": "snomed_row_to_input",
     },
