@@ -1,110 +1,221 @@
 """
 LLM Client Module
 
-Provides a unified interface for multiple LLM providers:
-- OpenAI (gpt-4o-mini, etc.)
-- SNUH Hari (snuh/hari-q3-14b via vLLM)
-- Google Gemma (google/gemma-3-12b-it via vLLM)
-
-Configuration via environment variables for container deployment flexibility.
+Provides a unified LangChain-based interface for multiple LLM routes:
+- openai: OpenAI API route (model configurable via env/CLI/API)
+- together: Together AI serverless route
 """
 
-import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-# Reload environment variables at import time
-# This allows runtime configuration changes in containerized deployments
-load_dotenv(override=True)
+# Load .env defaults without overriding real process environment variables.
+load_dotenv(override=False)
 
 logger = logging.getLogger(__name__)
 
-# Optional dependency
 try:
-    from openai import OpenAI
-    HAS_OPENAI = True
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_openai import ChatOpenAI
+
+    HAS_LANGCHAIN = True
 except ImportError:
-    HAS_OPENAI = False
-    logger.warning("OpenAI library not installed. LLM features unavailable.")
+    HAS_LANGCHAIN = False
+    logger.warning("LangChain OpenAI packages not installed. LLM features unavailable.")
 
 
 class LLMProvider:
-    """Available LLM providers."""
+    """Available LLM routes."""
+
     OPENAI = "openai"
-    HARI = "hari"      # snuh/hari-q3-14b
-    GEMMA = "gemma"    # google/gemma-3-12b-it
+    TOGETHER = "together"
 
 
-# Default configurations for each provider
+PROVIDER_ALIASES = {
+    LLMProvider.OPENAI: LLMProvider.OPENAI,
+    "openai_api": LLMProvider.OPENAI,
+    "openai-open": LLMProvider.OPENAI,
+    "openai_open": LLMProvider.OPENAI,
+    LLMProvider.TOGETHER: LLMProvider.TOGETHER,
+    "together_ai": LLMProvider.TOGETHER,
+    "together-ai": LLMProvider.TOGETHER,
+}
+
+
+TOGETHER_MODEL_ALIASES = {
+    "mistral_small_24b": "mistralai/Mistral-Small-24B-Instruct-2501",
+    "gpt_oss_20b": "openai/gpt-oss-20b",
+    "llama4_maverick": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+}
+
+
 DEFAULT_CONFIGS = {
     LLMProvider.OPENAI: {
-        "model": "gpt-4o-mini",
-        "base_url": None,  # Use default OpenAI endpoint
+        "model": "gpt-5-mini-2025-08-07",
+        "base_url": None,
         "supports_json_mode": True,
     },
-    LLMProvider.HARI: {
-        "model": "snuh/hari-q3-14b",
-        "base_url": "http://localhost:8000/v1",  # Default vLLM endpoint
-        "supports_json_mode": False,  # vLLM may not support json_object mode
-    },
-    LLMProvider.GEMMA: {
-        "model": "google/gemma-3-12b-it",
-        "base_url": "http://localhost:8001/v1",  # Default vLLM endpoint
+    LLMProvider.TOGETHER: {
+        "model": "openai/gpt-oss-20b",
+        "base_url": "https://api.together.xyz/v1",
         "supports_json_mode": False,
     },
 }
 
 
-def get_env_config() -> Dict[str, Any]:
+def normalize_provider(provider: Optional[str]) -> str:
+    """Normalize provider aliases to canonical keys."""
+
+    raw = (provider or LLMProvider.OPENAI).strip().lower()
+    return PROVIDER_ALIASES.get(raw, LLMProvider.OPENAI)
+
+
+def _provider_env_prefix(provider: str) -> str:
+    return {
+        LLMProvider.OPENAI: "OPENAI",
+        LLMProvider.TOGETHER: "TOGETHER",
+    }[provider]
+
+
+def _clean_optional_env(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _escape_prompt_content(text: str) -> str:
+    """Escape braces so ChatPromptTemplate treats content as literal text."""
+
+    return text.replace("{", "{{").replace("}", "}}")
+
+
+def _normalize_prompt_role(role: str) -> str:
+    role = role.strip().lower()
+    if role == "user":
+        return "human"
+    if role == "assistant":
+        return "ai"
+    return role
+
+
+def _get_env_value(prefix: str, field: str, fallback: Optional[str] = None) -> Optional[str]:
+    value = os.getenv(f"{prefix}_{field}")
+    if value is None and fallback:
+        value = os.getenv(fallback)
+    return _clean_optional_env(value)
+
+
+def _get_env_float(prefix: str, field: str, fallback_key: str, default: float) -> float:
+    raw = os.getenv(f"{prefix}_{field}") or os.getenv(fallback_key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s value '%s'; using default %.3f", fallback_key, raw, default)
+        return default
+
+
+def _get_env_int(prefix: str, field: str, fallback_key: str, default: int) -> int:
+    raw = os.getenv(f"{prefix}_{field}") or os.getenv(fallback_key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s value '%s'; using default %d", fallback_key, raw, default)
+        return default
+
+
+def _default_max_tokens_for_model(model: str) -> int:
     """
-    Get LLM configuration from environment variables.
-    
-    Reloads .env file to support runtime configuration changes.
-    
-    Environment variables:
-        LLM_PROVIDER: Provider name (openai, hari, gemma)
-        LLM_MODEL: Model name (overrides default)
-        LLM_BASE_URL: API base URL (for vLLM servers)
-        LLM_API_KEY: API key (for OpenAI or secured vLLM)
-        LLM_TEMPERATURE: Temperature (0.0-2.0)
-        LLM_TOP_P: Top-p / nucleus sampling (0.0-1.0)
-        
-    Returns:
-        Configuration dictionary
+    Return a safe default output-token cap for well-known models.
+
+    GPT-5 family currently supports up to 128,000 output tokens. For unknown
+    models, keep a conservative fallback unless overridden by env/CLI/API.
     """
-    # Reload environment to get latest values
-    load_dotenv(override=True)
-    
-    provider = os.getenv("LLM_PROVIDER", LLMProvider.OPENAI).lower()
-    
-    # Get default config for provider
-    default = DEFAULT_CONFIGS.get(provider, DEFAULT_CONFIGS[LLMProvider.OPENAI])
-    
-    # Override with environment variables
-    config = {
-        "provider": provider,
-        "model": os.getenv("LLM_MODEL", default["model"]),
-        "base_url": os.getenv("LLM_BASE_URL", default["base_url"]),
-        "api_key": os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
-        "temperature": float(os.getenv("LLM_TEMPERATURE", "0.3")),
-        "top_p": float(os.getenv("LLM_TOP_P", "1.0")),
-        "supports_json_mode": default["supports_json_mode"],
+
+    model_name = (model or "").strip().lower()
+    if model_name.startswith("gpt-5"):
+        return 128000
+    return 2048
+
+
+def normalize_model_name(provider: str, model: Optional[str]) -> Optional[str]:
+    """Normalize provider-specific model aliases to canonical model IDs."""
+
+    if model is None:
+        return None
+
+    model_name = model.strip()
+    if not model_name:
+        return None
+
+    if provider == LLMProvider.TOGETHER:
+        return TOGETHER_MODEL_ALIASES.get(model_name.lower(), model_name)
+
+    return model_name
+
+
+def get_env_config(provider: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Resolve LLM configuration from environment variables.
+
+    Precedence:
+    1. Provider-specific env vars for the resolved provider
+    2. Shared LLM_* env vars
+    3. Provider defaults
+    """
+
+    load_dotenv(override=False)
+
+    active_provider = normalize_provider(os.getenv("LLM_PROVIDER", LLMProvider.OPENAI))
+    resolved_provider = normalize_provider(provider or active_provider)
+    defaults = DEFAULT_CONFIGS.get(resolved_provider, DEFAULT_CONFIGS[LLMProvider.OPENAI])
+    prefix = _provider_env_prefix(resolved_provider)
+    use_shared_provider_overrides = provider is None or resolved_provider == active_provider
+
+    api_key = _get_env_value(prefix, "API_KEY")
+
+    shared_model = _clean_optional_env(os.getenv("LLM_MODEL")) if use_shared_provider_overrides else None
+    resolved_model = normalize_model_name(
+        resolved_provider,
+        (
+            _get_env_value(prefix, "MODEL")
+            or shared_model
+            or defaults["model"]
+        ),
+    )
+    default_max_tokens = _default_max_tokens_for_model(resolved_model)
+
+    shared_base_url = _clean_optional_env(os.getenv("LLM_BASE_URL")) if use_shared_provider_overrides else None
+    return {
+        "provider": resolved_provider,
+        "model": resolved_model,
+        "base_url": (
+            _get_env_value(prefix, "BASE_URL")
+            or shared_base_url
+            or defaults["base_url"]
+        ),
+        "api_key": api_key,
+        "temperature": _get_env_float(prefix, "TEMPERATURE", "LLM_TEMPERATURE", 0.3),
+        "top_p": _get_env_float(prefix, "TOP_P", "LLM_TOP_P", 1.0),
+        "max_tokens": _get_env_int(prefix, "MAX_TOKENS", "LLM_MAX_TOKENS", default_max_tokens),
+        "supports_json_mode": defaults["supports_json_mode"],
     }
-    
-    return config
 
 
 class LLMClient:
     """
-    Unified LLM client supporting multiple providers.
-    
-    Uses OpenAI-compatible API for all providers (OpenAI, vLLM).
-    Configuration can be loaded from environment or passed directly.
+    LangChain-based LLM client using ChatOpenAI for OpenAI and OpenAI-compatible
+    backends.
     """
-    
+
     def __init__(
         self,
         provider: Optional[str] = None,
@@ -113,203 +224,198 @@ class LLMClient:
         api_key: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
-        use_env_config: bool = True
+        max_tokens: Optional[int] = None,
+        use_env_config: bool = True,
     ):
-        """
-        Initialize LLM client.
-        
-        Args:
-            provider: LLM provider (openai, hari, gemma)
-            model: Model name
-            base_url: API base URL (for vLLM)
-            api_key: API key
-            temperature: Temperature (0.0-2.0)
-            top_p: Top-p (0.0-1.0)
-            use_env_config: Load configuration from environment variables
-        """
-        if not HAS_OPENAI:
-            logger.error("OpenAI library not installed")
-            self.client = None
-            return
-        
-        # Load config from environment if enabled
-        if use_env_config:
-            env_config = get_env_config()
-            self.provider = provider or env_config["provider"]
-            self.model = model or env_config["model"]
-            self.base_url = base_url or env_config["base_url"]
-            self.api_key = api_key or env_config["api_key"]
-            self.temperature = temperature if temperature is not None else env_config["temperature"]
-            self.top_p = top_p if top_p is not None else env_config["top_p"]
-            self.supports_json_mode = env_config["supports_json_mode"]
-        else:
-            self.provider = provider or LLMProvider.OPENAI
-            self.model = model or DEFAULT_CONFIGS[self.provider]["model"]
-            self.base_url = base_url or DEFAULT_CONFIGS[self.provider]["base_url"]
-            self.api_key = api_key
-            self.temperature = temperature or 0.3
-            self.top_p = top_p or 1.0
-            self.supports_json_mode = DEFAULT_CONFIGS.get(
-                self.provider, DEFAULT_CONFIGS[LLMProvider.OPENAI]
-            )["supports_json_mode"]
-        
-        # Initialize OpenAI-compatible client
+        env_config = get_env_config(provider=provider) if use_env_config else {
+            "provider": normalize_provider(provider),
+            "model": None,
+            "base_url": None,
+            "api_key": None,
+            "temperature": 0.3,
+            "top_p": 1.0,
+            "max_tokens": 2048,
+            "supports_json_mode": DEFAULT_CONFIGS[normalize_provider(provider)]["supports_json_mode"],
+        }
+
+        self.provider = normalize_provider(provider or env_config["provider"])
+        defaults = DEFAULT_CONFIGS[self.provider]
+        self.model = normalize_model_name(
+            self.provider,
+            model or env_config["model"] or defaults["model"],
+        )
+        self.base_url = _clean_optional_env(base_url) if base_url is not None else env_config["base_url"]
+        self.api_key = _clean_optional_env(api_key) if api_key is not None else env_config["api_key"]
+        self.temperature = temperature if temperature is not None else env_config["temperature"]
+        self.top_p = top_p if top_p is not None else env_config["top_p"]
+        self.max_tokens = max_tokens if max_tokens is not None else env_config["max_tokens"]
+        self.supports_json_mode = env_config["supports_json_mode"]
+        self.use_env_config = use_env_config
+
         self.client = None
         self._initialize_client()
-    
+
+    def _resolved_api_key(self) -> Optional[str]:
+        if self.api_key:
+            return self.api_key
+        if self.provider == LLMProvider.OPENAI:
+            return None
+        return "dummy"
+
+    def _build_chat_model(
+        self,
+        *,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        json_mode: bool = False,
+    ):
+        if not HAS_LANGCHAIN:
+            return None
+
+        api_key = self._resolved_api_key()
+        if self.provider == LLMProvider.OPENAI and not api_key:
+            logger.error("API key required for OpenAI provider")
+            return None
+
+        model_kwargs: Dict[str, Any] = {}
+        effective_top_p = self.top_p if top_p is None else top_p
+        if json_mode and self.supports_json_mode:
+            model_kwargs["response_format"] = {"type": "json_object"}
+
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "api_key": api_key,
+            "temperature": self.temperature if temperature is None else temperature,
+            "top_p": effective_top_p,
+            "max_retries": 2,
+        }
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        kwargs["max_tokens"] = self.max_tokens if max_tokens is None else max_tokens
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
+
+        return ChatOpenAI(**kwargs)
+
     def _initialize_client(self):
-        """Initialize the OpenAI-compatible client."""
-        try:
-            client_kwargs = {}
-            
-            if self.api_key:
-                client_kwargs["api_key"] = self.api_key
-            elif self.provider == LLMProvider.OPENAI:
-                logger.error("API key required for OpenAI provider")
-                return
-            else:
-                # vLLM servers may not require API key
-                client_kwargs["api_key"] = "dummy"  # OpenAI client requires some value
-            
-            if self.base_url:
-                client_kwargs["base_url"] = self.base_url
-            
-            self.client = OpenAI(**client_kwargs)
-            
-            logger.info(
-                f"LLM Client initialized: provider={self.provider}, "
-                f"model={self.model}, base_url={self.base_url or 'default'}"
-            )
-            
-        except Exception as e:
-            logger.error(f"LLM Client initialization failed: {e}")
+        """Initialize the default chat model."""
+
+        if not HAS_LANGCHAIN:
+            logger.error("LangChain OpenAI packages not installed")
             self.client = None
-    
+            return
+
+        try:
+            self.client = self._build_chat_model()
+            if self.client is None:
+                return
+
+            logger.info(
+                "LLM Client initialized: provider=%s, model=%s, base_url=%s",
+                self.provider,
+                self.model,
+                self.base_url or "default",
+            )
+        except Exception as e:
+            logger.error("LLM Client initialization failed: %s", e)
+            self.client = None
+
     def reload_config(self):
-        """
-        Reload configuration from environment variables.
-        
-        Useful for runtime configuration changes in containerized deployments.
-        """
+        """Reload configuration from environment variables."""
+
         env_config = get_env_config()
-        
-        old_provider = self.provider
-        old_model = self.model
-        old_base_url = self.base_url
-        
         self.provider = env_config["provider"]
         self.model = env_config["model"]
         self.base_url = env_config["base_url"]
         self.api_key = env_config["api_key"]
         self.temperature = env_config["temperature"]
         self.top_p = env_config["top_p"]
+        self.max_tokens = env_config["max_tokens"]
         self.supports_json_mode = env_config["supports_json_mode"]
-        
-        # Reinitialize client if configuration changed
-        if (self.provider != old_provider or 
-            self.model != old_model or 
-            self.base_url != old_base_url):
-            logger.info("LLM configuration changed, reinitializing client...")
-            self._initialize_client()
-    
+        self._initialize_client()
+
     @property
     def is_initialized(self) -> bool:
-        """Check if client is properly initialized."""
         return self.client is not None
-    
+
     def chat_completion(
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
-        max_tokens: int = 2048,
-        json_mode: bool = False
+        max_tokens: Optional[int] = None,
+        json_mode: bool = False,
     ) -> Optional[str]:
         """
-        Send chat completion request.
-        
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            temperature: Override default temperature
-            top_p: Override default top_p
-            max_tokens: Maximum tokens in response
-            json_mode: Request JSON formatted response
-            
-        Returns:
-            Response content string or None on error
+        Send a chat completion request through a LangChain prompt/model/parser
+        chain and return the raw text response.
         """
-        if not self.client:
+
+        if not self.is_initialized:
             logger.error("LLM client not initialized")
             return None
-        
+
         try:
-            kwargs = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature if temperature is not None else self.temperature,
-                "top_p": top_p if top_p is not None else self.top_p,
-                "max_tokens": max_tokens,
-            }
-            
-            # Only add response_format if provider supports it
-            if json_mode and self.supports_json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            
-            response = self.client.chat.completions.create(**kwargs)
-            
-            return response.choices[0].message.content
-            
+            prompt_messages = [
+                (_normalize_prompt_role(msg["role"]), _escape_prompt_content(msg["content"]))
+                for msg in messages
+            ]
+            prompt = ChatPromptTemplate.from_messages(prompt_messages)
+            model = self._build_chat_model(
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+            )
+            if model is None:
+                return None
+
+            chain = prompt | model | StrOutputParser()
+            return chain.invoke({})
         except Exception as e:
-            logger.error(f"LLM API call failed: {e}")
+            logger.error("LLM API call failed: %s", e)
             return None
-    
+
     def get_info(self) -> Dict[str, Any]:
         """Get current LLM configuration info."""
+
         return {
             "provider": self.provider,
             "model": self.model,
             "base_url": self.base_url,
             "temperature": self.temperature,
             "top_p": self.top_p,
+            "max_tokens": self.max_tokens,
             "supports_json_mode": self.supports_json_mode,
             "is_initialized": self.is_initialized,
+            "backend": "langchain_openai" if HAS_LANGCHAIN else "unavailable",
         }
 
 
-# Singleton instance for shared use
 _default_client: Optional[LLMClient] = None
 
 
-def get_llm_client(force_reload: bool = False) -> LLMClient:
+def get_llm_client(force_reload: bool = False, **overrides) -> LLMClient:
     """
-    Get the default LLM client instance.
-    
-    Creates a singleton client or reloads configuration if requested.
-    
-    Args:
-        force_reload: Force reload configuration from environment
-        
-    Returns:
-        LLMClient instance
+    Get the default client or create a configured client when overrides are
+    provided.
     """
+
     global _default_client
-    
+
+    if overrides:
+        return LLMClient(**overrides)
+
     if _default_client is None:
         _default_client = LLMClient()
     elif force_reload:
         _default_client.reload_config()
-    
+
     return _default_client
 
 
 def create_llm_client(**kwargs) -> LLMClient:
-    """
-    Create a new LLM client with custom configuration.
-    
-    Args:
-        **kwargs: Arguments passed to LLMClient constructor
-        
-    Returns:
-        New LLMClient instance
-    """
+    """Create a new LLM client with custom configuration."""
+
     return LLMClient(**kwargs)

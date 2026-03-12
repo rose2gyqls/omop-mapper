@@ -26,7 +26,15 @@
 #     llm            : LLM 평가, 점수 미포함 (기본)
 #     llm_with_score : LLM 평가, SapBERT 의미유사도 포함
 #     semantic       : 의미유사도만
-#     hybrid         : LLM + 의미유사도 혼합
+#
+# [LLM 라우트 선택]
+#   --llm-provider   : openai | together
+#   --llm-model      : 모델명 override (Together: gpt_oss_20b | mistral_small_24b | llama4_maverick alias 지원)
+#   --llm-base-url   : OpenAI-compatible endpoint override
+#   --llm-api-key-env: API key를 읽을 환경변수 이름
+#   --llm-temperature: temperature override
+#   --llm-top-p      : top_p override
+#   --llm-max-tokens : 최대 출력 토큰 override
 #
 # [병렬 처리]
 #   -w, --workers N  : 워커 프로세스 수 (기본: 1). 4~8 권장 (메모리 ~1GB/워커)
@@ -62,6 +70,12 @@
 #
 # Validation 포함 실행 (with/without 비교용):
 #   ./scripts/run_mapping.sh snuh --validation
+#
+# Together GPT-OSS-20B로 실행:
+#   ./scripts/run_mapping.sh snuh --llm-provider together --llm-model gpt_oss_20b --llm-api-key-env TOGETHER_API_KEY
+#
+# Together Mistral Small 24B로 실행:
+#   ./scripts/run_mapping.sh snuh --llm-provider together --llm-model mistral_small_24b --llm-api-key-env TOGETHER_API_KEY
 #
 
 set -e

@@ -183,7 +183,6 @@ def evaluate_row(
     response = llm_client.chat_completion(
         messages=messages,
         temperature=0.0,
-        max_tokens=1024,
         json_mode=True,
     )
     if not response:
@@ -204,7 +203,7 @@ def run_evaluation(
 
     llm_client = get_llm_client()
     if not llm_client.is_initialized:
-        raise RuntimeError("LLM 클라이언트 초기화 실패. OPENAI_API_KEY 또는 .env 설정을 확인하세요.")
+        raise RuntimeError("LLM 클라이언트 초기화 실패. OPENAI_API_KEY/TOGETHER_API_KEY 및 .env 설정을 확인하세요.")
 
     rows = df.to_dict("records")
     if limit:

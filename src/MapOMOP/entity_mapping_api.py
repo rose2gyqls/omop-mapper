@@ -18,6 +18,7 @@ from .mapping_stages import (
     ScoringMode
 )
 from .mapping_validation import MappingValidator
+from .llm_client import get_llm_client
 
 # Optional dependencies
 try:
@@ -91,6 +92,13 @@ class EntityMappingAPI:
         scoring_mode: str = ScoringMode.LLM,
         include_non_std_info: bool = False,
         use_validation: bool = False,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_base_url: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
+        llm_temperature: Optional[float] = None,
+        llm_top_p: Optional[float] = None,
+        llm_max_tokens: Optional[int] = None,
     ):
         """
         Initialize mapping API.
@@ -104,12 +112,26 @@ class EntityMappingAPI:
                 - 'semantic': Semantic similarity only
             include_non_std_info: Include non-std concept info in LLM prompt
             use_validation: If True, validate top 3 candidates with LLM; if False (default), use top score as-is
+            llm_provider: LLM route key (openai, together)
+            llm_model: Optional model override
+            llm_base_url: Optional OpenAI-compatible base URL override
+            llm_api_key: Optional API key override
+            llm_temperature: Optional temperature override
+            llm_top_p: Optional top_p override
+            llm_max_tokens: Optional max output tokens override
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
         self.scoring_mode = scoring_mode
         self.include_non_std_info = include_non_std_info
         self.use_validation = use_validation
+        self.llm_provider = llm_provider
+        self.llm_model = llm_model
+        self.llm_base_url = llm_base_url
+        self.llm_api_key = llm_api_key
+        self.llm_temperature = llm_temperature
+        self.llm_top_p = llm_top_p
+        self.llm_max_tokens = llm_max_tokens
         
         # SapBERT model (lazy loading)
         self._sapbert_model = None
@@ -124,9 +146,32 @@ class EntityMappingAPI:
         
         self.stage2 = Stage2StandardCollection(es_client=self.es_client)
         self.stage3 = None  # Initialized after SapBERT loading
-        
-        # Validation module (uses LLM client from environment config)
-        self.validator = MappingValidator(es_client=self.es_client)
+
+        self.llm_client = None
+        if self.scoring_mode in [ScoringMode.LLM, ScoringMode.LLM_WITH_SCORE] or self.use_validation:
+            self.llm_client = get_llm_client(
+                provider=self.llm_provider,
+                model=self.llm_model,
+                base_url=self.llm_base_url,
+                api_key=self.llm_api_key,
+                temperature=self.llm_temperature,
+                top_p=self.llm_top_p,
+                max_tokens=self.llm_max_tokens,
+            )
+
+        self.validator = None
+        if self.use_validation:
+            self.validator = MappingValidator(
+                es_client=self.es_client,
+                llm_client=self.llm_client,
+                llm_provider=self.llm_provider,
+                llm_model=self.llm_model,
+                llm_base_url=self.llm_base_url,
+                llm_api_key=self.llm_api_key,
+                temperature=self.llm_temperature,
+                top_p=self.llm_top_p,
+                max_tokens=self.llm_max_tokens,
+            )
         
         # Debug variables
         self._last_stage1_candidates = []
@@ -180,8 +225,16 @@ class EntityMappingAPI:
                     sapbert_tokenizer=self._sapbert_tokenizer,
                     sapbert_device=self._sapbert_device,
                     es_client=self.es_client,
+                    llm_client=self.llm_client,
+                    llm_provider=self.llm_provider,
+                    llm_model=self.llm_model,
+                    llm_base_url=self.llm_base_url,
+                    llm_api_key=self.llm_api_key,
                     scoring_mode=self.scoring_mode,
-                    include_non_std_info=self.include_non_std_info
+                    include_non_std_info=self.include_non_std_info,
+                    temperature=self.llm_temperature,
+                    top_p=self.llm_top_p,
+                    max_tokens=self.llm_max_tokens,
                 )
             
             # Generate entity embedding

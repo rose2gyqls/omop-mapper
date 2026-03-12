@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import functools
+import os
 import sys
 import time
 
@@ -63,6 +64,13 @@ def _worker_init(
     use_validation: bool = False,
     log_file_path: str | None = None,
     capture_only: bool = False,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+    llm_api_key: str | None = None,
+    llm_temperature: float | None = None,
+    llm_top_p: float | None = None,
+    llm_max_tokens: int | None = None,
 ):
     """Worker 프로세스 초기화: API 인스턴스 1회 생성 + 로깅 설정.
     capture_only=True: 로그를 캡처 모드로 (멀티 워커 시 엔티티별로 묶어서 출력).
@@ -75,6 +83,13 @@ def _worker_init(
         es_client=es_client,
         scoring_mode=scoring_mode,
         use_validation=use_validation,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_temperature=llm_temperature,
+        llm_top_p=llm_top_p,
+        llm_max_tokens=llm_max_tokens,
     )
 
 
@@ -183,6 +198,13 @@ def run_mapping(
     workers: int = 1,
     num_runs: int = 1,
     use_validation: bool = False,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+    llm_api_key: str | None = None,
+    llm_temperature: float | None = None,
+    llm_top_p: float | None = None,
+    llm_max_tokens: int | None = None,
 ):
     """매핑 실행: 데이터 로드(기본 경로+전처리) → 매핑 → JSON/LOG/XLSX 출력.
     workers > 1 이면 ProcessPoolExecutor로 병렬 처리.
@@ -216,6 +238,16 @@ def run_mapping(
     logger.info(f"매핑 시작: data={data_type}, csv={csv_path}")
     logger.info(f"전처리: {config.get('vocabulary_filter', config.get('filter_domains', '없음'))}")
     logger.info(f"output_dir={out_path}")
+    if llm_provider or llm_model or llm_base_url or llm_temperature is not None or llm_top_p is not None or llm_max_tokens is not None:
+        logger.info(
+            "LLM override: provider=%s, model=%s, base_url=%s, temperature=%s, top_p=%s, max_tokens=%s",
+            llm_provider or "(env/default)",
+            llm_model or "(env/default)",
+            llm_base_url or "(env/default)",
+            llm_temperature if llm_temperature is not None else "(env/default)",
+            llm_top_p if llm_top_p is not None else "(env/default)",
+            llm_max_tokens if llm_max_tokens is not None else "(env/default)",
+        )
     logger.info("=" * 80)
 
     # 데이터 로드 (전처리 적용)
@@ -274,7 +306,19 @@ def run_mapping(
             with ProcessPoolExecutor(
                 max_workers=workers,
                 initializer=_worker_init,
-                initargs=(scoring_mode, use_validation, str(log_file), True),
+                initargs=(
+                    scoring_mode,
+                    use_validation,
+                    str(log_file),
+                    True,
+                    llm_provider,
+                    llm_model,
+                    llm_base_url,
+                    llm_api_key,
+                    llm_temperature,
+                    llm_top_p,
+                    llm_max_tokens,
+                ),
             ) as ex:
                 future_to_row_idx = {ex.submit(map_task, t): t[0] for t in tasks}
                 indexed_results = [None] * len(tasks)
@@ -336,6 +380,13 @@ def run_mapping(
                 es_client=es_client,
                 scoring_mode=scoring_mode,
                 use_validation=use_validation,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                llm_base_url=llm_base_url,
+                llm_api_key=llm_api_key,
+                llm_temperature=llm_temperature,
+                llm_top_p=llm_top_p,
+                llm_max_tokens=llm_max_tokens,
             )
             for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
                 try:
@@ -482,8 +533,47 @@ def main():
     parser.add_argument(
         "--scoring",
         default="llm",
-        choices=["llm", "llm_with_score", "semantic", "hybrid"],
+        choices=["llm", "llm_with_score", "semantic"],
         help="Scoring mode (ablation study용)",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=["openai", "together"],
+        default=None,
+        help="LLM route 선택. 미지정 시 LLM_PROVIDER/env 기본값 사용.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        help="모델명 override. Together는 gpt_oss_20b, mistral_small_24b, llama4_maverick alias도 지원.",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        default=None,
+        help="OpenAI-compatible base URL override.",
+    )
+    parser.add_argument(
+        "--llm-api-key-env",
+        default=None,
+        help="API key를 읽을 환경변수 이름. 예: OPENAI_API_KEY",
+    )
+    parser.add_argument(
+        "--llm-temperature",
+        type=float,
+        default=None,
+        help="LLM temperature override.",
+    )
+    parser.add_argument(
+        "--llm-top-p",
+        type=float,
+        default=None,
+        help="LLM top_p override.",
+    )
+    parser.add_argument(
+        "--llm-max-tokens",
+        type=int,
+        default=None,
+        help="LLM max output tokens override. 미지정 시 env/default 사용.",
     )
     parser.add_argument(
         "--workers",
@@ -508,6 +598,7 @@ def main():
     )
 
     args = parser.parse_args()
+    llm_api_key = os.getenv(args.llm_api_key_env) if args.llm_api_key_env else None
 
     run_mapping(
         data_type=args.data,
@@ -520,6 +611,13 @@ def main():
         workers=args.workers,
         num_runs=args.repeat,
         use_validation=args.validation,
+        llm_provider=args.llm_provider,
+        llm_model=args.llm_model,
+        llm_base_url=args.llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_temperature=args.llm_temperature,
+        llm_top_p=args.llm_top_p,
+        llm_max_tokens=args.llm_max_tokens,
     )
 
 

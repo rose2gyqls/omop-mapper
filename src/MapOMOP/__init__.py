@@ -9,9 +9,8 @@ Stages:
     3. Hybrid Scoring: LLM or embedding-based final ranking
 
 LLM Providers:
-    - OpenAI (gpt-4o-mini, etc.)
-    - SNUH Hari (snuh/hari-q3-14b via vLLM)
-    - Google Gemma (google/gemma-3-12b-it via vLLM)
+    - OpenAI (gpt-5-mini-2025-08-07, etc.)
+    - Together AI serverless models
 
 Usage:
     from MapOMOP import EntityMappingAPI, EntityInput, DomainID

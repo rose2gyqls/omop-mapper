@@ -1,12 +1,13 @@
 # MapOMOP
 
-Medical entity mapping to OMOP CDM standard concepts using a 3-stage hybrid search pipeline. Index OMOP CDM data into Elasticsearch, then map source entities (e.g., SNUH clinical terms, SNOMED) to standard concepts with lexical, semantic, and LLM-based scoring.
+Medical entity mapping to OMOP CDM standard concepts using a 3-stage search pipeline. Index OMOP CDM data into Elasticsearch, then map source entities (e.g., SNUH clinical terms, SNOMED) to standard concepts with lexical, semantic, and LLM-based scoring.
 
 ## Features
 
 - **3-Stage Pipeline**: Candidate Retrieval → Standard Collection → LLM Scoring
 - **Elasticsearch Indexing**: Local CSV or PostgreSQL with SapBERT embeddings
-- **Multiple Scoring Modes**: LLM, semantic similarity, hybrid (ablation study)
+- **Multiple Scoring Modes**: LLM, LLM + semantic hint, semantic similarity
+- **Switchable LLM Routes**: OpenAI default + Together AI serverless via LangChain
 - **Batch Mapping**: SNUH/SNOMED data sources with automatic preprocessing
 - **Repeat Runs**: Consistency validation with incremental JSON/Excel output per run
 - **Intermediate Results**: View partial results in Excel while mapping is in progress
@@ -31,7 +32,13 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 
 ```bash
-OPENAI_API_KEY=your-api-key          # For LLM scoring
+LLM_PROVIDER=openai                  # openai | together
+OPENAI_API_KEY=your-api-key          # For OpenAI route
+OPENAI_MODEL=gpt-5-mini-2025-08-07   # Optional route-specific override
+LLM_MAX_TOKENS=128000                # Optional global override
+TOGETHER_API_KEY=your-together-key   # For Together serverless route
+TOGETHER_MODEL=openai/gpt-oss-20b
+TOGETHER_BASE_URL=https://api.together.xyz/v1
 ES_SERVER_HOST=localhost
 ES_SERVER_PORT=9200
 ES_SERVER_USERNAME=elastic
@@ -88,7 +95,14 @@ Use `snomed` for SNOMED data. See options below.
 | `--sample-per-domain N` | N entities per domain |
 | `--random` | Random sampling |
 | `--seed N` | Random seed (default: 42) |
-| `--scoring` | `llm`, `llm_with_score`, `semantic`, `hybrid` |
+| `--scoring` | `llm`, `llm_with_score`, `semantic` |
+| `--llm-provider` | `openai`, `together` |
+| `--llm-model` | Override model name (`gpt_oss_20b`, `mistral_small_24b`, `llama4_maverick` aliases supported for Together) |
+| `--llm-base-url` | Override OpenAI-compatible endpoint |
+| `--llm-api-key-env` | Env var name to read API key from |
+| `--llm-temperature` | Override temperature |
+| `--llm-top-p` | Override top_p |
+| `--llm-max-tokens` | Override max output tokens |
 | `--workers`, `-w` | Parallel workers (default: 1) |
 | `--repeat`, `-r` | Repeat N times (consistency check) |
 

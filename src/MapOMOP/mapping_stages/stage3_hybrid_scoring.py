@@ -7,9 +7,8 @@ Final scoring and ranking of candidates using multiple strategies:
 - semantic: SapBERT cosine similarity only
 
 Supports multiple LLM providers via LLMClient:
-- OpenAI (gpt-4o-mini, etc.)
-- SNUH Hari (snuh/hari-q3-14b)
-- Google Gemma (google/gemma-3-12b-it)
+- OpenAI (gpt-5-mini-2025-08-07, etc.)
+- Together AI serverless models
 """
 
 import json
@@ -17,7 +16,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ..utils import sigmoid_normalize
-from ..llm_client import LLMClient, get_llm_client, LLMProvider
+from ..llm_client import LLMClient, get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -182,10 +181,15 @@ class Stage3HybridScoring:
         sapbert_device=None,
         es_client=None,
         llm_client: Optional[LLMClient] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_base_url: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
         scoring_mode: str = ScoringMode.LLM,
         include_non_std_info: bool = False,
         temperature: Optional[float] = None,
-        top_p: Optional[float] = None
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Initialize Stage 3.
@@ -213,10 +217,15 @@ class Stage3HybridScoring:
         self.sapbert_tokenizer = sapbert_tokenizer
         self.sapbert_device = sapbert_device
         
-        # LLM client (supports OpenAI, Hari, Gemma)
+        # LLM client (supports OpenAI and Together)
         self.llm_client = llm_client
+        self.llm_provider = llm_provider
+        self.llm_model = llm_model
+        self.llm_base_url = llm_base_url
+        self.llm_api_key = llm_api_key
         self.temperature = temperature
         self.top_p = top_p
+        self.max_tokens = max_tokens
         
         # Initialize based on mode
         self._initialize_mode()
@@ -226,7 +235,15 @@ class Stage3HybridScoring:
         if self.scoring_mode in [ScoringMode.LLM, ScoringMode.LLM_WITH_SCORE]:
             # Use provided client or get default
             if self.llm_client is None:
-                self.llm_client = get_llm_client()
+                self.llm_client = get_llm_client(
+                    provider=self.llm_provider,
+                    model=self.llm_model,
+                    base_url=self.llm_base_url,
+                    api_key=self.llm_api_key,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_tokens=self.max_tokens,
+                )
             
             if self.llm_client.is_initialized:
                 mode_desc = "with score" if self.scoring_mode == ScoringMode.LLM_WITH_SCORE else "without score"
@@ -436,7 +453,6 @@ class Stage3HybridScoring:
                 messages=messages,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                max_tokens=2048,
                 json_mode=True
             )
             

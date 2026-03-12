@@ -4,9 +4,8 @@ Mapping Validation Module
 Validates mapping results using LLM to ensure semantic correctness.
 
 Supports multiple LLM providers via LLMClient:
-- OpenAI (gpt-4o-mini, etc.)
-- SNUH Hari (snuh/hari-q3-14b)
-- Google Gemma (google/gemma-3-12b-it)
+- OpenAI (gpt-5-mini-2025-08-07, etc.)
+- Together AI serverless models
 """
 
 import json
@@ -29,8 +28,13 @@ class MappingValidator:
         self,
         es_client=None,
         llm_client: Optional[LLMClient] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_base_url: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
         temperature: Optional[float] = None,
-        top_p: Optional[float] = None
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Initialize validator.
@@ -45,10 +49,18 @@ class MappingValidator:
         self.temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
         self.top_p = top_p if top_p is not None else self.DEFAULT_TOP_P
         
-        # LLM client (supports OpenAI, Hari, Gemma)
+        # LLM client (supports OpenAI and Together)
         self.llm_client = llm_client
         if self.llm_client is None:
-            self.llm_client = get_llm_client()
+            self.llm_client = get_llm_client(
+                provider=llm_provider,
+                model=llm_model,
+                base_url=llm_base_url,
+                api_key=llm_api_key,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                max_tokens=max_tokens,
+            )
         
         if self.llm_client.is_initialized:
             llm_info = self.llm_client.get_info()
@@ -128,7 +140,6 @@ class MappingValidator:
                 messages=messages,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                max_tokens=256,
                 json_mode=True
             )
             
