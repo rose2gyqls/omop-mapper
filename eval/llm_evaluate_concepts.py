@@ -3,9 +3,9 @@
 MapOMOP 매핑 결과 LLM 기반 정확도 평가
 
 evaluation_blind_test_결과.xlsx의 각 unique concept에 대해 LLM으로 점수를 부여합니다.
-- 0: 부정확 (entity와 concept이 관련 없거나 잘못된 매핑)
-- 1: 일부정확 (부분적으로 관련 있으나 완전히 일치하지 않음)
-- 2: 매우정확 (의학적으로 완전히 일치)
+
+[기본 3단계] 0: 부정확, 1: 일부정확, 2: 매우정확
+[Drug 4단계] 0: 부정확, 0.5: 약간관련, 1: 일부정확, 2: 매우정확
 
 Usage:
     python eval/llm_evaluate_concepts.py
@@ -55,6 +55,28 @@ domain_id: {domain_id}
 각 concept에 대해 0, 1, 2 중 하나의 점수를 부여한 JSON 객체를 반환해 주세요.
 예: {{"concept_name(id)": 2, "another_concept(id)": 1}}"""
 
+# Drug 도메인: 4단계 (2, 1, 0.5, 0)
+DRUG_SYSTEM_PROMPT = """당신은 의료 용어 매핑 평가 전문가입니다.
+Drug(약물) 도메인의 OMOP CDM 표준 용어로의 매핑 정확도를 평가해 주세요.
+
+평가 기준 (4단계):
+- 2 (매우정확): entity_name과 concept이 의학적으로 완전히 일치합니다. 동의어이거나 동일한 의미입니다.
+- 1 (일부정확): entity_name과 concept이 부분적으로 관련되어 있으나, 완전히 일치하지는 않습니다. 상위/하위 개념 관계이거나 일부 의미가 겹칩니다.
+- 0.5 (약간관련): entity_name과 concept이 약간의 관련은 있으나, 의미적 거리가 있습니다.
+- 0 (부정확): entity_name과 concept이 관련이 없거나 잘못된 매핑입니다.
+
+반드시 JSON 형식으로만 응답하세요. 각 concept 문자열을 키로, 점수(0, 0.5, 1, 2)를 값으로 사용합니다."""
+
+DRUG_USER_PROMPT_TEMPLATE = """다음 entity_name(Drug 도메인)에 대해, MapOMOP 모델이 매핑한 concept들의 정확도를 평가해 주세요.
+
+entity_name: {entity_name}
+
+평가할 concepts:
+{concepts_list}
+
+각 concept에 대해 0, 0.5, 1, 2 중 하나의 점수를 부여한 JSON 객체를 반환해 주세요.
+예: {{"concept_name(id)": 2, "another_concept(id)": 0.5}}"""
+
 
 def parse_concept_columns(df: pd.DataFrame) -> list[str]:
     """concept1, concept2, ... 컬럼명 추출"""
@@ -71,14 +93,34 @@ def extract_concepts_from_row(row: pd.Series, concept_cols: list[str]) -> list[s
     return concepts
 
 
-def parse_llm_scores(response: str, concepts: list[str]) -> dict[str, int]:
+def _normalize_score(v: float, allow_half: bool = False) -> float | int:
+    """점수 정규화. allow_half=True면 0.5 허용 (Drug)."""
+    if not isinstance(v, (int, float)):
+        return -1
+    v = float(v)
+    if v < 0:
+        return -1
+    if allow_half:
+        # Drug: 0, 0.5, 1, 2
+        if v <= 0.25:
+            return 0
+        if v <= 0.75:
+            return 0.5
+        if v <= 1.5:
+            return 1
+        return 2
+    else:
+        return max(0, min(2, int(round(v))))
+
+
+def parse_llm_scores(response: str, concepts: list[str], domain_id: str = "") -> dict[str, float | int]:
     """
     LLM 응답에서 concept별 점수 파싱.
-    concepts 리스트와 매칭하여 점수 반환. 매칭 실패 시 -1.
+    Drug 도메인: 0, 0.5, 1, 2. 그 외: 0, 1, 2.
     """
-    scores: dict[str, int] = {}
+    scores: dict[str, float | int] = {}
+    allow_half = str(domain_id).strip() == "Drug"
     try:
-        # JSON 블록 추출 (```json ... ``` 또는 {...})
         text = response.strip()
         json_match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
         if json_match:
@@ -87,22 +129,15 @@ def parse_llm_scores(response: str, concepts: list[str]) -> dict[str, int]:
             obj = json.loads(text)
 
         for c in concepts:
-            # 정확한 키 매칭 시도
             if c in obj:
-                v = obj[c]
-                if isinstance(v, (int, float)):
-                    scores[c] = max(0, min(2, int(v)))
-                else:
-                    scores[c] = -1
+                v = _normalize_score(obj[c], allow_half)
+                scores[c] = v if v >= 0 else -1
             else:
-                # 부분 매칭 (concept 이름만)
                 found = False
                 for k, v in obj.items():
                     if k in c or c in k:
-                        if isinstance(v, (int, float)):
-                            scores[c] = max(0, min(2, int(v)))
-                        else:
-                            scores[c] = -1
+                        vn = _normalize_score(v, allow_half)
+                        scores[c] = vn if vn >= 0 else -1
                         found = True
                         break
                 if not found:
@@ -119,20 +154,31 @@ def evaluate_row(
     entity_name: str,
     domain_id: str,
     concepts: list[str],
-) -> dict[str, int]:
-    """한 entity의 concept들에 대해 LLM 평가 수행"""
+) -> dict[str, float | int]:
+    """한 entity의 concept들에 대해 LLM 평가 수행. Drug 도메인은 4단계(2,1,0.5,0)."""
     if not concepts:
         return {}
 
     concepts_list = "\n".join(f"- {c}" for c in concepts)
-    prompt = USER_PROMPT_TEMPLATE.format(
-        entity_name=entity_name,
-        domain_id=domain_id,
-        concepts_list=concepts_list,
-    )
+    is_drug = str(domain_id).strip() == "Drug"
+
+    if is_drug:
+        system_prompt = DRUG_SYSTEM_PROMPT
+        user_prompt = DRUG_USER_PROMPT_TEMPLATE.format(
+            entity_name=entity_name,
+            concepts_list=concepts_list,
+        )
+    else:
+        system_prompt = SYSTEM_PROMPT
+        user_prompt = USER_PROMPT_TEMPLATE.format(
+            entity_name=entity_name,
+            domain_id=domain_id,
+            concepts_list=concepts_list,
+        )
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
     ]
     response = llm_client.chat_completion(
         messages=messages,
@@ -142,7 +188,7 @@ def evaluate_row(
     )
     if not response:
         return {c: -1 for c in concepts}
-    return parse_llm_scores(response, concepts)
+    return parse_llm_scores(response, concepts, domain_id)
 
 
 def run_evaluation(
@@ -167,7 +213,7 @@ def run_evaluation(
 
     results = []
     total_concepts = 0
-    score_counts = {0: 0, 1: 0, 2: 0, -1: 0}
+    score_counts = {0: 0, 0.5: 0, 1: 0, 2: 0, -1: 0}
 
     for i, row in enumerate(rows):
         entity_name = str(row.get("entity_name", "")).strip()
@@ -210,7 +256,9 @@ def run_evaluation(
     if valid > 0:
         acc_2 = score_counts.get(2, 0) / valid * 100
         acc_1_or_2 = (score_counts.get(1, 0) + score_counts.get(2, 0)) / valid * 100
-        weighted = (score_counts.get(2, 0) * 2 + score_counts.get(1, 0) * 1) / (valid * 2) * 100
+        # 가중평균: 2→100%, 1→50%, 0.5→25%, 0→0%
+        w_sum = score_counts.get(2, 0) * 2 + score_counts.get(1, 0) * 1 + score_counts.get(0.5, 0) * 0.5
+        weighted = w_sum / (valid * 2) * 100
     else:
         acc_2 = acc_1_or_2 = weighted = 0.0
 
@@ -220,6 +268,8 @@ def run_evaluation(
     logger.info(f"총 평가 concept 수: {total_concepts}")
     logger.info(f"  - 매우정확(2): {score_counts.get(2, 0)}")
     logger.info(f"  - 일부정확(1): {score_counts.get(1, 0)}")
+    if score_counts.get(0.5, 0) > 0:
+        logger.info(f"  - 약간관련(0.5): {score_counts.get(0.5, 0)}")
     logger.info(f"  - 부정확(0):   {score_counts.get(0, 0)}")
     logger.info(f"  - 파싱실패(-1): {score_counts.get(-1, 0)}")
     logger.info("-" * 60)

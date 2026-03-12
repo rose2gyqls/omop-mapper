@@ -16,6 +16,8 @@ import argparse
 import functools
 import sys
 import time
+
+import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -79,9 +81,10 @@ def _worker_init(
 def _map_single_task(task, capture_logs: bool = False):
     """단일 엔티티 매핑 (worker에서 실행, pickle 가능한 인자만 사용).
     capture_logs=True: API 로그를 캡처해 (test_index, result, log_lines) 반환.
+    task: (row_idx, test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col)
     """
     global _worker_api
-    (test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col) = task
+    (row_idx, test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col) = task
     domain_id = DOMAIN_MAP.get(domain_str) if domain_str else None
     entity_input = EntityInput(
         entity_name=entity_name,
@@ -114,21 +117,24 @@ def _map_single_task(task, capture_logs: bool = False):
         result = {
                 "test_index": test_index,
                 "id": record_id,
-                id_col: record_id,
                 "entity_name": entity_name,
                 "input_domain": domain_id.value if domain_id else "All",
-                "ground_truth_concept_id": ground_truth,
-                "ground_truth_concept_name": ground_truth_concept_name,
-                "success": mapping_results is not None and len(mapping_results) > 0,
-                "mapping_correct": mapping_correct,
-                "best_result_domain": best.domain_id if best else None,
-                "best_concept_id": best.mapped_concept_id if best else None,
-                "best_concept_name": best.mapped_concept_name if best else None,
-                "best_score": best.mapping_score if best else 0.0,
-                "stage1_candidates": stage1,
-                "stage2_candidates": stage2,
-                "stage3_candidates": stage3,
-            }
+        }
+        if id_col != "test_index":
+            result[id_col] = record_id
+        result.update({
+            "ground_truth_concept_id": ground_truth,
+            "ground_truth_concept_name": ground_truth_concept_name,
+            "success": mapping_results is not None and len(mapping_results) > 0,
+            "mapping_correct": mapping_correct,
+            "best_result_domain": best.domain_id if best else None,
+            "best_concept_id": best.mapped_concept_id if best else None,
+            "best_concept_name": best.mapped_concept_name if best else None,
+            "best_score": best.mapping_score if best else 0.0,
+            "stage1_candidates": stage1,
+            "stage2_candidates": stage2,
+            "stage3_candidates": stage3,
+        })
         if capture_logs:
             h = handlers_added[0][1]
             for log, _ in handlers_added:
@@ -142,24 +148,25 @@ def _map_single_task(task, capture_logs: bool = False):
             for log, _ in handlers_added:
                 log.removeHandler(h)
         result = {
-                "test_index": test_index,
-                "id": record_id,
-                id_col: record_id,
-                "entity_name": entity_name,
-                "input_domain": "All",
-                "ground_truth_concept_id": ground_truth,
-                "ground_truth_concept_name": ground_truth_concept_name,
-                "success": False,
-                "mapping_correct": False,
-                "best_result_domain": None,
-                "best_concept_id": None,
-                "best_concept_name": None,
-                "best_score": 0.0,
-                "stage1_candidates": [],
-                "stage2_candidates": [],
-                "stage3_candidates": [],
-                "error": str(e),
-            }
+            "test_index": test_index,
+            "id": record_id,
+            "entity_name": entity_name,
+            "input_domain": "All",
+            "ground_truth_concept_id": ground_truth,
+            "ground_truth_concept_name": ground_truth_concept_name,
+            "success": False,
+            "mapping_correct": False,
+            "best_result_domain": None,
+            "best_concept_id": None,
+            "best_concept_name": None,
+            "best_score": 0.0,
+            "stage1_candidates": [],
+            "stage2_candidates": [],
+            "stage3_candidates": [],
+            "error": str(e),
+        }
+        if id_col != "test_index":
+            result[id_col] = record_id
         if capture_logs:
             return (test_index, result, log_lines)
         return (test_index, result)
@@ -257,47 +264,48 @@ def run_mapping(
             for idx, row in df.iterrows():
                 entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
                 domain_str = domain_id.value if domain_id else None
-                tasks.append((idx + 1, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col))
+                # SNOMED: CSV의 test_index 사용, 그 외: 행 인덱스+1
+                csv_test_index = int(row["test_index"]) if "test_index" in df.columns and pd.notna(row.get("test_index")) else (idx + 1)
+                tasks.append((idx, csv_test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col))
 
             completed = 0
+            log_buffer = {}  # row_idx -> log_lines (완료 순서가 아닌 엔티티 순서로 저장)
             map_task = functools.partial(_map_single_task, capture_logs=True)
             with ProcessPoolExecutor(
                 max_workers=workers,
                 initializer=_worker_init,
                 initargs=(scoring_mode, use_validation, str(log_file), True),
             ) as ex:
-                future_to_idx = {ex.submit(map_task, t): t[0] for t in tasks}
+                future_to_row_idx = {ex.submit(map_task, t): t[0] for t in tasks}
                 indexed_results = [None] * len(tasks)
                 with tqdm(total=len(tasks), desc="매핑", unit="건") as pbar:
-                    for future in as_completed(future_to_idx):
-                        test_index = future_to_idx[future]
+                    for future in as_completed(future_to_row_idx):
+                        row_idx = future_to_row_idx[future]
                         try:
                             ret = future.result()
                             if len(ret) == 3:
                                 _, r, log_lines = ret
                                 if log_lines:
-                                    with open(log_file, "a", encoding="utf-8") as f:
-                                        for line in log_lines:
-                                            f.write(line + "\n")
+                                    log_buffer[row_idx] = log_lines
                             else:
                                 _, r = ret
-                            indexed_results[test_index - 1] = r
+                            indexed_results[row_idx] = r
                             completed += 1
                             if completed <= 5:
                                 status = "정답" if r.get("mapping_correct") else ("오답" if r.get("success") else "실패")
-                                logger.info(f"#{test_index} {r['entity_name']}: {status}")
+                                logger.info(f"#{r.get('test_index')} {r['entity_name']}: {status}")
                             pbar.update(1)
                         except Exception as e:
+                            task = tasks[row_idx]
+                            test_index = task[1]
                             logger.error(f"#{test_index} Worker 예외: {e}")
-                            task = tasks[test_index - 1]
-                            indexed_results[test_index - 1] = {
+                            indexed_results[row_idx] = {
                                 "test_index": test_index,
-                                "id": task[3],
-                                id_col: task[3],
-                                "entity_name": task[1],
-                                "input_domain": task[2] or "All",
-                                "ground_truth_concept_id": task[4],
-                                "ground_truth_concept_name": task[5],
+                                "id": task[4],
+                                "entity_name": task[2],
+                                "input_domain": task[3] or "All",
+                                "ground_truth_concept_id": task[5],
+                                "ground_truth_concept_name": task[6],
                                 "success": False,
                                 "mapping_correct": False,
                                 "best_result_domain": None,
@@ -310,6 +318,16 @@ def run_mapping(
                                 "error": str(e),
                             }
                             pbar.update(1)
+                # 로그: 엔티티 순서(row_idx)대로 파일에 기록
+                if log_buffer:
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        for row_idx in range(len(tasks)):
+                            if row_idx in log_buffer:
+                                r = indexed_results[row_idx]
+                                if r:
+                                    f.write(f"\n{'='*60} Entity #{r.get('test_index')}: {r.get('entity_name', 'N/A')} {'='*60}\n")
+                                for line in log_buffer[row_idx]:
+                                    f.write(line + "\n")
             results = [r for r in indexed_results if r is not None]
         else:
             # 순차 처리 (workers == 1)
@@ -322,6 +340,9 @@ def run_mapping(
             for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
                 try:
                     entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
+                    # SNOMED: CSV의 test_index 사용, 그 외: 행 인덱스+1
+                    csv_test_index = int(row["test_index"]) if "test_index" in df.columns and pd.notna(row.get("test_index")) else (idx + 1)
+
                     entity_input = EntityInput(
                         entity_name=entity_name,
                         domain_id=domain_id,
@@ -346,9 +367,8 @@ def run_mapping(
                             pass
 
                     r = {
-                        "test_index": idx + 1,
+                        "test_index": csv_test_index,
                         "id": record_id,
-                        id_col: record_id,
                         "entity_name": entity_name,
                         "input_domain": domain_id.value if domain_id else "All",
                         "ground_truth_concept_id": ground_truth,
@@ -367,16 +387,16 @@ def run_mapping(
 
                     if idx < 5:
                         status = "정답" if mapping_correct else ("오답" if r["success"] else "실패")
-                        logger.info(f"#{idx + 1} {entity_name}: {status}")
+                        logger.info(f"#{csv_test_index} {entity_name}: {status}")
 
                 except Exception as e:
-                    logger.error(f"#{idx + 1} 오류: {e}")
+                    csv_test_index = int(row["test_index"]) if "test_index" in df.columns and pd.notna(row.get("test_index")) else (idx + 1)
+                    logger.error(f"#{csv_test_index} 오류: {e}")
                     entity_col = "source_name" if data_type == "snuh" else "entity_name"
-                    rid = str(row.get(id_col, "N/A"))
+                    rid = str(row.get("row_id", row.get("note_id", "N/A")))
                     results.append({
-                        "test_index": idx + 1,
+                        "test_index": csv_test_index,
                         "id": rid,
-                        id_col: rid,
                         "entity_name": str(row.get(entity_col, "")),
                         "input_domain": "All",
                         "ground_truth_concept_id": None,
