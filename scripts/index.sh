@@ -11,6 +11,10 @@
 #   ./scripts/index.sh local_csv --tables concept-small synonym
 #   ./scripts/index.sh local_csv --tables concept-small   # concept-small만
 #
+# ── 기존 concept-relationship에 'Is a' 관계만 추가 (기존 데이터 삭제 없음) ──
+#   ./scripts/index.sh local_csv --add-isa
+#   ./scripts/index.sh postgres --add-isa
+#
 # ── 끊긴 뒤 재시작 (Checkpoint 기반) ──
 #   ./scripts/index.sh local_csv --resume                 # Checkpoint에서 마지막 성공 위치 읽어서 재개
 #   ./scripts/index.sh local_csv --resume --tables synonym
@@ -43,7 +47,7 @@ cd "$PROJECT_ROOT"
 # ============================================================================
 # 설정 (필요시 수정)
 # ============================================================================
-DATA_FOLDER="${DATA_FOLDER:-/workspace/omop-mapper/data/omop-cdm}"
+DATA_FOLDER="${DATA_FOLDER:-/Users/rose/omop-mapper/data/omop-cdm}"
 
 # ============================================================================
 # 메인 로직
@@ -70,8 +74,12 @@ fi
 # 데이터 소스 확인 (첫 번째 인자 또는 기본값)
 SOURCE_TYPE="${1:-local_csv}"
 
-# local_csv인 경우 CONCEPT_SMALL.csv 생성
-if [[ "$SOURCE_TYPE" == "local_csv" ]]; then
+# --add-isa: CONCEPT_SMALL 불필요 (CONCEPT_RELATIONSHIP만 사용)
+ADD_ISA=false
+for arg in "$@"; do [[ "$arg" == "--add-isa" ]] && ADD_ISA=true && break; done
+
+# local_csv인 경우 CONCEPT_SMALL.csv 생성 (--add-isa 모드에서는 스킵)
+if [[ "$SOURCE_TYPE" == "local_csv" && "$ADD_ISA" != "true" ]]; then
     CONCEPT_SMALL_PATH="$DATA_FOLDER/CONCEPT_SMALL.csv"
     
     echo ""
@@ -89,6 +97,10 @@ if [[ "$SOURCE_TYPE" == "local_csv" ]]; then
     
     echo ""
     echo "[Step 2/2] Elasticsearch 인덱싱"
+    echo "--------------------------------------------"
+elif [[ "$SOURCE_TYPE" == "local_csv" && "$ADD_ISA" == "true" ]]; then
+    echo ""
+    echo "[Step] concept-relationship에 'Is a' 관계 추가"
     echo "--------------------------------------------"
 else
     echo ""

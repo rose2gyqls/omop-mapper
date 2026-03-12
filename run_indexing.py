@@ -19,6 +19,10 @@ Usage:
     python run_indexing.py local_csv --resume
     python run_indexing.py local_csv --resume --tables synonym
     
+    # 기존 concept-relationship 인덱스에 'Is a' 관계만 추가 (기존 데이터 삭제 없음)
+    python run_indexing.py local_csv --add-isa
+    python run_indexing.py postgres --add-isa
+    
     # 429 완화 (bulk 요청 간 대기)
     python run_indexing.py local_csv --resume --bulk-delay 1
 """
@@ -43,7 +47,7 @@ DEFAULT_TABLES = ['concept-small', 'synonym', 'relationship']
 # ----------------------------------------------------------------------------
 # Local CSV 설정
 # ----------------------------------------------------------------------------
-DEFAULT_DATA_FOLDER = '/workspace/omop-mapper/data/omop-cdm'
+DEFAULT_DATA_FOLDER = '/Users/rose/omop-mapper/data/omop-cdm'
 
 # ----------------------------------------------------------------------------
 # PostgreSQL 설정
@@ -121,6 +125,9 @@ def parse_args():
         help='끊긴 부분부터 재개: Checkpoint 파일(.indexing_checkpoint.json)에서 '
              '마지막 성공 위치를 읽고, 그 다음 행부터 이어서 인덱싱. '
              '기존 인덱스 유지, 멱등한 _id로 중복 없음.')
+    parser.add_argument('--add-isa', action='store_true',
+        help="기존 concept-relationship 인덱스에 'Is a' 관계만 추가. "
+             "기존 데이터는 절대 삭제하지 않음.")
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE,
         help=f'임베딩 배치 크기 (기본: {DEFAULT_BATCH_SIZE})')
     parser.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE,
@@ -177,7 +184,9 @@ def main():
     print(f"Elasticsearch: {args.es_host}:{args.es_port}")
     print(f"GPU: {args.gpu}")
     print(f"임베딩: {'비활성화' if args.no_embeddings else '활성화'}")
-    if args.resume:
+    if args.add_isa:
+        print(f"모드: ADD-ISA (기존 concept-relationship에 'Is a' 관계만 추가, 기존 데이터 유지)")
+    elif args.resume:
         print(f"모드: RESUME (Checkpoint 기반 재개)")
     else:
         print(f"모드: FRESH (새로 인덱싱)")
@@ -193,8 +202,8 @@ def main():
         if args.source_type == 'local_csv':
             print(f"\n데이터 폴더: {args.data_folder}")
             
-            # concept-small 전처리
-            if 'concept-small' in args.tables:
+            # concept-small 전처리 (--add-isa 모드에서는 스킵)
+            if 'concept-small' in args.tables and not args.add_isa:
                 print("\n[1/2] CONCEPT_SMALL.csv 확인 중...")
                 from prepare_concept_small import create_concept_small
                 
@@ -241,11 +250,16 @@ def main():
             bulk_delay_sec=args.bulk_delay
         )
         
-        results = indexer.index_all(
-            delete_existing=not args.resume,
-            max_rows=args.max_rows,
-            tables=args.tables
-        )
+        if args.add_isa:
+            # 기존 concept-relationship에 'Is a' 관계만 추가 (기존 데이터 삭제 없음)
+            success = indexer.index_relationships_isa_only(max_rows=args.max_rows)
+            results = {'relationship(Is a 추가)': success}
+        else:
+            results = indexer.index_all(
+                delete_existing=not args.resume,
+                max_rows=args.max_rows,
+                tables=args.tables
+            )
         
         # 3. 결과 출력
         print("\n" + "=" * 70)

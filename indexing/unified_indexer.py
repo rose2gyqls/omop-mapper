@@ -565,6 +565,97 @@ class UnifiedIndexer:
             self.logger.error(traceback.format_exc())
             return False
     
+    def index_relationships_isa_only(
+        self,
+        max_rows: Optional[int] = None,
+        skip_rows: int = 0
+    ) -> bool:
+        """
+        기존 concept-relationship 인덱스에 'Is a' 관계만 추가 인덱싱.
+        기존 데이터는 절대 삭제하지 않음 (delete_existing=False 고정).
+        """
+        table_key = 'relationship'
+        ISA_RELATIONSHIP_IDS = {'Is a'}
+        
+        self.logger.info("=" * 60)
+        self.logger.info("Adding 'Is a' relationships to concept-relationship (기존 데이터 유지)")
+        self.logger.info("=" * 60)
+        
+        start_time = time.time()
+        
+        try:
+            indexer = self._get_indexer('relationship')
+            
+            # 기존 인덱스 절대 삭제하지 않음
+            if not indexer.create_index(delete_if_exists=False):
+                self.logger.error("Failed to create/access index")
+                return False
+            
+            total = self.data_source.get_relationship_count()
+            actual_max = min(max_rows or total, total - skip_rows)
+            
+            if actual_max <= 0:
+                self.logger.info(f"RELATIONSHIP(Is a): 처리할 행 없음 (total={total:,}, skip={skip_rows:,})")
+                return True
+            
+            self.logger.info(f"Total records: {total:,}")
+            self.logger.info(f"Processing: {actual_max:,} (skip: {skip_rows:,})")
+            self.logger.info(f"Filtering: {ISA_RELATIONSHIP_IDS} only (추가 인덱싱)")
+            
+            processed = 0
+            indexed = 0
+            filtered_out = 0
+            
+            rel_chunk_size = self.chunk_size * 10
+            
+            with tqdm(total=actual_max, desc="RELATIONSHIP(Is a)", unit="rows") as pbar:
+                for chunk in self.data_source.read_relationships(
+                    chunk_size=rel_chunk_size,
+                    skip_rows=skip_rows,
+                    max_rows=actual_max
+                ):
+                    if len(chunk) == 0:
+                        continue
+                    
+                    orig_len = len(chunk)
+                    chunk = chunk[chunk['relationship_id'].isin(ISA_RELATIONSHIP_IDS)]
+                    filtered_out += (orig_len - len(chunk))
+                    if len(chunk) == 0:
+                        processed += orig_len
+                        pbar.update(orig_len)
+                        continue
+                    
+                    docs = self.data_source.to_es_relationships(chunk)
+                    is_last = (processed + orig_len) >= actual_max
+                    if indexer.index_documents(
+                        docs,
+                        show_progress=False,
+                        refresh=is_last,
+                        bulk_delay_sec=self.bulk_delay_sec
+                    ):
+                        indexed += len(docs)
+                        processed += orig_len
+                        pbar.update(orig_len)
+                    else:
+                        self.logger.error(
+                            f"RELATIONSHIP(Is a): Chunk failed at offset {skip_rows + processed}"
+                        )
+                        return False
+            
+            elapsed = time.time() - start_time
+            
+            self.logger.info(f"CONCEPT_RELATIONSHIP 'Is a' 추가 완료")
+            self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}, Filtered out: {filtered_out:,}")
+            self.logger.info(f"Time: {elapsed/60:.1f} min, Speed: {processed/elapsed:.1f} rows/sec")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"CONCEPT_RELATIONSHIP 'Is a' 추가 실패: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+    
     def index_synonyms(
         self,
         delete_existing: bool = True,
@@ -756,7 +847,7 @@ def create_data_source(source_type: str, **kwargs) -> BaseDataSource:
             synonym_file=kwargs.get('synonym_file', 'CONCEPT_SYNONYM.csv'),
             concept_small_file=kwargs.get('concept_small_file', 'CONCEPT_SMALL.csv'),
             delimiter=kwargs.get('delimiter', '\t'),
-            relationship_delimiter=kwargs.get('relationship_delimiter', ',')
+            relationship_delimiter=kwargs.get('relationship_delimiter', '\t')
         )
     
     elif source_type == 'postgres':

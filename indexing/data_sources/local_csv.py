@@ -26,7 +26,7 @@ class LocalCSVDataSource(BaseDataSource):
         synonym_file: str = "CONCEPT_SYNONYM.csv",
         concept_small_file: str = "CONCEPT_SMALL.csv",
         delimiter: str = "\t",
-        relationship_delimiter: Optional[str] = ","
+        relationship_delimiter: Optional[str] = "\t"
     ):
         """
         Initialize local CSV data source.
@@ -38,8 +38,8 @@ class LocalCSVDataSource(BaseDataSource):
             synonym_file: CONCEPT_SYNONYM file name
             concept_small_file: CONCEPT_SMALL file name (merged concept + synonym)
             delimiter: CSV delimiter (default: tab)
-            relationship_delimiter: Delimiter for CONCEPT_RELATIONSHIP file (default: comma).
-                Use '\t' if your relationship file is tab-separated.
+            relationship_delimiter: Delimiter for CONCEPT_RELATIONSHIP file (default: tab).
+                Use ',' if your relationship file is comma-separated.
         """
         super().__init__(DataSourceType.LOCAL_CSV)
         

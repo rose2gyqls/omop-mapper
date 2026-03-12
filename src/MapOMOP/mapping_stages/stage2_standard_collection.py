@@ -30,7 +30,8 @@ class Stage2StandardCollection:
         'Marketed form of',
         'Tradename of',
         'Box of',
-        'Has quantified form'
+        'Has quantified form',
+        'Is a'
     ]
     
     def __init__(self, es_client):
