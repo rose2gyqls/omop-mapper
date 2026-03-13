@@ -25,8 +25,8 @@ DATA_SOURCES = {
     "snuh": {
         "csv_path": str(PROJECT_ROOT / "data" / "snuh-baseline-mapping-data.csv"),
         "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
-        "filter_domains": ["Procedure"],  # 이 도메인만 로드 (domains와 동일하게 설정)
-        "domains": ["Procedure"],
+        "filter_domains": ["Drug"],  # 이 도메인만 로드 (domains와 동일하게 설정)
+        "domains": ["Drug"],
         "id_col": "row_id",
         "loader": "load_snuh_data",
         "row_to_input": "snuh_row_to_input",

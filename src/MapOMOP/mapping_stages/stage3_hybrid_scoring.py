@@ -65,18 +65,36 @@ USER_PROMPT_TEMPLATE = """
     1% = 1 g / 100 ml = 10 mg/ml
     therefore X% = X x 10 mg/ml (e.g., 2% = 20 mg/ml),
     total dose / volume = concentration (e.g., 4 mg/2 ml = 2 mg/ml).
+    Additional normalization rule for dose/volume notation:
+    Expressions written as "X mg / Y mL" encode BOTH total dose and concentration.
+    Example:
+    5 mg / 1 mL → total dose = 5 mg, volume = 1 mL, concentration = 5 mg/mL
     After normalization, if quantitative meaning is identical, they MUST be treated as Equivalent. Do NOT compare raw numeric strings without unit conversion.
   b) THEN, compare ALL specifications
     eg. active ingredient + normalized strength + form + volume.
     eg. anotomic site + view
   c) A candidate matching ALL specifications to entity MUST score higher than one that omits volume (omitting = broader/parent).
+   If the entity specifies total volume (explicitly or via X mg/Y mL notation), a candidate omitting volume is a Parent concept, not Equivalent.
   d) Manufacturer/brand names and packaging info (e.g., "by Hospira", "box of 5")
     are ADDITIONAL details. A candidate with such extras is a child candidate and MUST score LOWER than
     the equivalent unbranded/unpackaged candidate.
     Prefer the candidate WITHOUT brand or packaging information when core specifications are identical (branded versions are child concepts due to added attributes).
+    Device specifications (e.g., prefilled syringe, vial, cartridge, pen) are additional attributes and therefore represent Child concepts.
     e) Compare quantitative MEANING after normalization — not raw numbers.
      Same number IS NOT same meaning (e.g., 2% IS NOT 2 mL).
      Convert to comparable units (e.g., %, mg/mL) and check if the clinical quantity is identical.
+
+- Procedure concepts must also be compared using defining attributes such as:
+  procedure method, body site, laterality, imaging modality, and imaging view.
+
+- Extra clinical specification = Child concept.
+  Missing clinical specification = Parent concept.
+
+- For imaging procedures, view/projection is a defining attribute.
+  If a candidate introduces an additional imaging view not present in the entity
+  (e.g., PA + lateral vs lateral),
+  the candidate is a Child (Narrower) concept.
+
 
 ### Decision Process (STRICT HIERARCHY LOCK — ENHANCED)
 
