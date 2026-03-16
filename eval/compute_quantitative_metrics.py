@@ -17,6 +17,11 @@ MapOMOP 정량평가 테이블 생성
 
 Usage:
     python eval/compute_quantitative_metrics.py
+
+Note:
+    점수매트릭스 시트에서 특정 run 열이 전부 비어 있으면, 해당 run의 매핑 JSON에서
+    best_concept_id가 None인 경우입니다. (예: mapping_snuh_drug_merged.json Run 8)
+    매핑 파이프라인을 해당 run에 대해 재실행해야 합니다.
 """
 
 from __future__ import annotations
@@ -214,16 +219,33 @@ def compute_metrics(
         d = domain_data[domain]
         raw_list = d["raw_scores"]
         m = _compute_domain_metrics(raw_list, domain)
-        row = {
-            "Scope": domain,
-            "엔티티 수": len(d["entity_ids"]),
-            "총 점수 수": len(raw_list),
-            "Acc_2만(%)": round(m["acc_2"], 2),
-            "가중평균(%)": round(m["weighted"], 2),
-        }
         if domain == DRUG_DOMAIN and m["acc_2_1"] is not None:
-            row["Acc_2+1(%)"] = round(m["acc_2_1"], 2)
-        table_rows.append(row)
+            # Drug: 2개 행으로 분리 (2 vs 1+0.5+0) / (2+1 vs 0.5+0)
+            table_rows.append({
+                "Scope": "Drug (2 vs 1+0.5+0)",
+                "엔티티 수": len(d["entity_ids"]),
+                "총 점수 수": len(raw_list),
+                "Acc_2만(%)": round(m["acc_2"], 2),
+                "Acc_2+1(%)": "",
+                "가중평균(%)": round(m["weighted"], 2),
+            })
+            table_rows.append({
+                "Scope": "Drug (2+1 vs 0.5+0)",
+                "엔티티 수": len(d["entity_ids"]),
+                "총 점수 수": len(raw_list),
+                "Acc_2만(%)": "",
+                "Acc_2+1(%)": round(m["acc_2_1"], 2),
+                "가중평균(%)": round(m["weighted"], 2),
+            })
+        else:
+            row = {
+                "Scope": domain,
+                "엔티티 수": len(d["entity_ids"]),
+                "총 점수 수": len(raw_list),
+                "Acc_2만(%)": round(m["acc_2"], 2),
+                "가중평균(%)": round(m["weighted"], 2),
+            }
+            table_rows.append(row)
 
     # Acc_2+1 컬럼 통일 (Drug 없으면 빈 열)
     if has_drug:
@@ -291,7 +313,7 @@ def main():
     parser = argparse.ArgumentParser(description="MapOMOP 정량평가 테이블 생성")
     parser.add_argument(
         "--json", "-j",
-        default=str(_root / "test_logs" / "mapping_snomed_20260311_150447.json"),
+        default=str(_root / "test_logs" / "SNUH/mapping_snuh_drug_merged.json"),
         help="매핑 결과 JSON",
     )
     parser.add_argument(
