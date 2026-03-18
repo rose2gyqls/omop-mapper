@@ -247,6 +247,17 @@ omop-mapper/
 
 ## Troubleshooting
 
+### Render Python version mismatch
+
+Render now defaults new Python services to newer versions unless you pin one explicitly. This repository includes a `.python-version` file with `3.11.11` so native deploys use a wheel-friendly version for the current dependency set.
+
+If Render still tries to build `scipy` or `scikit-learn` from source:
+
+1. Confirm the service runtime is `Python`
+2. Confirm `PYTHON_VERSION=3.11.11` is set in Render
+3. Redeploy after pulling the latest commit so Render sees the new `.python-version`
+4. Clear the build cache before retrying if the old build image is still being reused
+
 ### Missing configuration
 
 If the app says configuration is missing:
