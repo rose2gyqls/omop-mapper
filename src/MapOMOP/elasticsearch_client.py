@@ -10,19 +10,28 @@ import os
 from typing import Any, Dict, List, Optional
 
 from elasticsearch import Elasticsearch
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+load_dotenv(override=False)
+
+
+def _parse_port(raw_port: Optional[str], default: int) -> int:
+    if raw_port is None:
+        return default
+    try:
+        return int(raw_port)
+    except ValueError:
+        logger.warning("Invalid ES_SERVER_PORT '%s'; using default %s", raw_port, default)
+        return default
 
 
 class ElasticsearchClient:
     """Elasticsearch client for OMOP CDM data."""
-    
-    # Default configuration
-    DEFAULT_HOST = "3.35.110.161"
+
     DEFAULT_PORT = 9200
-    DEFAULT_USER = "elastic"
-    DEFAULT_PASSWORD = "snomed"
-    
+
     # Index names
     CONCEPT_INDEX = "concept-small"
     SYNONYM_INDEX = "concept-synonym"
@@ -48,11 +57,15 @@ class ElasticsearchClient:
             use_ssl: Whether to use SSL
             timeout: Request timeout in seconds
         """
-        self.host = host or os.getenv('ES_SERVER_HOST', self.DEFAULT_HOST)
-        self.port = port or int(os.getenv('ES_SERVER_PORT', str(self.DEFAULT_PORT)))
-        self.username = username or os.getenv('ES_SERVER_USERNAME', self.DEFAULT_USER)
-        self.password = password or os.getenv('ES_SERVER_PASSWORD', self.DEFAULT_PASSWORD)
-        self.use_ssl = use_ssl
+        env_host = os.getenv("ES_SERVER_HOST")
+        env_port = os.getenv("ES_SERVER_PORT")
+        env_use_ssl = os.getenv("ES_USE_SSL", "").strip().lower()
+
+        self.host = host or (env_host.strip() if env_host else None)
+        self.port = port or _parse_port(env_port, self.DEFAULT_PORT)
+        self.username = username or os.getenv("ES_SERVER_USERNAME")
+        self.password = password or os.getenv("ES_SERVER_PASSWORD")
+        self.use_ssl = use_ssl or env_use_ssl in {"1", "true", "yes", "on"}
         self.timeout = timeout
         
         # Index names (can be overridden)
@@ -67,9 +80,13 @@ class ElasticsearchClient:
             logger.info(f"Elasticsearch client initialized: {self.host}:{self.port}")
         else:
             logger.warning("Elasticsearch client initialization failed")
-    
+
     def _create_client(self) -> Optional[Elasticsearch]:
         """Create Elasticsearch client with retry logic."""
+        if not self.host:
+            logger.error("ES_SERVER_HOST is not configured")
+            return None
+
         scheme = "https" if self.use_ssl else "http"
         url = f"{scheme}://{self.host}:{self.port}"
             
@@ -135,6 +152,11 @@ class ElasticsearchClient:
     def health_check(self) -> Dict[str, Any]:
         """Check cluster health status."""
         if not self.es_client:
+            if not self.host:
+                return {
+                    "status": "disconnected",
+                    "error": "Elasticsearch host is not configured. Set ES_SERVER_HOST in your environment.",
+                }
             return {"status": "disconnected", "error": "Client not initialized"}
         
         try:

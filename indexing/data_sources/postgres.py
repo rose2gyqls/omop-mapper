@@ -5,11 +5,15 @@ Reads OMOP CDM data from PostgreSQL database (internal network CDM).
 """
 
 import logging
+import os
 from typing import Iterator, Optional
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from .base import BaseDataSource, DataSourceType
+
+load_dotenv(override=False)
 
 
 class PostgresDataSource(BaseDataSource):
@@ -17,11 +21,11 @@ class PostgresDataSource(BaseDataSource):
     
     # Default connection settings
     DEFAULT_CONFIG = {
-        'host': '172.23.100.146',
-        'port': '1341',
-        'dbname': 'cdm_public',
-        'user': 'cdmreader',
-        'password': 'scdm2025!@'
+        'host': None,
+        'port': '5432',
+        'dbname': None,
+        'user': None,
+        'password': None
     }
     
     # Default table names
@@ -49,11 +53,11 @@ class PostgresDataSource(BaseDataSource):
         Initialize PostgreSQL data source.
         
         Args:
-            host: Database host (default: 172.23.100.146)
-            port: Database port (default: 1341)
-            dbname: Database name (default: cdm_public)
-            user: Username (default: cdmreader)
-            password: Password (default: scdm2025!@)
+            host: Database host (default: PG_HOST env)
+            port: Database port (default: PG_PORT env or 5432)
+            dbname: Database name (default: PG_DBNAME env)
+            user: Username (default: PG_USER env)
+            password: Password (default: PG_PASSWORD env)
             concept_table: CONCEPT table name (schema.table)
             relationship_table: CONCEPT_RELATIONSHIP table name
             synonym_table: CONCEPT_SYNONYM table name
@@ -62,11 +66,11 @@ class PostgresDataSource(BaseDataSource):
         
         # Connection config
         self.config = {
-            'host': host or self.DEFAULT_CONFIG['host'],
-            'port': port or self.DEFAULT_CONFIG['port'],
-            'dbname': dbname or self.DEFAULT_CONFIG['dbname'],
-            'user': user or self.DEFAULT_CONFIG['user'],
-            'password': password or self.DEFAULT_CONFIG['password']
+            'host': host or os.getenv('PG_HOST') or self.DEFAULT_CONFIG['host'],
+            'port': port or os.getenv('PG_PORT') or self.DEFAULT_CONFIG['port'],
+            'dbname': dbname or os.getenv('PG_DBNAME') or self.DEFAULT_CONFIG['dbname'],
+            'user': user or os.getenv('PG_USER') or self.DEFAULT_CONFIG['user'],
+            'password': password or os.getenv('PG_PASSWORD') or self.DEFAULT_CONFIG['password']
         }
         
         # Table names

@@ -30,8 +30,13 @@ Usage:
 import sys
 import argparse
 import logging
+import os
 import time
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(override=False)
 
 # ============================================================================
 # 기본 설정 (CLI 옵션이 없으면 이 값 사용)
@@ -52,19 +57,19 @@ DEFAULT_DATA_FOLDER = '/Users/rose/omop-mapper/data/omop-cdm'
 # ----------------------------------------------------------------------------
 # PostgreSQL 설정
 # ----------------------------------------------------------------------------
-DEFAULT_PG_HOST = '172.23.100.146'
-DEFAULT_PG_PORT = '1341'
-DEFAULT_PG_DBNAME = 'cdm_public'
-DEFAULT_PG_USER = 'cdmreader'
-DEFAULT_PG_PASSWORD = 'scdm2025!@'
+DEFAULT_PG_HOST = os.getenv('PG_HOST')
+DEFAULT_PG_PORT = os.getenv('PG_PORT', '5432')
+DEFAULT_PG_DBNAME = os.getenv('PG_DBNAME')
+DEFAULT_PG_USER = os.getenv('PG_USER')
+DEFAULT_PG_PASSWORD = os.getenv('PG_PASSWORD')
 
 # ----------------------------------------------------------------------------
 # Elasticsearch 설정
 # ----------------------------------------------------------------------------
-DEFAULT_ES_HOST = '3.35.110.161'
-DEFAULT_ES_PORT = 9200
-DEFAULT_ES_USER = 'elastic'
-DEFAULT_ES_PASSWORD = 'snomed'
+DEFAULT_ES_HOST = os.getenv('ES_SERVER_HOST')
+DEFAULT_ES_PORT = int(os.getenv('ES_SERVER_PORT', '9200'))
+DEFAULT_ES_USER = os.getenv('ES_SERVER_USERNAME')
+DEFAULT_ES_PASSWORD = os.getenv('ES_SERVER_PASSWORD')
 
 # ----------------------------------------------------------------------------
 # 인덱싱 옵션 (대용량/GPU 최적화 기본값)
@@ -137,13 +142,13 @@ def parse_args():
     
     # Elasticsearch 옵션
     parser.add_argument('--es-host', default=DEFAULT_ES_HOST,
-        help=f'Elasticsearch 호스트 (기본: {DEFAULT_ES_HOST})')
+        help='Elasticsearch 호스트 (기본: ES_SERVER_HOST 환경변수)')
     parser.add_argument('--es-port', type=int, default=DEFAULT_ES_PORT,
-        help=f'Elasticsearch 포트 (기본: {DEFAULT_ES_PORT})')
+        help=f'Elasticsearch 포트 (기본: ES_SERVER_PORT 환경변수 또는 {DEFAULT_ES_PORT})')
     parser.add_argument('--es-user', default=DEFAULT_ES_USER,
-        help=f'Elasticsearch 사용자 (기본: {DEFAULT_ES_USER})')
+        help='Elasticsearch 사용자 (기본: ES_SERVER_USERNAME 환경변수)')
     parser.add_argument('--es-password', default=DEFAULT_ES_PASSWORD,
-        help='Elasticsearch 비밀번호')
+        help='Elasticsearch 비밀번호 (기본: ES_SERVER_PASSWORD 환경변수)')
     
     # Local CSV 옵션
     parser.add_argument('--data-folder', default=DEFAULT_DATA_FOLDER,
@@ -151,15 +156,15 @@ def parse_args():
     
     # PostgreSQL 옵션
     parser.add_argument('--pg-host', default=DEFAULT_PG_HOST,
-        help=f'PostgreSQL 호스트 (기본: {DEFAULT_PG_HOST})')
+        help='PostgreSQL 호스트 (기본: PG_HOST 환경변수)')
     parser.add_argument('--pg-port', default=DEFAULT_PG_PORT,
-        help=f'PostgreSQL 포트 (기본: {DEFAULT_PG_PORT})')
+        help=f'PostgreSQL 포트 (기본: PG_PORT 환경변수 또는 {DEFAULT_PG_PORT})')
     parser.add_argument('--pg-dbname', default=DEFAULT_PG_DBNAME,
-        help=f'PostgreSQL DB명 (기본: {DEFAULT_PG_DBNAME})')
+        help='PostgreSQL DB명 (기본: PG_DBNAME 환경변수)')
     parser.add_argument('--pg-user', default=DEFAULT_PG_USER,
-        help=f'PostgreSQL 사용자 (기본: {DEFAULT_PG_USER})')
+        help='PostgreSQL 사용자 (기본: PG_USER 환경변수)')
     parser.add_argument('--pg-password', default=DEFAULT_PG_PASSWORD,
-        help='PostgreSQL 비밀번호')
+        help='PostgreSQL 비밀번호 (기본: PG_PASSWORD 환경변수)')
     
     return parser.parse_args()
 

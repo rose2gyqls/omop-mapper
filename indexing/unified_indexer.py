@@ -39,6 +39,16 @@ from elasticsearch_indexer import ElasticsearchIndexer
 CHECKPOINT_FILE = '.indexing_checkpoint.json'
 
 
+def _resolve_es_port(value: Optional[int]) -> int:
+    if value is not None:
+        return value
+    raw_port = os.getenv("ES_SERVER_PORT", "9200")
+    try:
+        return int(raw_port)
+    except ValueError:
+        return 9200
+
+
 class UnifiedIndexer:
     """Unified indexer for OMOP CDM data."""
     
@@ -53,10 +63,10 @@ class UnifiedIndexer:
     def __init__(
         self,
         data_source: BaseDataSource,
-        es_host: str = "3.35.110.161",
-        es_port: int = 9200,
-        es_username: str = "elastic",
-        es_password: str = "snomed",
+        es_host: Optional[str] = None,
+        es_port: Optional[int] = None,
+        es_username: Optional[str] = None,
+        es_password: Optional[str] = None,
         model_name: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
         gpu_device: int = 0,
         batch_size: int = 512,
@@ -90,10 +100,10 @@ class UnifiedIndexer:
         self.bulk_delay_sec = bulk_delay_sec
         
         self.es_config = {
-            'host': es_host,
-            'port': es_port,
-            'username': es_username,
-            'password': es_password
+            'host': es_host or os.getenv("ES_SERVER_HOST"),
+            'port': _resolve_es_port(es_port),
+            'username': es_username or os.getenv("ES_SERVER_USERNAME"),
+            'password': es_password or os.getenv("ES_SERVER_PASSWORD")
         }
         
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -107,7 +117,11 @@ class UnifiedIndexer:
         self.logger.info("=" * 60)
         self.logger.info("Initializing Unified Indexer")
         self.logger.info(f"Data source: {data_source.source_type.value}")
-        self.logger.info(f"Elasticsearch: {es_host}:{es_port}")
+        self.logger.info(
+            "Elasticsearch: %s:%s",
+            self.es_config["host"] or "<unset>",
+            self.es_config["port"],
+        )
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Include embeddings: {include_embeddings}")
         self.logger.info(f"Lowercase: {lowercase}")
