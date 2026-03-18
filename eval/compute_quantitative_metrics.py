@@ -327,7 +327,8 @@ def _compute_score_disagreements(
                     "concept": concept_str,
                 }
                 for ev in evaluator_sheets:
-                    rec[ev] = scores.get(ev, "")
+                    pseudo = EVALUATOR_PSEUDONYM.get(ev, ev)
+                    rec[pseudo] = scores.get(ev, "")
                 disagreements.append(rec)
 
     return disagreements
@@ -338,7 +339,10 @@ TEMPLATE_DATA_DOMAINS: dict[str, list[str]] = {
     "SNUH": ["Condition", "Measurement", "Procedure", "Drug"],
     "SNOMED": ["Condition", "Measurement", "Procedure", "Observation"],
 }
-TEMPLATE_EVALUATORS = ["박혜진", "양지영", "안정은"]
+# 평가자 가명: 박혜진→P, 양지영→Y, 안정은→A
+EVALUATOR_PSEUDONYM = {"박혜진": "P", "양지영": "Y", "안정은": "A"}
+EVALUATOR_REAL_NAME = {"P": "박혜진", "Y": "양지영", "A": "안정은"}
+TEMPLATE_EVALUATORS = ["P", "Y", "A"]
 
 
 def load_config(config_path: Optional[Path]) -> list[dict]:
@@ -514,7 +518,8 @@ def _save_excel(summary: dict[str, Any], output_path: Path) -> None:
             dom_weighted = round(dom_acc.get("weighted", 0), 2) if dom_acc and dom_n > 0 else ""
 
             for evaluator in TEMPLATE_EVALUATORS:
-                key = (data_source, domain, evaluator)
+                real_name = EVALUATOR_REAL_NAME.get(evaluator, evaluator)
+                key = (data_source, domain, real_name)
                 m = cell_data.get(key, {})
                 has_cell = key in cell_data and (m.get("acc_2") is not None or m.get("weighted") is not None)
                 acc_2 = round(m.get("acc_2", 0), 2) if has_cell else ""
@@ -559,11 +564,11 @@ def _save_excel(summary: dict[str, Any], output_path: Path) -> None:
     disagreements = summary.get("score_disagreements", [])
     if disagreements:
         ws_disc = wb.create_sheet(title="평가상이_목록", index=1)
-        # 평가자 컬럼: TEMPLATE 순서로, 실제 데이터에 있는 평가자만 포함
+        # 평가자 컬럼: TEMPLATE 순서(P,Y,A)로, 실제 데이터에 있는 평가자만 포함
         evals_in_data = set()
         for rec in disagreements:
             for k in rec:
-                if k in TEMPLATE_EVALUATORS:
+                if k in TEMPLATE_EVALUATORS:  # P, Y, A
                     evals_in_data.add(k)
         all_evals = [e for e in TEMPLATE_EVALUATORS if e in evals_in_data]
         headers_disc = ["dataset", "entity_name", "domain_id", "concept"] + all_evals
@@ -600,7 +605,8 @@ def _save_excel(summary: dict[str, Any], output_path: Path) -> None:
                 by_domain[dom].append(d)
 
             for domain, rows in by_domain.items():
-                sheet_name = f"{ev_name}_{data_source}_{domain.lower()}"[:31]
+                pseudo = EVALUATOR_PSEUDONYM.get(ev_name, ev_name)
+                sheet_name = f"{pseudo}_{data_source}_{domain.lower()}"[:31]
                 ws = wb.create_sheet(title=sheet_name)
 
                 run_cols = [f"run{i+1}" for i in range(num_runs)]
@@ -651,7 +657,8 @@ def main():
         acc2 = m.get("acc_2", 0)
         wgt = m.get("weighted", 0)
         n = m.get("n", 0)
-        print(f"  {ev}: Acc_2만={acc2:.2f}%, 가중평균={wgt:.2f}% (n={n})")
+        pseudo = EVALUATOR_PSEUDONYM.get(ev, ev)
+        print(f"  {pseudo}: Acc_2만={acc2:.2f}%, 가중평균={wgt:.2f}% (n={n})")
 
     print("\n=== 통합 정확도 (모든 평가자) ===")
     m = summary["combined_overall"]
@@ -669,7 +676,8 @@ def main():
         print(f"\n[{ds_name}]")
         for ev_name, ev_data in ds_data.get("evaluators", {}).items():
             o = ev_data.get("overall", {})
-            print(f"  {ev_name}: Acc_2만={o.get('acc_2', 0):.2f}%, 가중평균={o.get('weighted', 0):.2f}%")
+            pseudo = EVALUATOR_PSEUDONYM.get(ev_name, ev_name)
+            print(f"  {pseudo}: Acc_2만={o.get('acc_2', 0):.2f}%, 가중평균={o.get('weighted', 0):.2f}%")
 
 
 if __name__ == "__main__":
