@@ -1,0 +1,4 @@
+# Additional dependencies for local indexing workflows.
+
+-r requirements.txt
+psycopg2-binary==2.9.11

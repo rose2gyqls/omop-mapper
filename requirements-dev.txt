@@ -1,0 +1,8 @@
+# Optional developer tooling and notebook support.
+
+-r requirements.txt
+black==25.11.0
+jupyterlab==4.5.1
+mypy==1.19.0
+types-requests==2.32.4.20250913
+types-tqdm==4.67.0.20250809

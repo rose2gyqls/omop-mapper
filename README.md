@@ -44,6 +44,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Optional install profiles:
+
+```bash
+# PostgreSQL indexing support
+pip install -r requirements-indexing.txt
+
+# Notebook and developer tooling
+pip install -r requirements-dev.txt
+```
+
 Create your local environment file:
 
 ```bash
@@ -88,7 +98,7 @@ This repository includes a [`render.yaml`](./render.yaml) Blueprint for deployin
 4. Review the `render.yaml` settings before the first deploy:
    - `plan: free`
    - `region: singapore`
-   - `buildCommand: pip install -r requirements.txt`
+   - `buildCommand: python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt`
    - `startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
 5. Provide the prompted secret values for:
    - `OPENAI_API_KEY`
@@ -109,7 +119,7 @@ After deployment, Render will assign a public URL like `https://mapomop.onrender
 If you prefer not to use the Blueprint, create a `Web Service` in the Render dashboard with:
 
 - Runtime: `Python 3`
-- Build Command: `pip install -r requirements.txt`
+- Build Command: `python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt`
 - Start Command: `streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
 - Health Check Path: `/_stcore/health`
 
@@ -137,6 +147,12 @@ The Streamlit app:
 - Returns the top mapped concept plus ranked candidates
 
 This keeps the core mapping logic untouched while giving users a simple local UI.
+
+## Dependency Layout
+
+- `requirements.txt`: Streamlit app + `run_mapping.py`
+- `requirements-indexing.txt`: adds PostgreSQL indexing support
+- `requirements-dev.txt`: notebook and developer-only tooling
 
 ## Required Environment Variables
 
@@ -190,6 +206,12 @@ Outputs are written to `test_logs/`.
 
 This is only needed if you want to build or rebuild OMOP indexes yourself. It is not required for the local Streamlit demo when you already have access to a hosted Elasticsearch cluster.
 
+Install the extra dependency set before using PostgreSQL indexing:
+
+```bash
+pip install -r requirements-indexing.txt
+```
+
 If you use the PostgreSQL indexing path, provide `PG_HOST`, `PG_PORT`, `PG_DBNAME`, `PG_USER`, and `PG_PASSWORD` through your local `.env` or explicit CLI flags.
 
 ### Evaluation Utilities
@@ -213,6 +235,9 @@ omop-mapper/
 ├── app.py                    # Streamlit local demo UI
 ├── run_indexing.py           # Indexing CLI
 ├── run_mapping.py            # Mapping CLI
+├── requirements.txt          # App + mapping CLI runtime
+├── requirements-indexing.txt # PostgreSQL indexing extras
+├── requirements-dev.txt      # Notebook and developer tooling
 ├── indexing/                 # Index-building pipeline
 ├── eval/                     # Evaluation scripts
 ├── scripts/                  # Shell wrappers and utilities
@@ -245,11 +270,17 @@ If the app cannot reach Elasticsearch:
 If Render shows a deploy or health check failure:
 
 1. Confirm the service is a `Web Service`, not a static site
-2. Confirm the start command uses `--server.port $PORT --server.address 0.0.0.0`
+2. Confirm the build command uses `pip install --prefer-binary -r requirements.txt`
 3. Confirm the health check path is `/_stcore/health`
 4. Confirm all required secrets are present in Render
 5. Check the Render logs for import or dependency errors
 6. If needed, pin a different `PYTHON_VERSION` in Render and redeploy
+
+If the log mentions `Preparing metadata (pyproject.toml)`:
+
+1. That message refers to a dependency build step, not this repository
+2. If Render is trying to install `pandocfilters`, `jupyter*`, or `notebook*`, it is not using the trimmed runtime requirements yet
+3. Trigger a redeploy after confirming the updated build command and latest commit are applied
 
 ### No mapping results
 
