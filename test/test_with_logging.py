@@ -159,8 +159,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     entity_list = [
-        ("Propofol 2% 50mL inj", "Drug", 4068155, "atrial arrhythmia"),
-        ("Prednicarbate 0.25% 60g lotion", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
+        ("atrial arrhythmia", "Condition"),
+        # ("Prednicarbate 0.25% 60g lotion", "Drug", 35605482, "2 ml ondansetron 2 mg/ml injection"),
         # ("inflamed", "Condition", 4181063, "Inflammation of specific body organs"),
         # ("Pseudomyxoma peritonei", "Condition", 4146018, "pseudomyxoma peritonei"),
         # ("Platelet concentrate (400ml)", "Procedure", 4035234, "transfusion of platelet concentrate"),
