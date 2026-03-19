@@ -566,7 +566,7 @@ class EntityMappingAPI:
             return "very_low"
     
     def _format_stage1_candidate(self, hit: Dict) -> Dict:
-        """Format Stage 1 candidate for storage."""
+        """Format Stage 1 candidate for storage (full concept schema + stage1 fields)."""
         src = hit['_source']
         # 정규화 점수 사용 (0~1), 없으면 raw score 사용
         normalized_score = hit.get('_score_normalized') or hit['_score']
@@ -575,7 +575,12 @@ class EntityMappingAPI:
             'concept_name': src.get('concept_name', ''),
             'domain_id': src.get('domain_id', ''),
             'vocabulary_id': src.get('vocabulary_id', ''),
+            'concept_class_id': src.get('concept_class_id', ''),
             'standard_concept': src.get('standard_concept', ''),
+            'concept_code': src.get('concept_code', ''),
+            'valid_start_date': src.get('valid_start_date'),
+            'valid_end_date': src.get('valid_end_date'),
+            'invalid_reason': src.get('invalid_reason'),
             'elasticsearch_score': normalized_score,
             'search_type': hit.get('_search_type', 'unknown')
         }
@@ -604,14 +609,19 @@ class EntityMappingAPI:
         return result
     
     def _format_stage3_candidate(self, c: Dict) -> Dict:
-        """Format Stage 3 candidate for storage."""
+        """Format Stage 3 candidate for storage (full concept schema + stage3 fields)."""
         concept = c['concept']
         result = {
             'concept_id': str(concept.get('concept_id', '')),
             'concept_name': concept.get('concept_name', ''),
             'domain_id': concept.get('domain_id', ''),
             'vocabulary_id': concept.get('vocabulary_id', ''),
+            'concept_class_id': concept.get('concept_class_id', ''),
             'standard_concept': concept.get('standard_concept', ''),
+            'concept_code': concept.get('concept_code', ''),
+            'valid_start_date': concept.get('valid_start_date'),
+            'valid_end_date': concept.get('valid_end_date'),
+            'invalid_reason': concept.get('invalid_reason'),
             'is_original_standard': c.get('is_original_standard', True),
             'llm_score': c.get('llm_score'),
             'llm_rank': c.get('llm_rank'),

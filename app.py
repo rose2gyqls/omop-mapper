@@ -156,67 +156,108 @@ def _rounded(value: Optional[float]) -> Optional[float]:
     return round(value, 4)
 
 
+# OMOP CDM concept table schema (standard column order)
+CONCEPT_SCHEMA = [
+    "concept_id",
+    "concept_name",
+    "domain_id",
+    "vocabulary_id",
+    "concept_class_id",
+    "standard_concept",
+    "concept_code",
+    "valid_start_date",
+    "valid_end_date",
+    "invalid_reason",
+]
+
+
 def build_result_details_frame(best_result) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "vocabulary_id": best_result.vocabulary_id,
-                "concept_class_id": best_result.concept_class_id,
-                "standard_concept": best_result.standard_concept,
-                "mapping_method": best_result.mapping_method,
-                "mapping_confidence": best_result.mapping_confidence,
-                "mapping_score": _rounded(best_result.mapping_score),
-                "concept_code": best_result.concept_code,
-                "valid_start_date": best_result.valid_start_date,
-                "valid_end_date": best_result.valid_end_date,
-                "invalid_reason": best_result.invalid_reason,
-            }
-        ]
-    )
+    """Build Result details as OMOP CDM concept table schema."""
+    row = {
+        "concept_id": best_result.mapped_concept_id,
+        "concept_name": best_result.mapped_concept_name,
+        "domain_id": best_result.domain_id,
+        "vocabulary_id": best_result.vocabulary_id,
+        "concept_class_id": best_result.concept_class_id,
+        "standard_concept": best_result.standard_concept,
+        "concept_code": best_result.concept_code,
+        "valid_start_date": best_result.valid_start_date,
+        "valid_end_date": best_result.valid_end_date,
+        "invalid_reason": best_result.invalid_reason,
+    }
+    return pd.DataFrame([row])[CONCEPT_SCHEMA]
+
+
+def build_stage1_frame(stage1_candidates: list[dict]) -> pd.DataFrame:
+    """Stage 1 table: concept_id, concept_name, stage_1_score, match_type, + concept schema."""
+    rows = []
+    for candidate in stage1_candidates:
+        score = candidate.get("elasticsearch_score") or candidate.get("_score", 0.0)
+        match_type = candidate.get("search_type", "unknown")
+        row = {
+            "concept_id": candidate.get("concept_id", ""),
+            "concept_name": candidate.get("concept_name", ""),
+            "stage_1_score": _rounded(float(score)) if score is not None else None,
+            "match_type": match_type,
+            "domain_id": candidate.get("domain_id", ""),
+            "vocabulary_id": candidate.get("vocabulary_id", ""),
+            "concept_class_id": candidate.get("concept_class_id", ""),
+            "standard_concept": candidate.get("standard_concept", ""),
+            "concept_code": candidate.get("concept_code", ""),
+            "valid_start_date": candidate.get("valid_start_date"),
+            "valid_end_date": candidate.get("valid_end_date"),
+            "invalid_reason": candidate.get("invalid_reason", ""),
+        }
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def build_stage3_frame(stage3_candidates: list[dict]) -> pd.DataFrame:
+    """Stage 3 table: concept_id, concept_name, stage_3_reasoning, match_type, + concept schema."""
     rows = []
     sorted_candidates = sorted(
         stage3_candidates,
         key=lambda item: item.get("final_score", 0.0) or 0.0,
         reverse=True,
     )
-    for rank, candidate in enumerate(sorted_candidates, start=1):
-        rows.append(
-            {
-                "rank": rank,
-                "concept_id": candidate.get("concept_id", ""),
-                "concept_name": candidate.get("concept_name", ""),
-                "domain": candidate.get("domain_id", ""),
-                "vocabulary": candidate.get("vocabulary_id", ""),
-                "standard": candidate.get("standard_concept", ""),
-                "is_original_standard": candidate.get("is_original_standard"),
-                "search_type": candidate.get("search_type", ""),
-                "final_score": _rounded(candidate.get("final_score", 0.0) or 0.0),
-                "semantic_similarity": _rounded(candidate.get("semantic_similarity")),
-                "text_similarity": _rounded(candidate.get("text_similarity")),
-                "original_non_standard_id": (
-                    candidate.get("original_non_standard", {}) or {}
-                ).get("concept_id", ""),
-                "original_non_standard_name": (
-                    candidate.get("original_non_standard", {}) or {}
-                ).get("concept_name", ""),
-                "llm_reasoning": candidate.get("llm_reasoning", ""),
-            }
+    for candidate in sorted_candidates[:3]:
+        llm_reasoning = candidate.get("llm_reasoning") or ""
+        match_type = (
+            "logic-based"
+            if (candidate.get("llm_reasoning") or candidate.get("llm_score") is not None)
+            else "similarity"
         )
+        row = {
+            "concept_id": candidate.get("concept_id", ""),
+            "concept_name": candidate.get("concept_name", ""),
+            "stage_3_reasoning": llm_reasoning,
+            "match_type": match_type,
+            "domain_id": candidate.get("domain_id", ""),
+            "vocabulary_id": candidate.get("vocabulary_id", ""),
+            "concept_class_id": candidate.get("concept_class_id", ""),
+            "standard_concept": candidate.get("standard_concept", ""),
+            "concept_code": candidate.get("concept_code", ""),
+            "valid_start_date": candidate.get("valid_start_date"),
+            "valid_end_date": candidate.get("valid_end_date"),
+            "invalid_reason": candidate.get("invalid_reason", ""),
+        }
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
 def render_best_mapping_card(best_result) -> None:
+    concept_id = html.escape(str(best_result.mapped_concept_id or "-"))
+    domain_id = html.escape(str(best_result.domain_id or "-"))
+    standard = html.escape(str(best_result.standard_concept or "-"))
     st.markdown(
         f"""
         <section class="best-card">
             <p class="section-label">Best mapping</p>
             <h2 class="best-name">{html.escape(best_result.mapped_concept_name or "-")}</h2>
             <div class="pill-row">
-                <span class="pill pill-primary">Concept ID {html.escape(str(best_result.mapped_concept_id or "-"))}</span>
-                <span class="pill">Domain {html.escape(str(best_result.domain_id or "-"))}</span>
+                <span class="pill">Concept ID : {concept_id}</span>
+                <span class="pill">Domain ID : {domain_id}</span>
+                <span class="pill">Standard : {standard}</span>
             </div>
         </section>
         """,
@@ -231,6 +272,67 @@ def render_status_card(title: str, state: str, detail: str) -> None:
             <p class="status-label">{title}</p>
             <p class="status-state">{state}</p>
             <p class="status-detail">{detail}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_llm_card(config: dict) -> None:
+    """LLM status card: Ready ✅ / Not ready ❌, model, source."""
+    has_key = bool(config.get("openai_api_key"))
+    status = "Ready ✅" if has_key else "Not ready ❌"
+    model = html.escape(str(config.get("openai_model", "-")))
+    source = (
+        "Loaded from OPENAI_API_KEY & OPENAI_MODEL"
+        if has_key
+        else "Add OPENAI_API_KEY to your local .env file."
+    )
+    st.markdown(
+        f"""
+        <div class="status-card">
+            <p class="status-label">LLM</p>
+            <p class="status-state">{status}</p>
+            <p class="status-detail">Model: {model}</p>
+            <p class="status-detail">{source}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_vocabulary_card() -> None:
+    """VOCABULARY status card with link to Athena."""
+    athena_url = "https://athena.ohdsi.org/search-terms/start"
+    st.markdown(
+        f"""
+        <div class="status-card">
+            <p class="status-label">VOCABULARY</p>
+            <p class="status-state">Embedded ✅</p>
+            <p class="status-detail">Version: V20250827</p>
+            <p class="status-detail">Total Terms: 13,433,716</p>
+            <p class="status-detail">
+                <a href="{athena_url}" target="_blank" rel="noopener noreferrer" class="status-link">Vocabulary LINK</a>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_about_card() -> None:
+    """ABOUT card with MapOMOP GitHub link."""
+    github_url = "https://github.com/rose2gyqls/omop-mapper"
+    st.markdown(
+        f"""
+        <div class="status-card">
+            <p class="status-label">ABOUT</p>
+            <p class="status-detail">
+                Maps clinical terms to standard OMOP concepts using semantic search and ontology relationships.
+            </p>
+            <p class="status-detail">
+                Learn more → <a href="{github_url}" target="_blank" rel="noopener noreferrer" class="status-link">MapOMOP</a>
+            </p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -355,6 +457,14 @@ st.markdown(
         color: var(--muted);
         margin-bottom: 0;
     }
+    .status-link {
+        color: var(--primary);
+        text-decoration: none;
+        font-weight: 700;
+    }
+    .status-link:hover {
+        text-decoration: underline;
+    }
     .section-label {
         margin: 0 0 0.4rem 0;
         color: var(--primary);
@@ -419,11 +529,6 @@ st.markdown(
         color: var(--text);
         font-size: 0.92rem;
         font-weight: 700;
-    }
-    .pill-primary {
-        background: linear-gradient(90deg, var(--primary), var(--accent));
-        color: #ffffff;
-        border-color: transparent;
     }
     div[data-baseweb="input"] input,
     div[data-baseweb="select"] input,
@@ -520,27 +625,11 @@ st.markdown(
 
 status_col1, status_col2, status_col3 = st.columns(3)
 with status_col1:
-    render_status_card(
-        "OpenAI",
-        "Ready" if config["openai_api_key"] else "Missing key",
-        "Loaded from OPENAI_API_KEY" if config["openai_api_key"] else "Add OPENAI_API_KEY to your local .env file.",
-    )
+    render_llm_card(config)
 with status_col2:
-    render_status_card(
-        "Elasticsearch",
-        "Connected" if es_health.get("status") == "connected" else "Needs attention",
-        (
-            f"{config['es_host']}:{config['es_port']}"
-            if es_health.get("status") == "connected"
-            else str(es_health.get("error", "Check ES_SERVER_* configuration."))
-        ),
-    )
+    render_vocabulary_card()
 with status_col3:
-    render_status_card(
-        "Model",
-        str(config["openai_model"]),
-        "Override with OPENAI_MODEL if you want a different OpenAI route.",
-    )
+    render_about_card()
 
 if missing_config:
     st.error(
@@ -556,8 +645,8 @@ elif es_health.get("status") != "connected":
 
 st.markdown(
     """
-    <h2 class="section-title">Enter the source entity you want to map</h2>
-    <p class="section-copy">Fill in the clinical term and choose the OMOP domain below.</p>
+    <h2 class="section-title">Map a clinical term to OMOP</h2>
+    <p class="section-copy">Enter a clinical term and select the target domain.</p>
     """,
     unsafe_allow_html=True,
 )
@@ -566,7 +655,7 @@ with st.form("mapper_form"):
     input_col, domain_col = st.columns([1.5, 1.0], gap="large")
     with input_col:
         entity_name = st.text_input(
-            "1. Entity name",
+            "1. Clinical term",
             placeholder="e.g. myocardial ischemia",
             help="Enter the source clinical term you want to map into OMOP.",
         )
@@ -577,7 +666,7 @@ with st.form("mapper_form"):
             index=1,
             help="Pick a specific OMOP domain or search across all supported domains.",
         )
-    submitted = st.form_submit_button("Map entity", use_container_width=True)
+    submitted = st.form_submit_button("Map to OMOP", use_container_width=True)
 
 if submitted:
     if missing_config:
@@ -589,7 +678,7 @@ if submitted:
     else:
         domain = DOMAIN_BY_LABEL[selected_domain]
         try:
-            with st.spinner("Running OMOP mapping..."):
+            with st.spinner("Running MapOMOP"):
                 api = get_mapping_api(
                     host=str(config["es_host"]),
                     port=int(config["es_port"]),
@@ -609,8 +698,9 @@ if submitted:
                 st.warning("No mapping candidates were returned for this input.")
             else:
                 best_result = max(results, key=lambda item: item.mapping_score)
-                results_frame = build_results_frame(results)
+                stage1_candidates = getattr(api, "_last_stage1_candidates", []) or []
                 stage3_candidates = getattr(api, "_last_rerank_candidates", []) or []
+                stage1_frame = build_stage1_frame(stage1_candidates)
                 stage3_frame = build_stage3_frame(stage3_candidates)
                 detail_frame = build_result_details_frame(best_result)
 
@@ -619,12 +709,27 @@ if submitted:
                 st.markdown("### Result details")
                 st.dataframe(detail_frame, use_container_width=True, hide_index=True)
 
-                st.markdown("### Ranked candidates")
-                st.dataframe(
-                    stage3_frame if not stage3_frame.empty else results_frame,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.markdown("### Mapping details")
+                st.caption("How this match was selected")
+                with st.expander(
+                    f"Initial matches ({len(stage1_candidates)})",
+                    expanded=False,
+                ):
+                    st.caption("Based on similarity")
+                    if not stage1_frame.empty:
+                        st.dataframe(stage1_frame, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No stage 1 candidates.")
+
+                with st.expander(
+                    "Final results (Top 3)",
+                    expanded=True,
+                ):
+                    st.caption("Based on mapping logic and relationships")
+                    if not stage3_frame.empty:
+                        st.dataframe(stage3_frame, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No stage 3 candidates.")
 
                 with st.expander("Debug candidate counts", expanded=False):
                     st.write(
