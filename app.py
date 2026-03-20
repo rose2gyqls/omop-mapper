@@ -168,7 +168,7 @@ def _sql_null_display(value) -> str:
     return s
 
 
-_NULL_CELL_CSS = "color: #8b9eb0; font-style: italic;"
+_NULL_CELL_CSS = "color: #8b9eb0;"
 
 
 def _null_cell_style(value: object) -> str:
@@ -324,14 +324,8 @@ def render_llm_card(config: dict) -> None:
         <div class="status-card">
             <p class="status-label">{title}</p>
             <div class="status-rows">
-                <div class="status-row">
-                    <span class="status-row-label">Model</span>
-                    <span class="status-row-value">{model}</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-row-label">Source</span>
-                    <span class="status-row-value">OPENAI_API_KEY</span>
-                </div>
+                <div class="status-row"><span class="status-row-label">Model</span><span class="status-row-value">{model}</span></div>
+                <div class="status-row"><span class="status-row-label">Source</span><span class="status-row-value">OPENAI_API_KEY</span></div>
             </div>
         </div>
         """,
@@ -347,14 +341,8 @@ def render_vocabulary_card() -> None:
         <div class="status-card">
             <p class="status-label">VOCABULARY<a href="{athena_url}" target="_blank" rel="noopener noreferrer" class="status-link-icon" aria-label="OHDSI Athena vocabulary">🔗</a></p>
             <div class="status-rows">
-                <div class="status-row">
-                    <span class="status-row-label">Version</span>
-                    <span class="status-row-value">V20250827</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-row-label">Total terms</span>
-                    <span class="status-row-value">13,433,716</span>
-                </div>
+                <div class="status-row"><span class="status-row-label">Version</span><span class="status-row-value">V20250827</span></div>
+                <div class="status-row"><span class="status-row-label">Total terms</span><span class="status-row-value">13,433,716</span></div>
             </div>
         </div>
         """,
@@ -369,14 +357,8 @@ def render_ontology_card() -> None:
         <div class="status-card">
             <p class="status-label">ONTOLOGY 📖</p>
             <div class="status-rows">
-                <div class="status-row">
-                    <span class="status-row-label">Engine</span>
-                    <span class="status-row-value">SapBERT, Elasticsearch</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-row-label">OMOP</span>
-                    <span class="status-row-value">relationship, synonym</span>
-                </div>
+                <div class="status-row"><span class="status-row-label">Engine</span><span class="status-row-value">SapBERT, Elasticsearch</span></div>
+                <div class="status-row"><span class="status-row-label">OMOP</span><span class="status-row-value">relationship, synonym</span></div>
             </div>
         </div>
         """,
@@ -406,6 +388,7 @@ st.markdown(
         --shadow: rgba(19, 41, 61, 0.1);
         --input-placeholder: #7c96a8;
         --alert-text: #102a43;
+        --status-caps-spacing: 0.055em;
     }
     @media (prefers-color-scheme: dark) {
         :root {
@@ -423,6 +406,7 @@ st.markdown(
             --shadow: rgba(0, 0, 0, 0.35);
             --input-placeholder: #6f8a9a;
             --alert-text: #e7f3f8;
+            --status-caps-spacing: 0.055em;
         }
     }
     html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
@@ -502,6 +486,9 @@ st.markdown(
         box-shadow: 0 14px 28px var(--shadow);
         backdrop-filter: blur(10px);
         overflow: hidden;
+        font-family: "Manrope", "Helvetica Neue", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
     }
     .status-card::before {
         content: "";
@@ -516,7 +503,7 @@ st.markdown(
         font-size: 0.9rem;
         font-weight: 800;
         text-transform: uppercase;
-        letter-spacing: 0.1em;
+        letter-spacing: var(--status-caps-spacing);
         color: var(--muted);
         margin: 0 0 0.5rem 0;
         padding: 0;
@@ -535,36 +522,44 @@ st.markdown(
         margin: 0 0 0.9rem 0;
     }
     .status-rows {
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
+        display: table;
+        width: 100%;
+        table-layout: auto;
+        border-collapse: separate;
+        border-spacing: 0.4rem 0.5rem;
     }
     .status-row {
-        display: grid;
-        grid-template-columns: max-content minmax(0, 1fr);
-        column-gap: 0.5rem;
-        align-items: start;
-        font-size: 0.98rem;
-        line-height: 1.5;
+        display: table-row;
     }
     .status-row-label {
+        display: table-cell;
+        vertical-align: top;
         font-size: 0.78rem;
         font-weight: 800;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
+        letter-spacing: var(--status-caps-spacing);
         color: var(--muted);
-        padding-top: 0.12rem;
         white-space: nowrap;
+        text-align: left;
+        width: 1%;
     }
     .status-row-value {
+        display: table-cell;
+        vertical-align: top;
         min-width: 0;
-        font-weight: 600;
+        font-size: 0.98rem;
+        font-weight: 400;
+        font-style: normal;
+        letter-spacing: normal;
+        line-height: 1.45;
         color: var(--text);
         text-align: left;
+        white-space: normal;
         overflow-wrap: break-word;
+        word-break: normal;
     }
     .status-row-link .status-row-value {
-        font-weight: 500;
+        font-weight: 400;
     }
     .status-about-lead {
         font-size: 0.92rem;
@@ -769,7 +764,7 @@ es_health = get_es_health(
 st.markdown(
     """
     <section class="hero">
-        <h1 class="hero-title">MapOMOP 🩺</h1>
+        <h1 class="hero-title">MapOMOP</h1>
         <p class="hero-tagline">Understands clinical meaning, aligns with OMOP relationships, and selects the best standard OMOP concept.</p>
     </section>
     """,
