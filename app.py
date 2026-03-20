@@ -156,6 +156,42 @@ def _rounded(value: Optional[float]) -> Optional[float]:
     return round(value, 4)
 
 
+def _sql_null_display(value) -> str:
+    """OMOP-style Missing: show SQL NULL instead of None/empty in UI tables."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, float) and pd.isna(value):
+        return "NULL"
+    s = str(value).strip()
+    if s == "" or s.lower() in {"none", "nan"}:
+        return "NULL"
+    return s
+
+
+_NULL_CELL_CSS = "color: #8b9eb0; font-style: italic;"
+
+
+def _null_cell_style(value: object) -> str:
+    """Mimic Streamlit/None-style muted cells for SQL NULL and missing values."""
+    try:
+        if pd.isna(value):
+            return _NULL_CELL_CSS
+    except (TypeError, ValueError):
+        pass
+    if value == "NULL":
+        return _NULL_CELL_CSS
+    if isinstance(value, str) and value.strip().upper() == "NULL":
+        return _NULL_CELL_CSS
+    return ""
+
+
+def _with_null_cell_style(df: pd.DataFrame):
+    """Return DataFrame or pandas Styler (for NULL cell styling). Avoids pd.io.formats.style in type hints."""
+    if df.empty:
+        return df
+    return df.style.map(_null_cell_style)
+
+
 # OMOP CDM concept table schema (standard column order)
 CONCEPT_SCHEMA = [
     "concept_id",
@@ -172,18 +208,18 @@ CONCEPT_SCHEMA = [
 
 
 def build_result_details_frame(best_result) -> pd.DataFrame:
-    """Build Result details as OMOP CDM concept table schema."""
+    """Build Best mapping details table (OMOP CDM concept schema)."""
     row = {
         "concept_id": best_result.mapped_concept_id,
         "concept_name": best_result.mapped_concept_name,
         "domain_id": best_result.domain_id,
         "vocabulary_id": best_result.vocabulary_id,
         "concept_class_id": best_result.concept_class_id,
-        "standard_concept": best_result.standard_concept,
+        "standard_concept": _sql_null_display(best_result.standard_concept),
         "concept_code": best_result.concept_code,
         "valid_start_date": best_result.valid_start_date,
         "valid_end_date": best_result.valid_end_date,
-        "invalid_reason": best_result.invalid_reason,
+        "invalid_reason": _sql_null_display(best_result.invalid_reason),
     }
     return pd.DataFrame([row])[CONCEPT_SCHEMA]
 
@@ -197,23 +233,23 @@ def build_stage1_frame(stage1_candidates: list[dict]) -> pd.DataFrame:
         row = {
             "concept_id": candidate.get("concept_id", ""),
             "concept_name": candidate.get("concept_name", ""),
-            "stage_1_score": _rounded(float(score)) if score is not None else None,
+            "similarity_score": _rounded(float(score)) if score is not None else None,
             "match_type": match_type,
             "domain_id": candidate.get("domain_id", ""),
             "vocabulary_id": candidate.get("vocabulary_id", ""),
             "concept_class_id": candidate.get("concept_class_id", ""),
-            "standard_concept": candidate.get("standard_concept", ""),
+            "standard_concept": _sql_null_display(candidate.get("standard_concept")),
             "concept_code": candidate.get("concept_code", ""),
             "valid_start_date": candidate.get("valid_start_date"),
             "valid_end_date": candidate.get("valid_end_date"),
-            "invalid_reason": candidate.get("invalid_reason", ""),
+            "invalid_reason": _sql_null_display(candidate.get("invalid_reason")),
         }
         rows.append(row)
     return pd.DataFrame(rows)
 
 
 def build_stage3_frame(stage3_candidates: list[dict]) -> pd.DataFrame:
-    """Stage 3 table: concept_id, concept_name, stage_3_reasoning, match_type, + concept schema."""
+    """Stage 3 table: concept_id, concept_name, llm_reasoning, match_type, + concept schema."""
     rows = []
     sorted_candidates = sorted(
         stage3_candidates,
@@ -230,16 +266,16 @@ def build_stage3_frame(stage3_candidates: list[dict]) -> pd.DataFrame:
         row = {
             "concept_id": candidate.get("concept_id", ""),
             "concept_name": candidate.get("concept_name", ""),
-            "stage_3_reasoning": llm_reasoning,
+            "llm_reasoning": llm_reasoning,
             "match_type": match_type,
             "domain_id": candidate.get("domain_id", ""),
             "vocabulary_id": candidate.get("vocabulary_id", ""),
             "concept_class_id": candidate.get("concept_class_id", ""),
-            "standard_concept": candidate.get("standard_concept", ""),
+            "standard_concept": _sql_null_display(candidate.get("standard_concept")),
             "concept_code": candidate.get("concept_code", ""),
             "valid_start_date": candidate.get("valid_start_date"),
             "valid_end_date": candidate.get("valid_end_date"),
-            "invalid_reason": candidate.get("invalid_reason", ""),
+            "invalid_reason": _sql_null_display(candidate.get("invalid_reason")),
         }
         rows.append(row)
     return pd.DataFrame(rows)
@@ -279,22 +315,24 @@ def render_status_card(title: str, state: str, detail: str) -> None:
 
 
 def render_llm_card(config: dict) -> None:
-    """LLM status card: Ready ✅ / Not ready ❌, model, source."""
+    """LLM status card: LLM ✅ / LLM ❌, model and source."""
     has_key = bool(config.get("openai_api_key"))
-    status = "Ready ✅" if has_key else "Not ready ❌"
+    title = "LLM ✅" if has_key else "LLM ❌"
     model = html.escape(str(config.get("openai_model", "-")))
-    source = (
-        "Loaded from OPENAI_API_KEY & OPENAI_MODEL"
-        if has_key
-        else "Add OPENAI_API_KEY to your local .env file."
-    )
     st.markdown(
         f"""
         <div class="status-card">
-            <p class="status-label">LLM</p>
-            <p class="status-state">{status}</p>
-            <p class="status-detail">Model: {model}</p>
-            <p class="status-detail">{source}</p>
+            <p class="status-label">{title}</p>
+            <div class="status-rows">
+                <div class="status-row">
+                    <span class="status-row-label">Model</span>
+                    <span class="status-row-value">{model}</span>
+                </div>
+                <div class="status-row">
+                    <span class="status-row-label">Source</span>
+                    <span class="status-row-value">OPENAI_API_KEY</span>
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -302,37 +340,44 @@ def render_llm_card(config: dict) -> None:
 
 
 def render_vocabulary_card() -> None:
-    """VOCABULARY status card with link to Athena."""
+    """VOCABULARY + linked 🔗; VERSION and TOTAL TERMS rows like other status cards."""
     athena_url = "https://athena.ohdsi.org/search-terms/start"
     st.markdown(
         f"""
         <div class="status-card">
-            <p class="status-label">VOCABULARY</p>
-            <p class="status-state">Embedded ✅</p>
-            <p class="status-detail">Version: V20250827</p>
-            <p class="status-detail">Total Terms: 13,433,716</p>
-            <p class="status-detail">
-                <a href="{athena_url}" target="_blank" rel="noopener noreferrer" class="status-link">Vocabulary LINK</a>
-            </p>
+            <p class="status-label">VOCABULARY<a href="{athena_url}" target="_blank" rel="noopener noreferrer" class="status-link-icon" aria-label="OHDSI Athena vocabulary">🔗</a></p>
+            <div class="status-rows">
+                <div class="status-row">
+                    <span class="status-row-label">Version</span>
+                    <span class="status-row-value">V20250827</span>
+                </div>
+                <div class="status-row">
+                    <span class="status-row-label">Total terms</span>
+                    <span class="status-row-value">13,433,716</span>
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_about_card() -> None:
-    """ABOUT card with MapOMOP GitHub link."""
-    github_url = "https://github.com/rose2gyqls/omop-mapper"
+def render_ontology_card() -> None:
+    """ONTOLOGY 📖: SapBERT + Elasticsearch engine; OMOP linkage types."""
     st.markdown(
-        f"""
+        """
         <div class="status-card">
-            <p class="status-label">ABOUT</p>
-            <p class="status-detail">
-                Maps clinical terms to standard OMOP concepts using semantic search and ontology relationships.
-            </p>
-            <p class="status-detail">
-                Learn more → <a href="{github_url}" target="_blank" rel="noopener noreferrer" class="status-link">MapOMOP</a>
-            </p>
+            <p class="status-label">ONTOLOGY 📖</p>
+            <div class="status-rows">
+                <div class="status-row">
+                    <span class="status-row-label">Engine</span>
+                    <span class="status-row-value">SapBERT, Elasticsearch</span>
+                </div>
+                <div class="status-row">
+                    <span class="status-row-label">OMOP</span>
+                    <span class="status-row-value">relationship, synonym</span>
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -428,33 +473,125 @@ st.markdown(
         font-weight: 800;
         margin: 0;
         color: var(--text);
+        position: relative;
+        z-index: 1;
+    }
+    .hero-tagline {
+        font-family: "Manrope", "Helvetica Neue", sans-serif;
+        font-size: 1.08rem;
+        font-weight: 500;
+        line-height: 1.45;
+        color: var(--muted);
+        margin: 0.75rem 0 0 0;
+        max-width: none;
+        white-space: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        position: relative;
+        z-index: 1;
+        -webkit-overflow-scrolling: touch;
     }
     .status-card {
-        min-height: 8rem;
+        position: relative;
+        min-height: 0;
         border-radius: 1.05rem;
-        padding: 1.05rem 1.1rem;
+        padding: 1.15rem 1.05rem 1.05rem;
+        padding-top: 1.25rem;
         background: var(--surface);
         border: 1px solid var(--border);
         box-shadow: 0 14px 28px var(--shadow);
         backdrop-filter: blur(10px);
+        overflow: hidden;
+    }
+    .status-card::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, var(--primary), var(--accent));
     }
     .status-label {
-        font-size: 0.82rem;
-        font-weight: 700;
+        font-size: 0.9rem;
+        font-weight: 800;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.1em;
         color: var(--muted);
-        margin-bottom: 0.35rem;
+        margin: 0 0 0.5rem 0;
+        padding: 0;
+        border: none;
+        line-height: 1.3;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25em;
     }
     .status-state {
-        font-size: 1.16rem;
+        font-size: 1.12rem;
         font-weight: 800;
         color: var(--text);
+        line-height: 1.35;
+        margin: 0 0 0.9rem 0;
+    }
+    .status-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .status-row {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        column-gap: 0.5rem;
+        align-items: start;
+        font-size: 0.98rem;
+        line-height: 1.5;
+    }
+    .status-row-label {
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        padding-top: 0.12rem;
+        white-space: nowrap;
+    }
+    .status-row-value {
+        min-width: 0;
+        font-weight: 600;
+        color: var(--text);
+        text-align: left;
+        overflow-wrap: break-word;
+    }
+    .status-row-link .status-row-value {
+        font-weight: 500;
+    }
+    .status-about-lead {
+        font-size: 0.92rem;
+        font-weight: 700;
+        margin: 0 0 0.65rem 0;
+        line-height: 1.4;
+    }
+    .status-about-list {
+        margin: 0;
+        padding-left: 1.15rem;
+        font-size: 0.92rem;
+        color: var(--muted);
+        line-height: 1.6;
+    }
+    .status-about-list li {
         margin-bottom: 0.35rem;
+    }
+    .status-about-list li:last-child {
+        margin-bottom: 0;
     }
     .status-detail {
         font-size: 0.94rem;
         color: var(--muted);
+        line-height: 1.55;
+        margin: 0 0 0.42rem 0;
+    }
+    .status-detail:last-child {
         margin-bottom: 0;
     }
     .status-link {
@@ -464,6 +601,15 @@ st.markdown(
     }
     .status-link:hover {
         text-decoration: underline;
+    }
+    .status-label .status-link-icon {
+        color: inherit;
+        font-weight: inherit;
+        text-decoration: none;
+    }
+    .status-label .status-link-icon:hover {
+        text-decoration: underline;
+        opacity: 0.88;
     }
     .section-label {
         margin: 0 0 0.4rem 0;
@@ -491,14 +637,20 @@ st.markdown(
         padding: 1.25rem 1.25rem 0.45rem 1.25rem;
         box-shadow: 0 14px 28px var(--shadow);
         position: relative;
+        overflow: hidden;
+        isolation: isolate;
     }
     [data-testid="stForm"]::before {
         content: "";
         position: absolute;
-        inset: 0 0 auto 0;
+        top: 0;
+        left: 0;
+        right: 0;
         height: 0.28rem;
-        border-radius: 1.1rem 1.1rem 0 0;
         background: linear-gradient(90deg, var(--primary), var(--accent));
+        border-radius: 0;
+        z-index: 0;
+        pointer-events: none;
     }
     .best-card {
         background: linear-gradient(180deg, var(--surface-strong), var(--surface));
@@ -618,18 +770,19 @@ st.markdown(
     """
     <section class="hero">
         <h1 class="hero-title">MapOMOP 🩺</h1>
+        <p class="hero-tagline">Understands clinical meaning, aligns with OMOP relationships, and selects the best standard OMOP concept.</p>
     </section>
     """,
     unsafe_allow_html=True,
 )
 
-status_col1, status_col2, status_col3 = st.columns(3)
+status_col1, status_col2, status_col3 = st.columns(3, gap="small")
 with status_col1:
-    render_llm_card(config)
-with status_col2:
     render_vocabulary_card()
+with status_col2:
+    render_ontology_card()
 with status_col3:
-    render_about_card()
+    render_llm_card(config)
 
 if missing_config:
     st.error(
@@ -706,8 +859,12 @@ if submitted:
 
                 render_best_mapping_card(best_result)
 
-                st.markdown("### Result details")
-                st.dataframe(detail_frame, use_container_width=True, hide_index=True)
+                st.markdown("### Best mapping details")
+                st.dataframe(
+                    _with_null_cell_style(detail_frame),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
                 st.markdown("### Mapping details")
                 st.caption("How this match was selected")
@@ -715,9 +872,13 @@ if submitted:
                     f"Initial matches ({len(stage1_candidates)})",
                     expanded=False,
                 ):
-                    st.caption("Based on similarity")
+                    st.caption("Based on semantic, lexical similarity")
                     if not stage1_frame.empty:
-                        st.dataframe(stage1_frame, use_container_width=True, hide_index=True)
+                        st.dataframe(
+                            _with_null_cell_style(stage1_frame),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
                     else:
                         st.info("No stage 1 candidates.")
 
@@ -727,15 +888,10 @@ if submitted:
                 ):
                     st.caption("Based on mapping logic and relationships")
                     if not stage3_frame.empty:
-                        st.dataframe(stage3_frame, use_container_width=True, hide_index=True)
+                        st.dataframe(
+                            _with_null_cell_style(stage3_frame),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
                     else:
                         st.info("No stage 3 candidates.")
-
-                with st.expander("Debug candidate counts", expanded=False):
-                    st.write(
-                        {
-                            "stage1_candidates": len(getattr(api, "_last_stage1_candidates", []) or []),
-                            "stage2_candidates": len(getattr(api, "_last_stage2_candidates", []) or []),
-                            "stage3_candidates": len(getattr(api, "_last_rerank_candidates", []) or []),
-                        }
-                    )
