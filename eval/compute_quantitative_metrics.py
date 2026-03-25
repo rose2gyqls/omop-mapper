@@ -17,6 +17,7 @@ MapOMOP 정량평가 테이블 생성 (인간 평가자 기반)
 
 지원 구조:
 - 다중 데이터셋: SNUH condition, SNUH other(drug/procedure/measurement), SNOMED 1000
+- eval_config.yaml의 json_files: 도메인별 JSON 여러 개를 순서대로 병합 (엑셀 index와 맞출 때 누적 오프셋)
 - 다중 인간 평가자: 평가자별 시트 자동 감지 (첫 시트 제외)
 - 평가자별 비교, 도메인별 분석, 전체 통합 정확도
 
@@ -135,6 +136,43 @@ def load_run_concepts(json_path: Path) -> tuple[list[list[dict]], int]:
     raise ValueError("Unsupported JSON format")
 
 
+def load_run_concepts_merged(json_paths: list[Path]) -> tuple[list[list[dict]], int]:
+    """
+    도메인별로 나뉜 JSON 여러 개를 하나의 데이터셋처럼 병합.
+    각 파일은 보통 test_index가 1부터 다시 시작하므로, 파일 순서대로 누적 오프셋을 더해
+    eval 엑셀의 단일 index 열과 맞춘다. (json_paths 순서는 엑셀 행 도메인 블록 순서와 동일해야 함)
+    """
+    if not json_paths:
+        raise ValueError("json_paths가 비어 있습니다")
+    if len(json_paths) == 1:
+        return load_run_concepts(json_paths[0])
+
+    merged_runs: list[list[dict]] | None = None
+    num_runs: int | None = None
+    offset = 0
+
+    for path in json_paths:
+        runs, n = load_run_concepts(path)
+        if num_runs is None:
+            num_runs = n
+            merged_runs = [[] for _ in range(n)]
+        elif n != num_runs:
+            raise ValueError(
+                f"run 수 불일치: {path.name}는 {n}회, 이전 파일들은 {num_runs}회"
+            )
+        assert merged_runs is not None and num_runs is not None
+        max_idx = max(r["test_index"] for r in runs[0])
+        for run_i, run_list in enumerate(runs):
+            for r in run_list:
+                rr = dict(r)
+                rr["test_index"] = int(r["test_index"]) + offset
+                merged_runs[run_i].append(rr)
+        offset += max_idx
+
+    assert merged_runs is not None and num_runs is not None
+    return merged_runs, num_runs
+
+
 def _compute_domain_metrics(
     raw_scores_list: list[float],
     domain: str,
@@ -164,7 +202,7 @@ def _compute_domain_metrics(
 
 def compute_dataset_metrics(
     eval_path: Path,
-    json_path: Path,
+    json_path: Path | list[Path],
     dataset_name: str = "",
 ) -> dict[str, Any]:
     """
@@ -185,7 +223,10 @@ def compute_dataset_metrics(
     evaluator_sheets = sheet_names[1:]
 
     result_df = pd.read_excel(xl, sheet_name=result_sheet)
-    all_results, num_runs = load_run_concepts(json_path)
+    if isinstance(json_path, list):
+        all_results, num_runs = load_run_concepts_merged(json_path)
+    else:
+        all_results, num_runs = load_run_concepts(json_path)
 
     # by test_index: [run0_result, run1_result, ...]
     by_index: dict[int, list[dict]] = {}
@@ -380,17 +421,27 @@ def run_evaluation(
     for ds in datasets:
         name = ds.get("name", "unknown")
         eval_file = root / ds["eval_file"]
-        json_file = root / ds["json_file"]
+        json_files_cfg = ds.get("json_files")
+        if json_files_cfg:
+            json_arg: Path | list[Path] = [root / p for p in json_files_cfg]
+            missing = [p for p in json_arg if not p.exists()]
+        elif ds.get("json_file"):
+            json_arg = root / ds["json_file"]
+            missing = [json_arg] if not json_arg.exists() else []
+        else:
+            print(f"[건너뜀] {name}: json_file 또는 json_files 없음")
+            continue
 
         if not eval_file.exists():
             print(f"[건너뜀] {name}: eval 파일 없음 - {eval_file}")
             continue
-        if not json_file.exists():
-            print(f"[건너뜀] {name}: JSON 파일 없음 - {json_file}")
+        if missing:
+            for p in missing:
+                print(f"[건너뜀] {name}: JSON 파일 없음 - {p}")
             continue
 
         data_source = ds.get("data_source", "SNUH" if "SNUH" in name else "SNOMED")
-        res = compute_dataset_metrics(eval_file, json_path=json_file, dataset_name=name)
+        res = compute_dataset_metrics(eval_file, json_path=json_arg, dataset_name=name)
         res["data_source"] = data_source
         all_results[name] = res
 

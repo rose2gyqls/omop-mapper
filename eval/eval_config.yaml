@@ -1,20 +1,23 @@
 # MapOMOP 인간 평가 정량평가 설정
 # - eval_file: 인간 평가 엑셀 (첫 시트=unique concept 결과, 나머지=평가자별 시트)
-# - json_file: 20회 매핑 결과 JSON
+# - json_file: 20회 매핑 결과 JSON (한 파일)
+# - json_files: 도메인별 JSON 여러 개 — 리스트 순서가 엑셀의 index(행 순서) 블록과 같아야 함
 # - name: 데이터셋 식별자 (출력용)
 
 # data_source: "데이터" 컬럼 값 (SNUH | SNOMED)
 datasets:
-  - name: SNUH_condition
-    data_source: SNUH
-    eval_file: eval/evaluation_blind_test_1_SNUH_condition_용어.xlsx
-    json_file: test_logs/SNUH/mapping_snuh_20260308_144131_con.json
-
-  # 추후 추가 예정
-  # - name: SNUH_other
+  # - name: SNUH_condition
   #   data_source: SNUH
-  #   eval_file: eval/evaluation_blind_test_SNUH_other_domains.xlsx
-  #   json_file: test_logs/SNUH/mapping_snuh_other_domains.json
+  #   eval_file: eval/evaluation_blind_test_1_SNUH_condition_용어.xlsx
+  #   json_file: test_logs/SNUH/mapping_snuh_20260308_144131_con.json
+
+  - name: SNUH_other
+    data_source: SNUH
+    eval_file: eval/evaluation_blind_test_2_SNUH_drug_meas_proc_용어.xlsx
+    json_files:
+      - test_logs/SNUH/mapping_snuh_20260313_meas.json
+      - test_logs/SNUH/mapping_snuh_20260314_drug.json
+      - test_logs/SNUH/mapping_snuh_20260315_proc.json
 
   # - name: SNOMED_1000
   #   data_source: SNOMED
