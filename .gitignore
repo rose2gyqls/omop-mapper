@@ -147,6 +147,7 @@ test_logs/
 test_logs_*/
 temp/
 tmp/
+omophub/outputs/
 
 # Large data files (exceeds GitHub 100MB limit)
 data/
