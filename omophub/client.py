@@ -35,13 +35,25 @@ class SearchHit:
     raw: dict[str, Any]
 
 
+def _domain_from_row(row: dict[str, Any]) -> str | None:
+    """API가 domain_id 대신 domain 등 다른 키를 쓰는 경우 대비."""
+    for key in ("domain_id", "domain", "omop_domain"):
+        v = row.get(key)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s and s.lower() != "none":
+            return s
+    return None
+
+
 def _hit_from_row(row: dict[str, Any], score_key: str) -> SearchHit:
     return SearchHit(
         concept_id=row.get("concept_id"),
         concept_name=row.get("concept_name"),
         score=row.get(score_key),
         vocabulary_id=row.get("vocabulary_id"),
-        domain_id=row.get("domain_id"),
+        domain_id=_domain_from_row(row),
         concept_code=row.get("concept_code"),
         standard_concept=row.get("standard_concept"),
         raw=row,

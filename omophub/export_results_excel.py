@@ -3,7 +3,7 @@ OMOPHub 배치 출력 CSV → 요약 엑셀 (열 순서 고정).
 
 열: source_id, domain_id, source_value,
     ground_truth_concept_id(선택), ground_truth_concept_name(선택),
-    result_concept_id, result_concept_name, results_score
+    result_concept_id, result_concept_name, result_domain_id, results_score
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from omophub.top_hits import domain_id_from_top_hits_json
+
 OUTPUT_COLUMNS = [
     "source_id",
     "domain_id",
@@ -27,6 +29,7 @@ OUTPUT_COLUMNS = [
     "ground_truth_concept_name",
     "result_concept_id",
     "result_concept_name",
+    "result_domain_id",
     "results_score",
 ]
 
@@ -71,6 +74,14 @@ def omophub_csv_to_summary(df: pd.DataFrame) -> pd.DataFrame:
         out["result_concept_name"] = df["result1_concept_name"]
     else:
         out["result_concept_name"] = pd.NA
+
+    # 결과 domain은 top_hits_json 첫 히트 기준(입력 domain과 무관)
+    if "top_hits_json" in df.columns:
+        out["result_domain_id"] = df["top_hits_json"].map(domain_id_from_top_hits_json)
+    elif "result1_domain_id" in df.columns:
+        out["result_domain_id"] = df["result1_domain_id"]
+    else:
+        out["result_domain_id"] = pd.NA
 
     if "result1_score" in df.columns:
         out["results_score"] = df["result1_score"]

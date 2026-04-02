@@ -20,7 +20,17 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from omophub.client import OmopHubClient, OmopHubError, SearchHit, sleep_ratelimit
+from omophub.client import OmopHubClient, OmopHubError, SearchHit, _domain_from_row, sleep_ratelimit
+
+
+def _payload_domain(h: SearchHit) -> str | None:
+    """API 응답 행·SearchHit에서 결과 concept의 domain (입력 domain 사용 안 함)."""
+    d = h.domain_id
+    if d is not None and str(d).strip():
+        return str(d).strip()
+    if h.raw:
+        return _domain_from_row(h.raw)
+    return None
 
 
 def _detect_text_column(df: pd.DataFrame) -> str:
@@ -78,13 +88,14 @@ def _hits_to_columns(
 ) -> dict[str, Any]:
     payload = []
     for h in hits:
+        pdomain = _payload_domain(h)
         payload.append(
             {
                 "concept_id": h.concept_id,
                 "concept_name": h.concept_name,
                 "score": h.score,
                 "vocabulary_id": h.vocabulary_id,
-                "domain_id": h.domain_id,
+                "domain_id": pdomain,
                 "concept_code": h.concept_code,
                 "standard_concept": h.standard_concept,
             }
@@ -97,6 +108,7 @@ def _hits_to_columns(
         out["error"] = error
         out["result1_concept_id"] = None
         out["result1_concept_name"] = None
+        out["result1_domain_id"] = None
         out["result1_score"] = None
         out["result1_vocabulary_id"] = None
         out["result1_standard_concept"] = None
@@ -107,12 +119,14 @@ def _hits_to_columns(
         top = hits[0]
         out["result1_concept_id"] = top.concept_id
         out["result1_concept_name"] = top.concept_name
+        out["result1_domain_id"] = payload[0].get("domain_id") if payload else None
         out["result1_score"] = top.score
         out["result1_vocabulary_id"] = top.vocabulary_id
         out["result1_standard_concept"] = top.standard_concept
     else:
         out["result1_concept_id"] = None
         out["result1_concept_name"] = None
+        out["result1_domain_id"] = None
         out["result1_score"] = None
         out["result1_vocabulary_id"] = None
         out["result1_standard_concept"] = None

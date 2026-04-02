@@ -24,6 +24,7 @@ USAGI_TEXT_COL = "sourceName"
 OMOPHUB_RENAME = {
     "result_concept_id": "omophub_result_concept_id",
     "result_concept_name": "omophub_result_concept_name",
+    "result_domain_id": "omophub_result_domain_id",
     "results_score": "omophub_results_score",
 }
 
@@ -43,12 +44,14 @@ FINAL_COLUMN_ORDER = [
     "ground_truth_concept_name",
     "omophub_result_concept_id",
     "omophub_result_concept_name",
+    "omophub_result_domain_id",
     "omophub_results_score",
     "usagi_targetConceptId",
     "usagi_targetConceptName",
     "usagi_targetDomainId",
     "usagi_targetStandardConcept",
     "usagi_matchScore",
+    "omophub_usagi_same",
 ]
 
 
@@ -146,6 +149,7 @@ def merge_input_ordered(
         "__k_text",
         "omophub_result_concept_id",
         "omophub_result_concept_name",
+        "omophub_result_domain_id",
         "omophub_results_score",
     ]
     omo = omo[[c for c in omo_cols if c in omo.columns]]
@@ -162,8 +166,22 @@ def merge_input_ordered(
     for c in FINAL_COLUMN_ORDER:
         if c not in m.columns:
             m[c] = pd.NA
+
+    m["omophub_usagi_same"] = _omophub_usagi_match_labels(m)
+
     m = m[FINAL_COLUMN_ORDER]
     return m, dup_note
+
+
+def _omophub_usagi_match_labels(df: pd.DataFrame) -> pd.Series:
+    """OMOPHub·USAGI 1순위 concept_id 가 같으면 같음, 둘 다 있으면 다름, 하나라도 없으면 빈값."""
+    o = pd.to_numeric(df.get("omophub_result_concept_id"), errors="coerce")
+    u = pd.to_numeric(df.get("usagi_targetConceptId"), errors="coerce")
+    out = pd.Series(pd.NA, index=df.index, dtype=object)
+    both = o.notna() & u.notna()
+    out.loc[both & (o.round() == u.round())] = "같음"
+    out.loc[both & (o.round() != u.round())] = "다름"
+    return out
 
 
 def _nullable_int_series(s: pd.Series) -> pd.Series:
