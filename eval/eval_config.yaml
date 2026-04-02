@@ -11,15 +11,15 @@ datasets:
   #   eval_file: eval/evaluation_blind_test_1_SNUH_condition_용어.xlsx
   #   json_file: test_logs/SNUH/mapping_snuh_20260308_144131_con.json
 
-  - name: SNUH_other
-    data_source: SNUH
-    eval_file: eval/evaluation_blind_test_2_SNUH_drug_meas_proc_용어.xlsx
-    json_files:
-      - test_logs/SNUH/mapping_snuh_20260313_meas.json
-      - test_logs/SNUH/mapping_snuh_20260314_drug.json
-      - test_logs/SNUH/mapping_snuh_20260315_proc.json
+  # - name: SNUH_other
+  #   data_source: SNUH
+  #   eval_file: eval/evaluation_blind_test_2_SNUH_drug_meas_proc_용어.xlsx
+  #   json_files:
+  #     - test_logs/SNUH/mapping_snuh_20260313_meas.json
+  #     - test_logs/SNUH/mapping_snuh_20260314_drug.json
+  #     - test_logs/SNUH/mapping_snuh_20260315_proc.json
 
-  # - name: SNOMED_1000
-  #   data_source: SNOMED
-  #   eval_file: eval/evaluation_blind_test_SNOMED_1000.xlsx
-  #   json_file: test_logs/SNOMED/mapping_snomed_1000.json
+  - name: SNOMED_1000
+    data_source: SNOMED
+    eval_file: eval/evaluation_blind_test_3_SNOMED_용어.xlsx
+    json_file: test_logs/SNOMED/mapping_snomed_merged.json
