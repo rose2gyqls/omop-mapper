@@ -221,7 +221,7 @@ class LocalCSVDataSource(BaseDataSource):
         if not self.concept_small_path.exists():
             self.logger.error(
                 f"CONCEPT_SMALL 파일을 찾을 수 없습니다: {self.concept_small_path}\n"
-                f"prepare_concept_small.py를 먼저 실행하여 파일을 생성하세요."
+                f"scripts/prepare_concept_small.py를 먼저 실행하여 파일을 생성하세요."
             )
             return
         

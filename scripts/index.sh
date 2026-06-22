@@ -65,7 +65,7 @@ if [[ "$1" == "--prepare-only" ]]; then
     echo ""
     echo "[Step] CONCEPT_SMALL.csv 생성"
     echo "--------------------------------------------"
-    python prepare_concept_small.py --data-folder "$DATA_FOLDER"
+    python scripts/prepare_concept_small.py --data-folder "$DATA_FOLDER"
     echo ""
     echo "완료!"
     exit 0
@@ -91,7 +91,7 @@ if [[ "$SOURCE_TYPE" == "local_csv" && "$ADD_ISA" != "true" ]]; then
         echo "  -> 재생성하려면: ./scripts/index.sh --prepare-only"
     else
         echo "  -> 생성 중..."
-        python prepare_concept_small.py --data-folder "$DATA_FOLDER"
+        python scripts/prepare_concept_small.py --data-folder "$DATA_FOLDER"
         echo "  -> 완료"
     fi
     
@@ -109,7 +109,7 @@ else
 fi
 
 # 인덱싱 실행 (DATA_FOLDER를 Python에 전달; 명령줄 --data-folder가 있으면 그쪽이 우선)
-python run_indexing.py --data-folder "$DATA_FOLDER" "$@"
+python scripts/run_indexing.py --data-folder "$DATA_FOLDER" "$@"
 
 echo ""
 echo "============================================"

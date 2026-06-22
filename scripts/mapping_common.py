@@ -19,7 +19,7 @@ import pandas as pd
 # -----------------------------------------------------------------------------
 # 데이터 소스 설정 (확장 가능: 새 데이터 추가 시 여기에 등록)
 # -----------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DATA_SOURCES = {
     "snuh": {

@@ -6,10 +6,10 @@
 동일한 timestamp로 JSON(raw), LOG, XLSX 3개 파일을 test_logs/에 생성합니다.
 
 Usage:
-    python run_mapping.py snuh
-    python run_mapping.py snomed
-    python run_mapping.py snuh --sample-per-domain 5 --random
-    python run_mapping.py snuh --workers 4   # 병렬 처리
+    python scripts/run_mapping.py snuh
+    python scripts/run_mapping.py snomed
+    python scripts/run_mapping.py snuh --sample-per-domain 5 --random
+    python scripts/run_mapping.py snuh --workers 4   # 병렬 처리
 """
 
 import argparse
@@ -22,9 +22,10 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-_root = Path(__file__).resolve().parent
+_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root / "src"))
 sys.path.insert(0, str(_root))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from MapOMOP.entity_mapping_api import EntityMappingAPI, EntityInput, DomainID
 from MapOMOP.elasticsearch_client import ElasticsearchClient

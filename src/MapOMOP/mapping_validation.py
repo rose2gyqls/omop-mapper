@@ -140,7 +140,8 @@ class MappingValidator:
                 messages=messages,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                json_mode=True
+                json_mode=True,
+                metrics_tag="mapping_validation",
             )
             
             if response is None:

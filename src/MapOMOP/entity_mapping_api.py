@@ -18,7 +18,7 @@ from .mapping_stages import (
     ScoringMode
 )
 from .mapping_validation import MappingValidator
-from .llm_client import get_llm_client
+from .llm_client import LLMClient, create_llm_client
 
 # Optional dependencies
 try:
@@ -99,6 +99,8 @@ class EntityMappingAPI:
         llm_temperature: Optional[float] = None,
         llm_top_p: Optional[float] = None,
         llm_max_tokens: Optional[int] = None,
+        llm_client: Optional[LLMClient] = None,
+        llm_enable_metrics: bool = False,
     ):
         """
         Initialize mapping API.
@@ -119,6 +121,8 @@ class EntityMappingAPI:
             llm_temperature: Optional temperature override
             llm_top_p: Optional top_p override
             llm_max_tokens: Optional max output tokens override
+            llm_client: Pre-configured LLM client (e.g. benchmarking with metrics enabled)
+            llm_enable_metrics: Record per-call latency/tokens on the shared LLM client
         """
         self.es_client = es_client or ElasticsearchClient.create_default()
         self.confidence_threshold = confidence_threshold
@@ -149,15 +153,19 @@ class EntityMappingAPI:
 
         self.llm_client = None
         if self.scoring_mode in [ScoringMode.LLM, ScoringMode.LLM_WITH_SCORE] or self.use_validation:
-            self.llm_client = get_llm_client(
-                provider=self.llm_provider,
-                model=self.llm_model,
-                base_url=self.llm_base_url,
-                api_key=self.llm_api_key,
-                temperature=self.llm_temperature,
-                top_p=self.llm_top_p,
-                max_tokens=self.llm_max_tokens,
-            )
+            if llm_client is not None:
+                self.llm_client = llm_client
+            else:
+                self.llm_client = create_llm_client(
+                    provider=self.llm_provider,
+                    model=self.llm_model,
+                    base_url=self.llm_base_url,
+                    api_key=self.llm_api_key,
+                    temperature=self.llm_temperature,
+                    top_p=self.llm_top_p,
+                    max_tokens=self.llm_max_tokens,
+                    enable_metrics=llm_enable_metrics,
+                )
 
         self.validator = None
         if self.use_validation:

@@ -76,7 +76,7 @@ ES_USE_SSL=false
 Run the local app:
 
 ```bash
-streamlit run app.py
+streamlit run scripts/app.py
 ```
 
 Then open the browser URL printed by Streamlit, enter:
@@ -99,7 +99,7 @@ This repository includes a [`render.yaml`](./render.yaml) Blueprint for deployin
    - `plan: free`
    - `region: singapore`
    - `buildCommand: python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt`
-   - `startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
+   - `startCommand: streamlit run scripts/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
 5. Provide the prompted secret values for:
    - `OPENAI_API_KEY`
    - `ES_SERVER_HOST`
@@ -120,7 +120,7 @@ If you prefer not to use the Blueprint, create a `Web Service` in the Render das
 
 - Runtime: `Python 3`
 - Build Command: `python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt`
-- Start Command: `streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
+- Start Command: `streamlit run scripts/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
 - Health Check Path: `/_stcore/health`
 
 Then add the environment variables from the table below in the Render `Environment` settings.
@@ -232,15 +232,19 @@ results = api.map_entity(entity)
 
 ```text
 omop-mapper/
-├── app.py                    # Streamlit local demo UI
-├── run_indexing.py           # Indexing CLI
-├── run_mapping.py            # Mapping CLI
 ├── requirements.txt          # App + mapping CLI runtime
 ├── requirements-indexing.txt # PostgreSQL indexing extras
 ├── requirements-dev.txt      # Notebook and developer tooling
 ├── indexing/                 # Index-building pipeline
 ├── eval/                     # Evaluation scripts
-├── scripts/                  # Shell wrappers and utilities
+├── scripts/                  # Shell wrappers and CLIs
+│   ├── app.py                # Streamlit local demo UI
+│   ├── run_indexing.py       # Indexing CLI
+│   ├── run_mapping.py        # Mapping CLI
+│   ├── prepare_concept_small.py # CONCEPT_SMALL.csv builder
+│   ├── mapping_common.py     # Shared mapping helpers
+│   ├── index.sh              # Indexing wrapper
+│   └── run_mapping.sh        # Mapping wrapper
 ├── src/MapOMOP/              # Core mapping package
 └── .env.example              # Local config template
 ```

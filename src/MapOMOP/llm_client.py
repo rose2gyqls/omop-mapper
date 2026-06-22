@@ -8,6 +8,8 @@ Provides a unified LangChain-based interface for multiple LLM routes:
 
 import logging
 import os
+import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -51,6 +53,217 @@ TOGETHER_MODEL_ALIASES = {
     "gpt_oss_20b": "openai/gpt-oss-20b",
     "llama4_maverick": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
 }
+
+
+@dataclass
+class LLMCallRecord:
+    """Single LLM API call measurement."""
+
+    tag: str
+    latency_ms: float
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost_usd: float
+    model: str
+    provider: str
+    success: bool = True
+    error: Optional[str] = None
+
+
+@dataclass
+class LLMMetricsSummary:
+    """Aggregated metrics over multiple LLM calls."""
+
+    call_count: int
+    success_count: int
+    mean_latency_ms: float
+    p50_latency_ms: float
+    p95_latency_ms: float
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    total_cost_usd: float
+    mean_cost_usd_per_call: float
+    by_tag: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+def _percentile(values: List[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * (pct / 100.0)
+    low = int(rank)
+    high = min(low + 1, len(ordered) - 1)
+    weight = rank - low
+    return ordered[low] * (1.0 - weight) + ordered[high] * weight
+
+
+def _extract_message_text(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif hasattr(block, "text"):
+                parts.append(str(block.text))
+        return "".join(parts)
+    return str(content or "")
+
+
+def _extract_token_usage(message: Any) -> Dict[str, int]:
+    usage_meta = getattr(message, "usage_metadata", None) or {}
+    if usage_meta:
+        input_tokens = int(usage_meta.get("input_tokens") or 0)
+        output_tokens = int(usage_meta.get("output_tokens") or 0)
+        total_tokens = int(usage_meta.get("total_tokens") or (input_tokens + output_tokens))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    response_meta = getattr(message, "response_metadata", None) or {}
+    token_usage = response_meta.get("token_usage") or response_meta.get("usage") or {}
+    input_tokens = int(
+        token_usage.get("input_tokens")
+        or token_usage.get("prompt_tokens")
+        or 0
+    )
+    output_tokens = int(
+        token_usage.get("output_tokens")
+        or token_usage.get("completion_tokens")
+        or 0
+    )
+    total_tokens = int(token_usage.get("total_tokens") or (input_tokens + output_tokens))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def get_default_price_per_1m(provider: str, model: str) -> tuple[float, float]:
+    """
+    Return (input_usd_per_1m, output_usd_per_1m) for cost estimation.
+
+    Override with LLM_INPUT_USD_PER_1M / LLM_OUTPUT_USD_PER_1M in .env.
+    """
+
+    input_override = os.getenv("LLM_INPUT_USD_PER_1M")
+    output_override = os.getenv("LLM_OUTPUT_USD_PER_1M")
+    if input_override and output_override:
+        try:
+            return float(input_override), float(output_override)
+        except ValueError:
+            pass
+
+    model_lower = (model or "").lower()
+    if normalize_provider(provider) == LLMProvider.OPENAI:
+        if model_lower.startswith("gpt-5-mini"):
+            return 0.25, 2.00
+        if model_lower.startswith("gpt-5"):
+            return 1.25, 10.00
+        if model_lower.startswith("gpt-4o-mini"):
+            return 0.15, 0.60
+        if model_lower.startswith("gpt-4o"):
+            return 2.50, 10.00
+    return 0.0, 0.0
+
+
+def estimate_cost_usd(
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    provider: str,
+    model: str,
+    input_price_per_1m: Optional[float] = None,
+    output_price_per_1m: Optional[float] = None,
+) -> float:
+    """Estimate USD cost from token counts and per-1M prices."""
+
+    if input_price_per_1m is None or output_price_per_1m is None:
+        default_in, default_out = get_default_price_per_1m(provider, model)
+        input_price_per_1m = default_in if input_price_per_1m is None else input_price_per_1m
+        output_price_per_1m = default_out if output_price_per_1m is None else output_price_per_1m
+
+    return (
+        (input_tokens / 1_000_000.0) * input_price_per_1m
+        + (output_tokens / 1_000_000.0) * output_price_per_1m
+    )
+
+
+def summarize_llm_metrics(
+    records: List[LLMCallRecord],
+    *,
+    input_price_per_1m: Optional[float] = None,
+    output_price_per_1m: Optional[float] = None,
+) -> LLMMetricsSummary:
+    """Aggregate call records into paper-friendly summary statistics."""
+
+    if not records:
+        return LLMMetricsSummary(
+            call_count=0,
+            success_count=0,
+            mean_latency_ms=0.0,
+            p50_latency_ms=0.0,
+            p95_latency_ms=0.0,
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_tokens=0,
+            total_cost_usd=0.0,
+            mean_cost_usd_per_call=0.0,
+            by_tag={},
+        )
+
+    latencies = [r.latency_ms for r in records if r.success]
+    success_records = [r for r in records if r.success]
+    total_cost = sum(r.cost_usd for r in success_records)
+
+    by_tag: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        bucket = by_tag.setdefault(
+            record.tag,
+            {
+                "call_count": 0,
+                "success_count": 0,
+                "mean_latency_ms": 0.0,
+                "total_tokens": 0,
+                "total_cost_usd": 0.0,
+                "_latencies": [],
+            },
+        )
+        bucket["call_count"] += 1
+        if record.success:
+            bucket["success_count"] += 1
+            bucket["total_tokens"] += record.total_tokens
+            bucket["total_cost_usd"] += record.cost_usd
+            bucket["_latencies"].append(record.latency_ms)
+
+    for bucket in by_tag.values():
+        tag_latencies = bucket.pop("_latencies")
+        bucket["mean_latency_ms"] = (
+            sum(tag_latencies) / len(tag_latencies) if tag_latencies else 0.0
+        )
+
+    return LLMMetricsSummary(
+        call_count=len(records),
+        success_count=len(success_records),
+        mean_latency_ms=sum(latencies) / len(latencies) if latencies else 0.0,
+        p50_latency_ms=_percentile(latencies, 50),
+        p95_latency_ms=_percentile(latencies, 95),
+        total_input_tokens=sum(r.input_tokens for r in success_records),
+        total_output_tokens=sum(r.output_tokens for r in success_records),
+        total_tokens=sum(r.total_tokens for r in success_records),
+        total_cost_usd=total_cost,
+        mean_cost_usd_per_call=total_cost / len(success_records) if success_records else 0.0,
+        by_tag=by_tag,
+    )
 
 
 DEFAULT_CONFIGS = {
@@ -226,6 +439,9 @@ class LLMClient:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         use_env_config: bool = True,
+        enable_metrics: bool = False,
+        input_price_per_1m: Optional[float] = None,
+        output_price_per_1m: Optional[float] = None,
     ):
         env_config = get_env_config(provider=provider) if use_env_config else {
             "provider": normalize_provider(provider),
@@ -251,6 +467,10 @@ class LLMClient:
         self.max_tokens = max_tokens if max_tokens is not None else env_config["max_tokens"]
         self.supports_json_mode = env_config["supports_json_mode"]
         self.use_env_config = use_env_config
+        self.enable_metrics = enable_metrics
+        self.input_price_per_1m = input_price_per_1m
+        self.output_price_per_1m = output_price_per_1m
+        self.metrics_records: List[LLMCallRecord] = []
 
         self.client = None
         self._initialize_client()
@@ -339,6 +559,60 @@ class LLMClient:
     def is_initialized(self) -> bool:
         return self.client is not None
 
+    def reset_metrics(self) -> None:
+        """Clear accumulated call metrics."""
+
+        self.metrics_records.clear()
+
+    def get_metrics_records(self) -> List[LLMCallRecord]:
+        """Return a shallow copy of accumulated metrics records."""
+
+        return list(self.metrics_records)
+
+    def summarize_metrics(self) -> LLMMetricsSummary:
+        """Summarize metrics collected when enable_metrics=True."""
+
+        return summarize_llm_metrics(
+            self.metrics_records,
+            input_price_per_1m=self.input_price_per_1m,
+            output_price_per_1m=self.output_price_per_1m,
+        )
+
+    def _record_call_metric(
+        self,
+        *,
+        tag: str,
+        latency_ms: float,
+        usage: Dict[str, int],
+        success: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        if not self.enable_metrics:
+            return
+
+        cost_usd = estimate_cost_usd(
+            usage["input_tokens"],
+            usage["output_tokens"],
+            provider=self.provider,
+            model=self.model,
+            input_price_per_1m=self.input_price_per_1m,
+            output_price_per_1m=self.output_price_per_1m,
+        )
+        self.metrics_records.append(
+            LLMCallRecord(
+                tag=tag,
+                latency_ms=latency_ms,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                total_tokens=usage["total_tokens"],
+                cost_usd=cost_usd,
+                model=self.model,
+                provider=self.provider,
+                success=success,
+                error=error,
+            )
+        )
+
     def chat_completion(
         self,
         messages: List[Dict[str, str]],
@@ -346,16 +620,20 @@ class LLMClient:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
+        metrics_tag: str = "chat_completion",
     ) -> Optional[str]:
         """
-        Send a chat completion request through a LangChain prompt/model/parser
-        chain and return the raw text response.
+        Send a chat completion request and return the raw text response.
+
+        When enable_metrics=True, each call records latency and token usage
+        (from provider response metadata) for cost/latency benchmarking.
         """
 
         if not self.is_initialized:
             logger.error("LLM client not initialized")
             return None
 
+        started = time.perf_counter()
         try:
             prompt_messages = [
                 (_normalize_prompt_role(msg["role"]), _escape_prompt_content(msg["content"]))
@@ -371,9 +649,30 @@ class LLMClient:
             if model is None:
                 return None
 
+            if self.enable_metrics:
+                ai_message = (prompt | model).invoke({})
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                usage = _extract_token_usage(ai_message)
+                self._record_call_metric(
+                    tag=metrics_tag,
+                    latency_ms=latency_ms,
+                    usage=usage,
+                    success=True,
+                )
+                return _extract_message_text(ai_message)
+
             chain = prompt | model | StrOutputParser()
             return chain.invoke({})
         except Exception as e:
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            if self.enable_metrics:
+                self._record_call_metric(
+                    tag=metrics_tag,
+                    latency_ms=latency_ms,
+                    usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    success=False,
+                    error=str(e),
+                )
             logger.error("LLM API call failed: %s", e)
             return None
 

@@ -8,14 +8,18 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from MapOMOP.llm_client import (
+    LLMCallRecord,
     LLMProvider,
     _default_max_tokens_for_model,
     _escape_prompt_content,
+    _extract_token_usage,
     _normalize_prompt_role,
+    estimate_cost_usd,
     get_env_config,
     get_llm_client,
     normalize_model_name,
     normalize_provider,
+    summarize_llm_metrics,
 )
 
 
@@ -153,6 +157,60 @@ class LLMClientConfigTest(unittest.TestCase):
         self.assertEqual(_normalize_prompt_role("user"), "human")
         self.assertEqual(_normalize_prompt_role("assistant"), "ai")
         self.assertEqual(_normalize_prompt_role("system"), "system")
+
+    def test_extract_token_usage_from_usage_metadata(self):
+        class FakeMessage:
+            usage_metadata = {
+                "input_tokens": 100,
+                "output_tokens": 40,
+                "total_tokens": 140,
+            }
+            response_metadata = {}
+
+        usage = _extract_token_usage(FakeMessage())
+        self.assertEqual(usage["input_tokens"], 100)
+        self.assertEqual(usage["output_tokens"], 40)
+        self.assertEqual(usage["total_tokens"], 140)
+
+    def test_summarize_llm_metrics_aggregates_latency_and_cost(self):
+        records = [
+            LLMCallRecord(
+                tag="stage3_hybrid_scoring",
+                latency_ms=1000.0,
+                input_tokens=500,
+                output_tokens=200,
+                total_tokens=700,
+                cost_usd=0.01,
+                model="gpt-5-mini",
+                provider="openai",
+            ),
+            LLMCallRecord(
+                tag="stage3_hybrid_scoring",
+                latency_ms=2000.0,
+                input_tokens=600,
+                output_tokens=300,
+                total_tokens=900,
+                cost_usd=0.02,
+                model="gpt-5-mini",
+                provider="openai",
+            ),
+        ]
+        summary = summarize_llm_metrics(records)
+        self.assertEqual(summary.call_count, 2)
+        self.assertEqual(summary.mean_latency_ms, 1500.0)
+        self.assertEqual(summary.total_tokens, 1600)
+        self.assertAlmostEqual(summary.total_cost_usd, 0.03)
+
+    def test_estimate_cost_usd_uses_per_1m_prices(self):
+        cost = estimate_cost_usd(
+            1_000_000,
+            500_000,
+            provider=LLMProvider.OPENAI,
+            model="gpt-5-mini",
+            input_price_per_1m=0.25,
+            output_price_per_1m=2.0,
+        )
+        self.assertAlmostEqual(cost, 1.25)
 
 
 def _build_smoke_client(target: dict):

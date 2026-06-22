@@ -6,7 +6,7 @@ services:
     region: singapore
     autoDeployTrigger: commit
     buildCommand: python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    startCommand: streamlit run scripts/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     healthCheckPath: /_stcore/health
     envVars:
       - key: PYTHON_VERSION

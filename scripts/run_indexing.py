@@ -6,25 +6,25 @@ OMOP CDM 인덱싱 스크립트
 
 Usage:
     # 기본 설정으로 실행 (concept-small, synonym, relationship)
-    python run_indexing.py
+    python scripts/run_indexing.py
     
     # CLI 옵션으로 실행
-    python run_indexing.py local_csv --data-folder /path/to/data --tables concept-small synonym
-    python run_indexing.py postgres --tables concept-small relationship synonym
+    python scripts/run_indexing.py local_csv --data-folder /path/to/data --tables concept-small synonym
+    python scripts/run_indexing.py postgres --tables concept-small relationship synonym
     
     # 테스트 (일부 데이터만)
-    python run_indexing.py local_csv --max-rows 10000
+    python scripts/run_indexing.py local_csv --max-rows 10000
     
     # 끊긴 부분부터 재개 (Checkpoint 기반)
-    python run_indexing.py local_csv --resume
-    python run_indexing.py local_csv --resume --tables synonym
+    python scripts/run_indexing.py local_csv --resume
+    python scripts/run_indexing.py local_csv --resume --tables synonym
     
     # 기존 concept-relationship 인덱스에 'Is a' 관계만 추가 (기존 데이터 삭제 없음)
-    python run_indexing.py local_csv --add-isa
-    python run_indexing.py postgres --add-isa
+    python scripts/run_indexing.py local_csv --add-isa
+    python scripts/run_indexing.py postgres --add-isa
     
     # 429 완화 (bulk 요청 간 대기)
-    python run_indexing.py local_csv --resume --bulk-delay 1
+    python scripts/run_indexing.py local_csv --resume --bulk-delay 1
 """
 
 import sys
@@ -174,8 +174,10 @@ def main():
     args = parse_args()
     
     # 경로 설정
-    sys.path.insert(0, str(Path(__file__).parent))
-    sys.path.insert(0, str(Path(__file__).parent / "indexing"))
+    _root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_root))
+    sys.path.insert(0, str(_root / "indexing"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     
     # 로깅 설정
     log_file = setup_logging(args.source_type)

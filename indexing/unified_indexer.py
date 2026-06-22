@@ -387,7 +387,7 @@ class UnifiedIndexer:
             if total == 0:
                 self.logger.error(
                     "CONCEPT_SMALL 파일이 없거나 비어있습니다. "
-                    "prepare_concept_small.py를 먼저 실행하세요."
+                    "scripts/prepare_concept_small.py를 먼저 실행하세요."
                 )
                 return False
             

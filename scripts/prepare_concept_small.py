@@ -6,8 +6,8 @@ CONCEPT 테이블과 CONCEPT_SYNONYM 테이블(language_concept_id=4180186)을 �
 concept-small.csv 파일을 생성합니다.
 
 Usage:
-    python prepare_concept_small.py --data-folder /path/to/omop-cdm
-    python prepare_concept_small.py  # 기본 경로 사용
+    python scripts/prepare_concept_small.py --data-folder /path/to/omop-cdm
+    python scripts/prepare_concept_small.py  # 기본 경로 사용
 """
 
 import argparse
@@ -139,7 +139,7 @@ def main():
     
     parser.add_argument(
         '--data-folder',
-        default=str(Path(__file__).parent / "data" / "omop-cdm"),
+        default=str(Path(__file__).parent.parent / "data" / "omop-cdm"),
         help='OMOP CDM 데이터 폴더 경로 (default: ./data/omop-cdm)'
     )
     parser.add_argument(
