@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-OMOP CDM 인덱싱 스크립트
+OMOP CDM indexing script
 
-설정값을 수정하고 실행하거나, CLI 옵션으로 오버라이드할 수 있습니다.
+Edit the configuration values and run, or override them with CLI options.
 
 Usage:
-    # 기본 설정으로 실행 (concept-small, synonym, relationship)
+    # Run with default settings (concept-small, synonym, relationship)
     python scripts/run_indexing.py
     
-    # CLI 옵션으로 실행
+    # Run with CLI options
     python scripts/run_indexing.py local_csv --data-folder /path/to/data --tables concept-small synonym
     python scripts/run_indexing.py postgres --tables concept-small relationship synonym
     
-    # 테스트 (일부 데이터만)
+    # Test (partial data only)
     python scripts/run_indexing.py local_csv --max-rows 10000
     
-    # 끊긴 부분부터 재개 (Checkpoint 기반)
+    # Resume from where it stopped (Checkpoint-based)
     python scripts/run_indexing.py local_csv --resume
     python scripts/run_indexing.py local_csv --resume --tables synonym
     
-    # 기존 concept-relationship 인덱스에 'Is a' 관계만 추가 (기존 데이터 삭제 없음)
+    # Add only 'Is a' relationships to an existing concept-relationship index (no deletion of existing data)
     python scripts/run_indexing.py local_csv --add-isa
     python scripts/run_indexing.py postgres --add-isa
     
-    # 429 완화 (bulk 요청 간 대기)
+    # Mitigate 429s (wait between bulk requests)
     python scripts/run_indexing.py local_csv --resume --bulk-delay 1
 """
 
@@ -39,23 +39,23 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 
 # ============================================================================
-# 기본 설정 (CLI 옵션이 없으면 이 값 사용)
+# Default settings (used when no CLI option is given)
 # ============================================================================
 
-# 데이터 소스 타입: 'local_csv' 또는 'postgres'
+# Data source type: 'local_csv' or 'postgres'
 DEFAULT_SOURCE = 'local_csv'
 
-# 인덱싱할 테이블 목록
-# 옵션: 'concept-small', 'synonym', 'relationship', 'concept'
+# List of tables to index
+# Options: 'concept-small', 'synonym', 'relationship', 'concept'
 DEFAULT_TABLES = ['concept-small', 'synonym', 'relationship']
 
 # ----------------------------------------------------------------------------
-# Local CSV 설정
+# Local CSV settings
 # ----------------------------------------------------------------------------
-DEFAULT_DATA_FOLDER = '/Users/rose/omop-mapper/data/omop-cdm'
+DEFAULT_DATA_FOLDER = str(Path(__file__).resolve().parent.parent / 'data' / 'omop-cdm')
 
 # ----------------------------------------------------------------------------
-# PostgreSQL 설정
+# PostgreSQL settings
 # ----------------------------------------------------------------------------
 DEFAULT_PG_HOST = os.getenv('PG_HOST')
 DEFAULT_PG_PORT = os.getenv('PG_PORT', '5432')
@@ -64,7 +64,7 @@ DEFAULT_PG_USER = os.getenv('PG_USER')
 DEFAULT_PG_PASSWORD = os.getenv('PG_PASSWORD')
 
 # ----------------------------------------------------------------------------
-# Elasticsearch 설정
+# Elasticsearch settings
 # ----------------------------------------------------------------------------
 DEFAULT_ES_HOST = os.getenv('ES_SERVER_HOST')
 DEFAULT_ES_PORT = int(os.getenv('ES_SERVER_PORT', '9200'))
@@ -72,20 +72,20 @@ DEFAULT_ES_USER = os.getenv('ES_SERVER_USERNAME')
 DEFAULT_ES_PASSWORD = os.getenv('ES_SERVER_PASSWORD')
 
 # ----------------------------------------------------------------------------
-# 인덱싱 옵션 (대용량/GPU 최적화 기본값)
+# Indexing options (defaults tuned for large-scale / GPU)
 # ----------------------------------------------------------------------------
-DEFAULT_GPU = 0                 # GPU 번호 (-1: CPU 사용)
-DEFAULT_EMBEDDINGS = True       # SapBERT 임베딩 포함 여부
-DEFAULT_LOWERCASE = True        # concept_name 소문자 변환 여부
-DEFAULT_BATCH_SIZE = 512        # 임베딩 배치 크기 (GPU: 512~1024 권장)
-DEFAULT_CHUNK_SIZE = 10000      # 데이터 청크 크기 (클수록 GPU 활용·ES round-trip 감소)
+DEFAULT_GPU = 0                 # GPU number (-1: use CPU)
+DEFAULT_EMBEDDINGS = True       # Whether to include SapBERT embeddings
+DEFAULT_LOWERCASE = True        # Whether to lowercase concept_name
+DEFAULT_BATCH_SIZE = 512        # Embedding batch size (GPU: 512-1024 recommended)
+DEFAULT_CHUNK_SIZE = 10000      # Data chunk size (larger = better GPU utilization, fewer ES round-trips)
 
 # ============================================================================
-# 메인 코드
+# Main code
 # ============================================================================
 
 def setup_logging(source_type: str) -> str:
-    """로깅 설정"""
+    """Configure logging"""
     log_file = f'indexing_{source_type}_{time.strftime("%Y%m%d_%H%M%S")}.log'
     logging.basicConfig(
         level=logging.INFO,
@@ -99,127 +99,127 @@ def setup_logging(source_type: str) -> str:
 
 
 def parse_args():
-    """CLI 인자 파싱"""
+    """Parse CLI arguments"""
     parser = argparse.ArgumentParser(
-        description='OMOP CDM Elasticsearch 인덱싱',
+        description='OMOP CDM Elasticsearch indexing',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    # 데이터 소스 (선택적)
+    # Data source (optional)
     parser.add_argument(
         'source_type', nargs='?',
         choices=['local_csv', 'postgres'],
         default=DEFAULT_SOURCE,
-        help=f'데이터 소스 타입 (기본: {DEFAULT_SOURCE})'
+        help=f'Data source type (default: {DEFAULT_SOURCE})'
     )
     
-    # 공통 옵션
+    # Common options
     parser.add_argument('--tables', nargs='+',
         choices=['concept', 'concept-small', 'relationship', 'synonym'],
         default=DEFAULT_TABLES,
-        help=f'인덱싱할 테이블 (기본: {DEFAULT_TABLES})')
+        help=f'Tables to index (default: {DEFAULT_TABLES})')
     parser.add_argument('--gpu', type=int, default=DEFAULT_GPU,
-        help=f'GPU 번호, -1은 CPU (기본: {DEFAULT_GPU})')
+        help=f'GPU number, -1 for CPU (default: {DEFAULT_GPU})')
     parser.add_argument('--no-embeddings', action='store_true',
-        help='SapBERT 임베딩 비활성화')
+        help='Disable SapBERT embeddings')
     parser.add_argument('--no-lowercase', action='store_true',
-        help='소문자 변환 비활성화')
+        help='Disable lowercase conversion')
     parser.add_argument('--max-rows', type=int, default=None,
-        help='최대 처리 행 수 (테스트용)')
+        help='Maximum number of rows to process (for testing)')
     parser.add_argument('--resume', action='store_true',
-        help='끊긴 부분부터 재개: Checkpoint 파일(.indexing_checkpoint.json)에서 '
-             '마지막 성공 위치를 읽고, 그 다음 행부터 이어서 인덱싱. '
-             '기존 인덱스 유지, 멱등한 _id로 중복 없음.')
+        help='Resume from where it stopped: read the last successful position '
+             'from the checkpoint file (.indexing_checkpoint.json) and continue '
+             'indexing from the next row. Keeps the existing index; idempotent _id avoids duplicates.')
     parser.add_argument('--add-isa', action='store_true',
-        help="기존 concept-relationship 인덱스에 'Is a' 관계만 추가. "
-             "기존 데이터는 절대 삭제하지 않음.")
+        help="Add only 'Is a' relationships to an existing concept-relationship index. "
+             "Never deletes existing data.")
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE,
-        help=f'임베딩 배치 크기 (기본: {DEFAULT_BATCH_SIZE})')
+        help=f'Embedding batch size (default: {DEFAULT_BATCH_SIZE})')
     parser.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE,
-        help=f'데이터 청크 크기 (기본: {DEFAULT_CHUNK_SIZE})')
+        help=f'Data chunk size (default: {DEFAULT_CHUNK_SIZE})')
     parser.add_argument('--bulk-delay', type=float, default=0.0,
-        help='Bulk 요청 간 대기 시간(초). ES 429 발생 시 사용 (기본: 0)')
+        help='Wait time between bulk requests (seconds). Use when ES returns 429 (default: 0)')
     
-    # Elasticsearch 옵션
+    # Elasticsearch options
     parser.add_argument('--es-host', default=DEFAULT_ES_HOST,
-        help='Elasticsearch 호스트 (기본: ES_SERVER_HOST 환경변수)')
+        help='Elasticsearch host (default: ES_SERVER_HOST environment variable)')
     parser.add_argument('--es-port', type=int, default=DEFAULT_ES_PORT,
-        help=f'Elasticsearch 포트 (기본: ES_SERVER_PORT 환경변수 또는 {DEFAULT_ES_PORT})')
+        help=f'Elasticsearch port (default: ES_SERVER_PORT environment variable or {DEFAULT_ES_PORT})')
     parser.add_argument('--es-user', default=DEFAULT_ES_USER,
-        help='Elasticsearch 사용자 (기본: ES_SERVER_USERNAME 환경변수)')
+        help='Elasticsearch user (default: ES_SERVER_USERNAME environment variable)')
     parser.add_argument('--es-password', default=DEFAULT_ES_PASSWORD,
-        help='Elasticsearch 비밀번호 (기본: ES_SERVER_PASSWORD 환경변수)')
+        help='Elasticsearch password (default: ES_SERVER_PASSWORD environment variable)')
     
-    # Local CSV 옵션
+    # Local CSV options
     parser.add_argument('--data-folder', default=DEFAULT_DATA_FOLDER,
-        help=f'CSV 데이터 폴더 (기본: {DEFAULT_DATA_FOLDER})')
+        help=f'CSV data folder (default: {DEFAULT_DATA_FOLDER})')
     
-    # PostgreSQL 옵션
+    # PostgreSQL options
     parser.add_argument('--pg-host', default=DEFAULT_PG_HOST,
-        help='PostgreSQL 호스트 (기본: PG_HOST 환경변수)')
+        help='PostgreSQL host (default: PG_HOST environment variable)')
     parser.add_argument('--pg-port', default=DEFAULT_PG_PORT,
-        help=f'PostgreSQL 포트 (기본: PG_PORT 환경변수 또는 {DEFAULT_PG_PORT})')
+        help=f'PostgreSQL port (default: PG_PORT environment variable or {DEFAULT_PG_PORT})')
     parser.add_argument('--pg-dbname', default=DEFAULT_PG_DBNAME,
-        help='PostgreSQL DB명 (기본: PG_DBNAME 환경변수)')
+        help='PostgreSQL DB name (default: PG_DBNAME environment variable)')
     parser.add_argument('--pg-user', default=DEFAULT_PG_USER,
-        help='PostgreSQL 사용자 (기본: PG_USER 환경변수)')
+        help='PostgreSQL user (default: PG_USER environment variable)')
     parser.add_argument('--pg-password', default=DEFAULT_PG_PASSWORD,
-        help='PostgreSQL 비밀번호 (기본: PG_PASSWORD 환경변수)')
+        help='PostgreSQL password (default: PG_PASSWORD environment variable)')
     
     return parser.parse_args()
 
 
 def main():
-    """메인 함수"""
+    """Main function"""
     args = parse_args()
     
-    # 경로 설정
+    # Path setup
     _root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(_root))
     sys.path.insert(0, str(_root / "indexing"))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     
-    # 로깅 설정
+    # Logging setup
     log_file = setup_logging(args.source_type)
     logger = logging.getLogger(__name__)
     
     print("=" * 70)
-    print("OMOP CDM Elasticsearch 인덱싱")
+    print("OMOP CDM Elasticsearch indexing")
     print("=" * 70)
-    print(f"데이터 소스: {args.source_type}")
-    print(f"테이블: {args.tables}")
+    print(f"Data source: {args.source_type}")
+    print(f"Tables: {args.tables}")
     print(f"Elasticsearch: {args.es_host}:{args.es_port}")
     print(f"GPU: {args.gpu}")
-    print(f"임베딩: {'비활성화' if args.no_embeddings else '활성화'}")
+    print(f"Embeddings: {'disabled' if args.no_embeddings else 'enabled'}")
     if args.add_isa:
-        print(f"모드: ADD-ISA (기존 concept-relationship에 'Is a' 관계만 추가, 기존 데이터 유지)")
+        print(f"Mode: ADD-ISA (add only 'Is a' relationships to existing concept-relationship, keep existing data)")
     elif args.resume:
-        print(f"모드: RESUME (Checkpoint 기반 재개)")
+        print(f"Mode: RESUME (Checkpoint-based resume)")
     else:
-        print(f"모드: FRESH (새로 인덱싱)")
+        print(f"Mode: FRESH (fresh indexing)")
     if args.bulk_delay > 0:
-        print(f"Bulk 지연: {args.bulk_delay}s (429 완화)")
-    print(f"로그: {log_file}")
+        print(f"Bulk delay: {args.bulk_delay}s (429 mitigation)")
+    print(f"Log: {log_file}")
     print("=" * 70)
     
     try:
         from indexing.unified_indexer import UnifiedIndexer, create_data_source
         
-        # 1. 데이터 소스 생성
+        # 1. Create data source
         if args.source_type == 'local_csv':
-            print(f"\n데이터 폴더: {args.data_folder}")
+            print(f"\nData folder: {args.data_folder}")
             
-            # concept-small 전처리 (--add-isa 모드에서는 스킵)
+            # concept-small preprocessing (skipped in --add-isa mode)
             if 'concept-small' in args.tables and not args.add_isa:
-                print("\n[1/2] CONCEPT_SMALL.csv 확인 중...")
+                print("\n[1/2] Checking CONCEPT_SMALL.csv...")
                 from prepare_concept_small import create_concept_small
                 
                 concept_small_path = Path(args.data_folder) / 'CONCEPT_SMALL.csv'
                 if not concept_small_path.exists():
-                    print("  -> 생성 중...")
+                    print("  -> Creating...")
                     create_concept_small(args.data_folder)
                 else:
-                    print("  -> 이미 존재 (스킵)")
+                    print("  -> Already exists (skip)")
             
             data_source = create_data_source(
                 'local_csv',
@@ -228,7 +228,7 @@ def main():
             
         elif args.source_type == 'postgres':
             print(f"\nPostgreSQL: {args.pg_host}:{args.pg_port}/{args.pg_dbname}")
-            print("\n[1/2] PostgreSQL 연결 중...")
+            print("\n[1/2] Connecting to PostgreSQL...")
             
             data_source = create_data_source(
                 'postgres',
@@ -238,10 +238,10 @@ def main():
                 user=args.pg_user,
                 password=args.pg_password
             )
-            print("  -> 연결 성공")
+            print("  -> Connected")
         
-        # 2. 인덱서 생성 및 실행
-        print("\n[2/2] Elasticsearch 인덱싱...")
+        # 2. Create and run the indexer
+        print("\n[2/2] Elasticsearch indexing...")
         
         indexer = UnifiedIndexer(
             data_source=data_source,
@@ -258,9 +258,9 @@ def main():
         )
         
         if args.add_isa:
-            # 기존 concept-relationship에 'Is a' 관계만 추가 (기존 데이터 삭제 없음)
+            # Add only 'Is a' relationships to existing concept-relationship (no deletion of existing data)
             success = indexer.index_relationships_isa_only(max_rows=args.max_rows)
-            results = {'relationship(Is a 추가)': success}
+            results = {'relationship(Is a added)': success}
         else:
             results = indexer.index_all(
                 delete_existing=not args.resume,
@@ -268,39 +268,39 @@ def main():
                 tables=args.tables
             )
         
-        # 3. 결과 출력
+        # 3. Print results
         print("\n" + "=" * 70)
-        print("결과:")
+        print("Results:")
         for table, success in results.items():
-            status = "✓ 성공" if success else "✗ 실패"
+            status = "✓ Success" if success else "✗ Failed"
             print(f"  {table}: {status}")
         print("=" * 70)
         
         indexer.cleanup()
         
         if all(results.values()):
-            print("\n완료! 데이터 누락 없이 인덱싱 성공.")
+            print("\nDone! Indexing succeeded with no missing data.")
             return 0
         else:
-            print("\n일부 실패. --resume 로 재시작하면 실패한 부분부터 재개됩니다.")
+            print("\nSome failures. Restart with --resume to continue from the failed part.")
             return 1
             
     except ImportError as e:
-        print(f"\n오류: {e}")
-        print("pip install -r requirements.txt 실행 필요")
+        print(f"\nError: {e}")
+        print("Need to run pip install -r requirements.txt")
         return 1
     except FileNotFoundError as e:
-        print(f"\n파일 없음: {e}")
+        print(f"\nFile not found: {e}")
         return 1
     except ConnectionError as e:
-        print(f"\n연결 실패: {e}")
+        print(f"\nConnection failed: {e}")
         return 1
     except Exception as e:
-        logger.error(f"오류: {e}")
+        logger.error(f"Error: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        print(f"\n오류: {e}")
-        print("--resume 로 재시작하면 실패한 부분부터 재개됩니다.")
+        print(f"\nError: {e}")
+        print("Restart with --resume to continue from the failed part.")
         return 1
 
 

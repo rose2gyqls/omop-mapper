@@ -1,80 +1,80 @@
 #!/bin/bash
-# OMOP 매핑 실행 스크립트
+# OMOP mapping execution script
 #
-# 데이터 소스 선택 시 기본 CSV 경로 및 전처리가 자동 적용됩니다.
-# 출력: test_logs/mapping_{snuh|snomed}_{timestamp}.{json,log,xlsx}
+# Selecting a data source applies the default CSV path and preprocessing automatically.
+# Output: test_logs/mapping_{snuh|snomed}_{timestamp}.{json,log,xlsx}
 #
 # ============================================================================
-# 매핑 옵션 설명
+# Mapping option descriptions
 # ============================================================================
 #
-# [데이터 소스] 필수
-#   snuh   : 기본 data/mapping_test_snuh_top10k.csv
-#            전처리: vocabulary IN (SNOMED, LOINC)
+# [Data source] required
+#   snuh   : default data/mapping_test_snuh_top10k.csv
+#            preprocessing: vocabulary IN (SNOMED, LOINC)
 #
-#   snomed : 기본 data/mapping_test_snomed_no_note.csv
-#            전처리: domain_id IN (Condition, Measurement, Drug, Observation, Procedure)
+#   snomed : default data/mapping_test_snomed_no_note.csv
+#            preprocessing: domain_id IN (Condition, Measurement, Drug, Observation, Procedure)
 #
-# [샘플링]
-#   -n, --sample-size N   : 사용할 최대 샘플 수 (-n 미지정 시 전체 데이터). sample-per-domain 미사용 시 적용
-#   --sample-per-domain N : 도메인별 N개씩 샘플. 예: --sample-per-domain 5
-#   --random              : 랜덤 샘플링
-#   --seed N              : 랜덤 시드 (기본: 42)
+# [Sampling]
+#   -n, --sample-size N   : Max number of samples to use (uses all data if -n not given). Applied when sample-per-domain is not used
+#   --sample-per-domain N : Sample N per domain. Example: --sample-per-domain 5
+#   --random              : Random sampling
+#   --seed N              : Random seed (default: 42)
 #
-# [Scoring 모드] (ablation study용)
+# [Scoring mode] (for ablation study)
 #   --scoring MODE
-#     llm            : LLM 평가, 점수 미포함 (기본)
-#     llm_with_score : LLM 평가, SapBERT 의미유사도 포함
-#     semantic       : 의미유사도만
+#     llm            : LLM evaluation, score not included (default)
+#     llm_with_score : LLM evaluation, SapBERT semantic similarity included
+#     semantic       : semantic similarity only
 #
-# [LLM 라우트 선택]
+# [LLM route selection]
 #   --llm-provider   : openai | together
-#   --llm-model      : 모델명 override (Together: gpt_oss_20b | mistral_small_24b | llama4_maverick alias 지원)
+#   --llm-model      : Model name override (Together: gpt_oss_20b | mistral_small_24b | llama4_maverick aliases supported)
 #   --llm-base-url   : OpenAI-compatible endpoint override
-#   --llm-api-key-env: API key를 읽을 환경변수 이름
+#   --llm-api-key-env: Name of the environment variable to read the API key from
 #   --llm-temperature: temperature override
 #   --llm-top-p      : top_p override
-#   --llm-max-tokens : 최대 출력 토큰 override
+#   --llm-max-tokens : Max output tokens override
 #
-# [병렬 처리]
-#   -w, --workers N  : 워커 프로세스 수 (기본: 1). 4~8 권장 (메모리 ~1GB/워커)
+# [Parallel processing]
+#   -w, --workers N  : Number of worker processes (default: 1). 4-8 recommended (~1GB memory per worker)
 #
-# [반복 매핑] (일관성 검증)
-#   -r, --repeat N   : 동일 데이터로 N회 매핑 (기본: 1). 5 입력 시 현황+5개 상세 시트 생성.
+# [Repeat mapping] (consistency verification)
+#   -r, --repeat N   : Map the same data N times (default: 1). Entering 5 generates a summary + 5 detail sheets.
 #
 # [Validation]
-#   기본: stage 1~3 점수 기반 최고 점수 매핑만 사용 (validation 미포함)
-#   --validation      : LLM validation 모듈 포함. 출력: mapping_{snuh|snomed}_withval_{timestamp}.*
+#   default: use only the highest-scoring mapping based on stage 1-3 scores (validation not included)
+#   --validation      : Include the LLM validation module. Output: mapping_{snuh|snomed}_withval_{timestamp}.*
 #
 # ============================================================================
-# 사용 예시
+# Usage examples
 # ============================================================================
 #
-# SNUH 기본 (전체 데이터):
+# SNUH default (full data):
 #   ./scripts/run_mapping.sh snuh
 #
-# SNUH 도메인별 5개씩 랜덤:
+# SNUH 5 per domain, random:
 #   ./scripts/run_mapping.sh snuh --sample-per-domain 5 --random
 #
-# SNOMED 기본 (전체 데이터):
+# SNOMED default (full data):
 #   ./scripts/run_mapping.sh snomed
 #
-# SNOMED 도메인별 10개씩, semantic 모드:
+# SNOMED 10 per domain, semantic mode:
 #   ./scripts/run_mapping.sh snomed --sample-per-domain 10 --scoring semantic
 #
-# 병렬 4 워커 (1000건 이상 시 권장):
+# Parallel 4 workers (recommended for 1000+ items):
 #   ./scripts/run_mapping.sh snuh --workers 4
 #
-# 5회 반복 (일관성 검증, 현황+5개 상세 시트):
+# Repeat 5 times (consistency verification, summary + 5 detail sheets):
 #   ./scripts/run_mapping.sh snuh --repeat 5
 #
-# Validation 포함 실행 (with/without 비교용):
+# Run with validation included (for with/without comparison):
 #   ./scripts/run_mapping.sh snuh --validation
 #
-# Together GPT-OSS-20B로 실행:
+# Run with Together GPT-OSS-20B:
 #   ./scripts/run_mapping.sh snuh --llm-provider together --llm-model gpt_oss_20b --llm-api-key-env TOGETHER_API_KEY
 #
-# Together Mistral Small 24B로 실행:
+# Run with Together Mistral Small 24B:
 #   ./scripts/run_mapping.sh snuh --llm-provider together --llm-model mistral_small_24b --llm-api-key-env TOGETHER_API_KEY
 #
 
@@ -85,18 +85,18 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
-# 실시간 로그 출력 (버퍼링 비활성화)
+# Real-time log output (disable buffering)
 export PYTHONUNBUFFERED=1
 
 echo "============================================"
-echo "OMOP 매핑 실행"
+echo "OMOP mapping execution"
 echo "============================================"
-echo "프로젝트: $PROJECT_ROOT"
+echo "Project: $PROJECT_ROOT"
 echo "============================================"
 
 python scripts/run_mapping.py "$@"
 
 echo ""
 echo "============================================"
-echo "완료! test_logs/ 에서 .json, .log, .xlsx 확인"
+echo "Done! Check .json, .log, .xlsx in test_logs/"
 echo "============================================"

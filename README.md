@@ -1,39 +1,47 @@
 # OMOP Mapper
 
-Map clinical entity names to OMOP CDM standard concepts with a 3-stage pipeline:
+OMOP Mapper maps free-text clinical entity names (conditions, drugs, measurements,
+procedures, observations) to **OMOP CDM standard concepts**. It combines
+Elasticsearch retrieval, SapBERT semantic embeddings, and an LLM reranking step,
+and ships with a Streamlit demo, command-line tools, and an evaluation suite.
 
-1. Candidate retrieval from Elasticsearch
-2. Standard concept collection
-3. LLM-based final scoring
+A hosted demo is available at **https://mapomop.onrender.com**.
 
-The repository now includes a local Streamlit app so users can clone the project, configure their own secrets locally, and try single-entity mapping from a browser.
+## Method
 
-## What This Deployment Supports
+Given an entity name and an optional target domain, mapping runs as a three-stage
+pipeline (`src/MapOMOP/`):
 
-- Local demo UI with Streamlit
-- Single-entity mapping by `entity name` and `domain`
-- OpenAI-backed scoring
-- Remote Elasticsearch indexes hosted outside this repository
+1. **Candidate retrieval** (`stage1_candidate_retrieval.py`)
+   Retrieves candidate concepts from Elasticsearch with three complementary
+   strategies: lexical search (exact / phrase / fuzzy), semantic vector search over
+   SapBERT embeddings, and a hybrid query that combines text, vector, and
+   length similarity. Synonyms are searched and then resolved back to their original
+   concepts.
 
-## What This Deployment Does Not Do
+2. **Standard concept collection** (`stage2_standard_collection.py`)
+   Converts non-standard candidates to OMOP standard concepts by following
+   concept relationships (e.g. `Maps to`), keeping only standard concepts.
 
-- It does not publish Elasticsearch credentials to GitHub
-- It does not require users to run indexing before trying the UI
-- It does not replace the existing CLI, indexing, or evaluation workflows
+3. **Hybrid scoring** (`stage3_hybrid_scoring.py`)
+   Ranks the standard candidates and selects the best mapping. Three scoring modes
+   are supported:
+   - `llm` (default): LLM judgment without numeric similarity in the prompt
+   - `llm_with_score`: LLM judgment with SapBERT semantic similarity in the prompt
+   - `semantic`: SapBERT cosine similarity only
 
-## Prerequisites
+   LLM scoring is provider-agnostic via `LLMClient` (OpenAI and Together AI).
 
-- Python 3.9+
-- An OpenAI API key
-- Elasticsearch connection details for the hosted OMOP indexes:
-  - `ES_SERVER_HOST`
-  - `ES_SERVER_PORT`
-  - `ES_SERVER_USERNAME`
-  - `ES_SERVER_PASSWORD`
+An optional LLM **validation** stage (`mapping_validation.py`, enabled with
+`--validation`) can re-check the selected mapping.
 
-## Quick Start
+## Requirements
 
-Clone the repository and install dependencies:
+- Python 3.10+ (3.11 recommended)
+- An OpenAI API key (or another supported LLM provider)
+- Access to the OMOP Elasticsearch indexes (host, port, credentials)
+
+## Setup
 
 ```bash
 git clone https://github.com/yourusername/omop-mapper.git
@@ -42,30 +50,14 @@ cd omop-mapper
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+cp .env.example .env   # then fill in the values
 ```
 
-Optional install profiles:
-
-```bash
-# PostgreSQL indexing support
-pip install -r requirements-indexing.txt
-
-# Notebook and developer tooling
-pip install -r requirements-dev.txt
-```
-
-Create your local environment file:
-
-```bash
-cp .env.example .env
-```
-
-Fill in `.env` with your local secrets:
+Minimum `.env` values:
 
 ```bash
 OPENAI_API_KEY=your-openai-api-key
-OPENAI_MODEL=gpt-5-mini-2025-08-07
-
 ES_SERVER_HOST=your-es-host
 ES_SERVER_PORT=9200
 ES_SERVER_USERNAME=your-es-username
@@ -73,152 +65,18 @@ ES_SERVER_PASSWORD=your-es-password
 ES_USE_SSL=false
 ```
 
-Run the local app:
+## Usage
+
+### Streamlit demo
 
 ```bash
 streamlit run scripts/app.py
 ```
 
-Then open the browser URL printed by Streamlit, enter:
+Enter an entity name and a target domain to see the top mapped concept and ranked
+candidates.
 
-- `Entity name`
-- `Target domain`
-
-The app will run the existing mapping pipeline and show ranked OMOP candidates.
-
-## Deploy on Render
-
-This repository includes a [`render.yaml`](./render.yaml) Blueprint for deploying the Streamlit app as a Render web service.
-
-### Recommended path: Render Blueprint
-
-1. Push this repository to GitHub
-2. In Render, click `New +` → `Blueprint`
-3. Select this repository
-4. Review the `render.yaml` settings before the first deploy:
-   - `plan: free`
-   - `region: singapore`
-   - `buildCommand: python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt`
-   - `startCommand: streamlit run scripts/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
-5. Provide the prompted secret values for:
-   - `OPENAI_API_KEY`
-   - `ES_SERVER_HOST`
-   - `ES_SERVER_USERNAME`
-   - `ES_SERVER_PASSWORD`
-6. Confirm the non-secret defaults, or override them if needed:
-   - `PYTHON_VERSION=3.11.11`
-   - `OPENAI_MODEL=gpt-5-mini-2025-08-07`
-   - `ES_SERVER_PORT=9200`
-   - `ES_USE_SSL=false`
-7. Create the Blueprint and wait for the first deploy to finish
-
-After deployment, Render will assign a public URL like `https://mapomop.onrender.com`.
-
-### Manual path: Render Web Service
-
-If you prefer not to use the Blueprint, create a `Web Service` in the Render dashboard with:
-
-- Runtime: `Python 3`
-- Build Command: `python -m pip install --upgrade pip setuptools wheel && pip install --prefer-binary -r requirements.txt`
-- Start Command: `streamlit run scripts/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
-- Health Check Path: `/_stcore/health`
-
-Then add the environment variables from the table below in the Render `Environment` settings.
-
-### Custom domain
-
-To use `mapomop.com` after the app is live:
-
-1. Open the Render service
-2. Go to `Settings` → `Custom Domains`
-3. Add `mapomop.com`
-4. Update your DNS records with your domain provider using the values Render shows
-5. Optionally add `www.mapomop.com` if you want a separate redirect target
-
-Render keeps the `onrender.com` subdomain unless you explicitly disable it in the dashboard.
-
-## Local App Behavior
-
-The Streamlit app:
-
-- Reads OpenAI and Elasticsearch settings from your local `.env`
-- Verifies Elasticsearch connectivity on load
-- Uses the existing `EntityMappingAPI`
-- Returns the top mapped concept plus ranked candidates
-
-This keeps the core mapping logic untouched while giving users a simple local UI.
-
-## Dependency Layout
-
-- `requirements.txt`: Streamlit app + `run_mapping.py`
-- `requirements-indexing.txt`: adds PostgreSQL indexing support
-- `requirements-dev.txt`: notebook and developer-only tooling
-
-## Required Environment Variables
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `OPENAI_API_KEY` | Yes | OpenAI API key for LLM scoring |
-| `OPENAI_MODEL` | No | OpenAI model override |
-| `ES_SERVER_HOST` | Yes | Elasticsearch host |
-| `ES_SERVER_PORT` | No | Elasticsearch port, default `9200` |
-| `ES_SERVER_USERNAME` | Yes | Elasticsearch username |
-| `ES_SERVER_PASSWORD` | Yes | Elasticsearch password |
-| `ES_USE_SSL` | No | `true` or `false`, default `false` |
-| `PYTHON_VERSION` | Render only | Python runtime version, recommended `3.11.11` |
-
-## Security Notes
-
-- Do not commit `.env`
-- Do not hardcode Elasticsearch credentials in tracked source files
-- Share Elasticsearch credentials with users out of band
-- Use read-only Elasticsearch credentials for local demo users
-- In Render, store secrets in the service `Environment` page or the initial Blueprint prompt
-
-## Existing CLI Workflows
-
-The repository still includes the original command-line workflows.
-
-### Mapping CLI
-
-```bash
-./scripts/run_mapping.sh snuh
-```
-
-Useful options:
-
-- `--sample-size`, `-n`
-- `--sample-per-domain`
-- `--random`
-- `--workers`, `-w`
-- `--repeat`, `-r`
-- `--scoring`
-- `--llm-provider`
-- `--llm-model`
-
-Outputs are written to `test_logs/`.
-
-### Indexing CLI
-
-```bash
-./scripts/index.sh
-```
-
-This is only needed if you want to build or rebuild OMOP indexes yourself. It is not required for the local Streamlit demo when you already have access to a hosted Elasticsearch cluster.
-
-Install the extra dependency set before using PostgreSQL indexing:
-
-```bash
-pip install -r requirements-indexing.txt
-```
-
-If you use the PostgreSQL indexing path, provide `PG_HOST`, `PG_PORT`, `PG_DBNAME`, `PG_USER`, and `PG_PASSWORD` through your local `.env` or explicit CLI flags.
-
-### Evaluation Utilities
-
-The `eval/` directory remains available for offline evaluation and analysis workflows. The local UI does not change those scripts.
-
-## Python API
+### Python API
 
 ```python
 from MapOMOP import EntityInput, EntityMappingAPI, DomainID
@@ -228,82 +86,99 @@ entity = EntityInput(entity_name="myocardial ischemia", domain_id=DomainID.CONDI
 results = api.map_entity(entity)
 ```
 
+### Mapping CLI
+
+Runs batch mapping over a dataset and writes `.json`, `.log`, and `.xlsx` to
+`test_logs/`.
+
+```bash
+./scripts/run_mapping.sh snuh      # or: snomed
+```
+
+Common options:
+
+| Option | Description |
+| --- | --- |
+| `-n, --sample-size N` | Limit the number of samples |
+| `--sample-per-domain N` | Sample N entities per domain |
+| `--random`, `--seed N` | Random sampling and seed |
+| `-w, --workers N` | Parallel worker processes |
+| `-r, --repeat N` | Repeat mapping N times (consistency check) |
+| `--scoring {llm,llm_with_score,semantic}` | Stage-3 scoring mode |
+| `--llm-provider {openai,together}`, `--llm-model` | LLM route override |
+| `--validation` | Enable the LLM validation stage |
+
+### Indexing CLI
+
+Builds the Elasticsearch indexes from OMOP CDM data. Only needed if you maintain
+your own indexes; the demo and mapping CLI just need access to an existing cluster.
+
+```bash
+./scripts/index.sh                 # local CSV (default)
+./scripts/index.sh postgres        # PostgreSQL source
+```
+
+The PostgreSQL path additionally needs `PG_HOST`, `PG_PORT`, `PG_DBNAME`, `PG_USER`,
+and `PG_PASSWORD` in `.env`.
+
+### Evaluation
+
+`eval/` contains scripts that build the run-20 mapping logs, consensus
+evaluation workbooks, and baseline comparisons used in the study. They read and
+write a working directory specified by `--base` or the `OMOP_EVAL_BASE`
+environment variable:
+
+```bash
+export OMOP_EVAL_BASE=/path/to/eval-data
+python eval/build_run20_logs.py
+```
+
+## Deployment
+
+The app is deployed on [Render](https://render.com) and served at
+**https://mapomop.onrender.com**. A [`render.yaml`](./render.yaml) Blueprint is
+included: push the repository, create a Render Blueprint from it, and provide the
+secrets (`OPENAI_API_KEY`, `ES_SERVER_HOST`, `ES_SERVER_USERNAME`,
+`ES_SERVER_PASSWORD`). The start command is:
+
+```bash
+streamlit run scripts/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+```
+
+## Environment Variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | Yes | OpenAI API key for LLM scoring |
+| `OPENAI_MODEL` | No | OpenAI model override |
+| `ES_SERVER_HOST` | Yes | Elasticsearch host |
+| `ES_SERVER_PORT` | No | Elasticsearch port (default `9200`) |
+| `ES_SERVER_USERNAME` | Yes | Elasticsearch username |
+| `ES_SERVER_PASSWORD` | Yes | Elasticsearch password |
+| `ES_USE_SSL` | No | `true` or `false` (default `false`) |
+| `PG_*` | Indexing only | PostgreSQL connection for the indexing CLI |
+| `OMOP_EVAL_BASE` | Eval only | Working directory for `eval/` scripts |
+
+Never commit `.env`. Keep Elasticsearch credentials out of tracked source files and
+prefer read-only credentials for demo users.
+
 ## Project Structure
 
 ```text
 omop-mapper/
-├── requirements.txt          # App + mapping CLI runtime
-├── requirements-indexing.txt # PostgreSQL indexing extras
-├── requirements-dev.txt      # Notebook and developer tooling
-├── indexing/                 # Index-building pipeline
-├── eval/                     # Evaluation scripts
-├── scripts/                  # Shell wrappers and CLIs
-│   ├── app.py                # Streamlit local demo UI
-│   ├── run_indexing.py       # Indexing CLI
-│   ├── run_mapping.py        # Mapping CLI
-│   ├── prepare_concept_small.py # CONCEPT_SMALL.csv builder
-│   ├── mapping_common.py     # Shared mapping helpers
-│   ├── index.sh              # Indexing wrapper
-│   └── run_mapping.sh        # Mapping wrapper
-├── src/MapOMOP/              # Core mapping package
-└── .env.example              # Local config template
+├── src/MapOMOP/          # Core mapping package (3-stage pipeline + validation)
+├── indexing/             # Elasticsearch index-building pipeline
+├── scripts/              # CLIs and wrappers
+│   ├── app.py            # Streamlit demo
+│   ├── run_mapping.py    # Mapping CLI        (run_mapping.sh)
+│   ├── run_indexing.py   # Indexing CLI       (index.sh)
+│   ├── prepare_concept_small.py  # CONCEPT_SMALL.csv builder
+│   └── mapping_common.py # Shared data loading / output helpers
+├── eval/                 # Evaluation and analysis scripts
+├── requirements.txt
+├── render.yaml           # Render deployment blueprint
+└── .env.example
 ```
-
-## Troubleshooting
-
-### Render Python version mismatch
-
-Render now defaults new Python services to newer versions unless you pin one explicitly. This repository includes a `.python-version` file with `3.11.11` so native deploys use a wheel-friendly version for the current dependency set.
-
-If Render still tries to build `scipy` or `scikit-learn` from source:
-
-1. Confirm the service runtime is `Python`
-2. Confirm `PYTHON_VERSION=3.11.11` is set in Render
-3. Redeploy after pulling the latest commit so Render sees the new `.python-version`
-4. Clear the build cache before retrying if the old build image is still being reused
-
-### Missing configuration
-
-If the app says configuration is missing:
-
-1. Check that `.env` exists in the project root
-2. Confirm `OPENAI_API_KEY` is filled in
-3. Confirm all required `ES_SERVER_*` values are filled in
-
-### Elasticsearch connection failure
-
-If the app cannot reach Elasticsearch:
-
-1. Confirm host and port
-2. Confirm username and password
-3. Check whether `ES_USE_SSL` should be `true`
-4. Verify the cluster is reachable from your local machine
-5. If deployed on Render, verify the cluster is also reachable from the Render region you selected
-
-### Render deploy fails to boot
-
-If Render shows a deploy or health check failure:
-
-1. Confirm the service is a `Web Service`, not a static site
-2. Confirm the build command uses `pip install --prefer-binary -r requirements.txt`
-3. Confirm the health check path is `/_stcore/health`
-4. Confirm all required secrets are present in Render
-5. Check the Render logs for import or dependency errors
-6. If needed, pin a different `PYTHON_VERSION` in Render and redeploy
-
-If the log mentions `Preparing metadata (pyproject.toml)`:
-
-1. That message refers to a dependency build step, not this repository
-2. If Render is trying to install `pandocfilters`, `jupyter*`, or `notebook*`, it is not using the trimmed runtime requirements yet
-3. Trigger a redeploy after confirming the updated build command and latest commit are applied
-
-### No mapping results
-
-If a term returns no candidates:
-
-1. Try a different domain
-2. Try a normalized or less specific source phrase
-3. Confirm the target indexes contain the expected vocabularies
 
 ## License
 

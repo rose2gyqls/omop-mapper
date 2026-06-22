@@ -108,7 +108,7 @@ class BaseDataSource(ABC):
     
     def get_concept_small_count(self) -> int:
         """Return total number of CONCEPT_SMALL records."""
-        # 기본 구현: 서브클래스에서 오버라이드 가능
+        # Default implementation: subclasses may override
         return 0
     
     def read_concept_small(
@@ -118,7 +118,7 @@ class BaseDataSource(ABC):
         max_rows: Optional[int] = None
     ) -> Iterator[pd.DataFrame]:
         """Read CONCEPT_SMALL data in chunks."""
-        # 기본 구현: 서브클래스에서 오버라이드
+        # Default implementation: overridden by subclasses
         return iter([])
     
     # Common utility methods

@@ -35,7 +35,7 @@ class PostgresDataSource(BaseDataSource):
         'synonym': 'cdm2024_samples.concept_synonym'
     }
     
-    # 영어 동의어 language_concept_id
+    # language_concept_id for English synonyms
     ENGLISH_LANGUAGE_CONCEPT_ID = 4180186
     
     def __init__(
@@ -135,13 +135,13 @@ class PostgresDataSource(BaseDataSource):
     def get_concept_small_count(self) -> int:
         """
         Return total number of CONCEPT_SMALL records.
-        CONCEPT (Original) + CONCEPT_SYNONYM (영어만, Synonym) 합계
+        Sum of CONCEPT (Original) + CONCEPT_SYNONYM (English only, Synonym)
         """
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # CONCEPT 수 + 영어 SYNONYM 수
+            # CONCEPT count + English SYNONYM count
             query = f"""
                 SELECT 
                     (SELECT COUNT(*) FROM {self.tables['concept']}) +
@@ -265,7 +265,7 @@ class PostgresDataSource(BaseDataSource):
         """
         Read CONCEPT_SMALL data in chunks.
         
-        SQL UNION을 사용하여 CONCEPT + CONCEPT_SYNONYM (영어만)을 합쳐서 반환합니다.
+        Uses a SQL UNION to combine and return CONCEPT + CONCEPT_SYNONYM (English only).
         - CONCEPT: name_type = 'Original'
         - CONCEPT_SYNONYM (language_concept_id=4180186): name_type = 'Synonym'
         """
@@ -275,7 +275,7 @@ class PostgresDataSource(BaseDataSource):
             concept_table = self.tables['concept']
             synonym_table = self.tables['synonym']
             
-            # UNION ALL 쿼리: CONCEPT (Original) + SYNONYM (영어만, JOIN으로 메타데이터 가져옴)
+            # UNION ALL query: CONCEPT (Original) + SYNONYM (English only, metadata fetched via JOIN)
             base_query = f"""
                 SELECT 
                     concept_id,
@@ -310,7 +310,7 @@ class PostgresDataSource(BaseDataSource):
                 WHERE s.language_concept_id = {self.ENGLISH_LANGUAGE_CONCEPT_ID}
             """
             
-            # 서브쿼리로 감싸서 ORDER BY, LIMIT, OFFSET 적용
+            # Wrap in a subquery to apply ORDER BY, LIMIT, and OFFSET
             offset = skip_rows
             total_read = 0
             
@@ -340,7 +340,7 @@ class PostgresDataSource(BaseDataSource):
                 total_read += len(chunk)
                 offset += len(chunk)
                 
-                # 데이터 정제
+                # Clean data
                 cleaned = self.clean_concept_small_data(chunk)
                 if len(cleaned) > 0:
                     yield cleaned

@@ -1,10 +1,10 @@
 """
-통합 매핑 공통 모듈
+Shared utilities for the mapping pipeline.
 
-SNUH, SNOMED 등 모든 데이터 소스에 공통 적용되는:
-- 데이터 소스 설정 (기본 경로, 전처리)
-- 로깅 설정
-- JSON/LOG/XLSX 출력
+Common to all data sources (e.g. SNUH, SNOMED):
+- Data source configuration (default paths, preprocessing)
+- Logging setup
+- JSON/LOG/XLSX output
 """
 
 import json
@@ -17,15 +17,15 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 # -----------------------------------------------------------------------------
-# 데이터 소스 설정 (확장 가능: 새 데이터 추가 시 여기에 등록)
+# Data source registry (add a new entry here to support another dataset)
 # -----------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DATA_SOURCES = {
     "snuh": {
         "csv_path": str(PROJECT_ROOT / "data" / "snuh-baseline-mapping-data.csv"),
-        "vocabulary_filter": ["SNOMED", "LOINC"],  # 기본 전처리
-        "filter_domains": ["Procedure"],  # 이 도메인만 로드 (domains와 동일하게 설정)
+        "vocabulary_filter": ["SNOMED", "LOINC"],  # default preprocessing
+        "filter_domains": ["Procedure"],  # load only these domains (keep aligned with "domains")
         "domains": ["Procedure"],
         "id_col": "row_id",
         "loader": "load_snuh_data",
@@ -33,9 +33,9 @@ DATA_SOURCES = {
     },
     "snomed": {
         "csv_path": str(PROJECT_ROOT / "data" / "snomed-mapping-data-1000.csv"),
-        "filter_domains": ["Condition", "Measurement", "Observation", "Procedure"],  # 기본 전처리
+        "filter_domains": ["Condition", "Measurement", "Observation", "Procedure"],  # default preprocessing
         "domains": ["Condition", "Measurement", "Observation", "Procedure"],
-        "id_col": "test_index",  # note_id 없을 시 load_snomed_data에서 row_id 자동 생성
+        "id_col": "test_index",  # if note_id is missing, load_snomed_data generates row_id
         "loader": "load_snomed_data",
         "row_to_input": "snomed_row_to_input",
     },
@@ -50,7 +50,7 @@ except ImportError:
     HAS_OPENPYXL = False
 
 
-# XLSX 열 구성 (사용자 요구사항)
+# XLSX column layout
 XLSX_HEADERS = [
     "Test Index",
     "ID",
@@ -69,8 +69,8 @@ XLSX_HEADERS = [
     "Stage3 Candidates",
 ]
 
-# 반복 매핑 현황 시트 기본 헤더 (--repeat 옵션)
-# Mapped Concept 1~N은 save_xlsx_repeat에서 num_runs에 따라 동적 생성
+# Base headers for the repeated-mapping summary sheet (--repeat option).
+# "Mapped Concept 1..N" columns are added dynamically by save_xlsx_repeat.
 SUMMARY_BASE_HEADERS = [
     "Test Index",
     "ID",
@@ -78,16 +78,17 @@ SUMMARY_BASE_HEADERS = [
     "Input Domain",
     "Ground Truth Concept ID",
     "Ground Truth Concept Name",
-    "All Same",        # N개 결과 모두 같은지 여부
-    "Correct",         # N개 결과 중 정답인 결과 개수
+    "All Same",        # whether all N runs produced the same result
+    "Correct",         # number of correct results across the N runs
 ]
 
 
 def setup_logging(
     output_dir: Path, data_type: str, timestamp: str, console: bool = True
 ) -> tuple[logging.Logger, Path]:
-    """통합 로깅 설정. 동일 timestamp 사용.
-    console=False: 터미널 출력 비활성화 (파일만 기록, 병렬 실행 시 진행률만 터미널에 표시).
+    """Configure logging with a shared timestamp.
+    console=False: disable terminal output (file only); used in parallel runs where
+    only the progress bar is shown in the terminal.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / f"mapping_{data_type}_{timestamp}.log"
@@ -112,7 +113,8 @@ def setup_logging(
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-    # MapOMOP API 로거들: 파일에는 기록, 콘솔은 console 인자에 따름 (병렬 시 상세로그는 파일만)
+    # MapOMOP API loggers: always log to file; console depends on the console flag
+    # (in parallel runs the detailed logs go to the file only).
     for name in [
         "MapOMOP.entity_mapping_api",
         "MapOMOP.mapping_stages.stage1_candidate_retrieval",
@@ -127,15 +129,16 @@ def setup_logging(
         if console:
             api_log.addHandler(console_handler)
 
-    logger.info(f"로그 파일: {log_file}")
+    logger.info(f"Log file: {log_file}")
     return logger, log_file
 
 
 def setup_worker_logging(log_file_path: str, capture_only: bool = False) -> None:
-    """Worker 프로세스용 로깅 설정.
+    """Configure logging for a worker process.
 
-    capture_only=True: 로그를 파일/콘솔에 쓰지 않음. _map_single_task에서 캡처 후 반환.
-    capture_only=False: 기존처럼 파일+콘솔에 실시간 기록 (workers=1 시 사용 안 함).
+    capture_only=True: do not write logs to file/console; _map_single_task captures
+    and returns them instead.
+    capture_only=False: write to file and console in real time (not used when workers=1).
     """
     _API_LOGGER_NAMES = [
         "MapOMOP.entity_mapping_api",
@@ -172,7 +175,7 @@ def setup_worker_logging(log_file_path: str, capture_only: bool = False) -> None
 
 
 class LogCaptureHandler(logging.Handler):
-    """로그 레코드를 리스트에 포맷된 문자열로 수집."""
+    """Collect log records into a list as formatted strings."""
 
     def __init__(self, log_list: list):
         super().__init__()
@@ -196,8 +199,8 @@ API_LOGGER_NAMES = [
 
 
 def capture_entity_logs(logger_names: Optional[list[str]] = None, formatter: Optional[logging.Formatter] = None) -> tuple[list, list]:
-    """해당 로거들에 LogCaptureHandler를 붙이고, (handlers_added, log_list) 반환.
-    호출자가 작업 후 handlers를 제거하고 log_list를 반환 값에 포함시킴.
+    """Attach a LogCaptureHandler to the given loggers and return (handlers_added, log_list).
+    The caller removes the handlers afterward and includes log_list in its return value.
     """
     if logger_names is None:
         logger_names = API_LOGGER_NAMES
@@ -221,7 +224,7 @@ def capture_entity_logs(logger_names: Optional[list[str]] = None, formatter: Opt
 
 
 def save_json(results: List[Dict], output_dir: Path, data_type: str, timestamp: str) -> Path:
-    """매핑 raw 데이터를 JSON으로 저장."""
+    """Save raw mapping results to JSON."""
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"mapping_{data_type}_{timestamp}.json"
 
@@ -236,7 +239,7 @@ def save_json(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
             return obj
         if isinstance(obj, (int, float)):
             return obj
-        # numpy 등
+        # numpy scalars and similar
         try:
             return float(obj)
         except (TypeError, ValueError):
@@ -254,7 +257,7 @@ def save_json(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
 
 
 def _sort_stage1_by_score(candidates: List[Dict]) -> List[Dict]:
-    """Stage1 후보를 점수(elasticsearch_score) 높은 순 정렬. lexical/semantic/combined 구분 없이."""
+    """Sort stage1 candidates by descending elasticsearch_score (regardless of lexical/semantic/combined)."""
     if not candidates:
         return []
     return sorted(
@@ -265,7 +268,7 @@ def _sort_stage1_by_score(candidates: List[Dict]) -> List[Dict]:
 
 
 def _sort_stage2_by_score(candidates: List[Dict]) -> List[Dict]:
-    """Stage2 후보를 elasticsearch_score 순 정렬."""
+    """Sort stage2 candidates by elasticsearch_score."""
     if not candidates:
         return []
     return sorted(
@@ -276,7 +279,7 @@ def _sort_stage2_by_score(candidates: List[Dict]) -> List[Dict]:
 
 
 def _sort_stage3_by_score(candidates: List[Dict]) -> List[Dict]:
-    """Stage3 후보를 final_score 순 정렬."""
+    """Sort stage3 candidates by final_score."""
     if not candidates:
         return []
     return sorted(
@@ -287,9 +290,9 @@ def _sort_stage3_by_score(candidates: List[Dict]) -> List[Dict]:
 
 
 def _format_candidates_for_cell(candidates: List[Dict], stage_type: str) -> str:
-    """후보군을 XLSX 셀용 텍스트로 포맷. 점수 높은 순 표시."""
+    """Format the candidate list as text for an XLSX cell, ordered by descending score."""
     if not candidates:
-        return "후보 없음"
+        return "No candidates"
 
     if stage_type == "stage1":
         sorted_candidates = _sort_stage1_by_score(candidates)
@@ -309,7 +312,7 @@ def _format_candidates_for_cell(candidates: List[Dict], stage_type: str) -> str:
         if stage_type == "stage1":
             es_score = float(c.get("elasticsearch_score") or c.get("_score") or 0)
             line = f"{i}. [{st}] {name} (ID: {cid})\n"
-            line += f"   ES점수: {es_score:.4f}, Standard: {c.get('standard_concept', 'N/A')}, Domain: {c.get('domain_id', 'N/A')}"
+            line += f"   ES score: {es_score:.4f}, Standard: {c.get('standard_concept', 'N/A')}, Domain: {c.get('domain_id', 'N/A')}"
         elif stage_type == "stage2":
             is_std = "✓" if c.get("is_original_standard", True) else "→"
             line = f"{i}. [{st}] {is_std} {name} (ID: {cid})\n"
@@ -317,14 +320,14 @@ def _format_candidates_for_cell(candidates: List[Dict], stage_type: str) -> str:
             if not c.get("is_original_standard", True):
                 ons = c.get("original_non_standard", {})
                 if ons:
-                    line += f"\n   원본 Non-std: {ons.get('concept_name', 'N/A')} (ID: {ons.get('concept_id', 'N/A')})"
+                    line += f"\n   Original Non-std: {ons.get('concept_name', 'N/A')} (ID: {ons.get('concept_id', 'N/A')})"
         else:
             fin = float(c.get("final_score") or 0)
             sem = c.get("semantic_similarity")
             line = f"{i}. [{st}] {name} (ID: {cid})\n"
-            line += f"   최종: {fin:.1f}"
+            line += f"   Final: {fin:.1f}"
             if sem is not None:
-                line += f", 의미적: {sem:.4f}"
+                line += f", Semantic: {sem:.4f}"
             line += f", Standard: {c.get('standard_concept', 'N/A')}, Domain: {c.get('domain_id', 'N/A')}"
 
         lines.append(line)
@@ -333,7 +336,7 @@ def _format_candidates_for_cell(candidates: List[Dict], stage_type: str) -> str:
 
 
 def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: str) -> Path:
-    """매핑 결과를 XLSX로 저장. 열: Test Index, ID, Entity Name, Input Domain, ..."""
+    """Save mapping results to XLSX. Columns: Test Index, ID, Entity Name, Input Domain, ..."""
     if not HAS_OPENPYXL:
         raise ImportError("openpyxl required for XLSX output. pip install openpyxl")
 
@@ -344,7 +347,7 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
     ws = wb.active
     ws.title = "Detailed Results"
 
-    # 헤더
+    # Header
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center")
@@ -355,7 +358,7 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
         cell.fill = header_fill
         cell.alignment = header_align
 
-    # 데이터
+    # Data rows
     for row_idx, r in enumerate(results, 2):
         ws.cell(row=row_idx, column=1, value=r.get("test_index", ""))
         ws.cell(row=row_idx, column=2, value=r.get("id", r.get("snuh_id", r.get("note_id", "N/A"))))
@@ -363,9 +366,9 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
         ws.cell(row=row_idx, column=4, value=r.get("input_domain", "All"))
         ws.cell(row=row_idx, column=5, value=r.get("ground_truth_concept_id", ""))
         ws.cell(row=row_idx, column=6, value=r.get("ground_truth_concept_name", ""))
-        ws.cell(row=row_idx, column=7, value="성공" if r.get("success") else "실패")
+        ws.cell(row=row_idx, column=7, value="Success" if r.get("success") else "Fail")
 
-        correct_cell = ws.cell(row=row_idx, column=8, value="정답" if r.get("mapping_correct") else "오답")
+        correct_cell = ws.cell(row=row_idx, column=8, value="Correct" if r.get("mapping_correct") else "Incorrect")
         if r.get("mapping_correct"):
             correct_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
             correct_cell.font = Font(color="006100")
@@ -378,7 +381,7 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
         ws.cell(row=row_idx, column=11, value=r.get("best_concept_name", "N/A"))
         ws.cell(row=row_idx, column=12, value=r.get("best_score", 0.0))
 
-        # Stage1: 점수 높은 순 (lexical/semantic/combined 무관)
+        # Stage1: ordered by descending score (lexical/semantic/combined alike)
         stage1_text = _format_candidates_for_cell(r.get("stage1_candidates", []), "stage1")
         ws.cell(row=row_idx, column=13, value=stage1_text)
 
@@ -391,7 +394,7 @@ def save_xlsx(results: List[Dict], output_dir: Path, data_type: str, timestamp: 
         for c in range(13, 16):
             ws.cell(row=row_idx, column=c).alignment = Alignment(wrap_text=True, vertical="top")
 
-    # 열 너비
+    # Column widths
     widths = {
         "A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 12,
         "I": 18, "J": 15, "K": 45, "L": 12, "M": 70, "N": 70, "O": 85,
@@ -412,7 +415,7 @@ def save_xlsx_repeat(
     data_type: str,
     timestamp: str,
 ) -> Path:
-    """반복 매핑 결과 저장: 현황 시트 + 1~5번째 매핑 상세 시트."""
+    """Save repeated-mapping results: a summary sheet plus one detail sheet per run."""
     if not HAS_OPENPYXL:
         raise ImportError("openpyxl required for XLSX output. pip install openpyxl")
 
@@ -426,19 +429,19 @@ def save_xlsx_repeat(
 
     wb = openpyxl.Workbook()
 
-    # 시트 1: 현황 (num_runs만큼 Mapped Concept 1~N 동적 생성)
+    # Sheet 1: Summary (Mapped Concept 1..N created dynamically per num_runs)
     summary_headers = SUMMARY_BASE_HEADERS + [
         f"Mapped Concept {i}" for i in range(1, num_runs + 1)
     ]
     ws_summary = wb.active
-    ws_summary.title = "현황"
+    ws_summary.title = "Summary"
     for col, h in enumerate(summary_headers, 1):
         cell = ws_summary.cell(row=1, column=col, value=h)
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = header_align
 
-    # test_index별로 N회 결과 집계
+    # Aggregate the N runs per test_index
     by_index = {}  # test_index -> [r1, r2, ..., rN]
     for run_results in all_results:
         for r in run_results:
@@ -457,32 +460,32 @@ def save_xlsx_repeat(
         ws_summary.cell(row=row_idx, column=5, value=r0.get("ground_truth_concept_id", ""))
         ws_summary.cell(row=row_idx, column=6, value=r0.get("ground_truth_concept_name", ""))
 
-        # All Same: 5개 결과의 best_concept_id가 모두 같은지
+        # All Same: whether best_concept_id is identical across all runs
         concept_ids = [
             str(r.get("best_concept_id") or "") for r in rows
         ]
         all_same = len(set(concept_ids)) == 1 if concept_ids else False
         ws_summary.cell(row=row_idx, column=7, value="Y" if all_same else "N")
 
-        # Correct: N개 중 정답 개수
+        # Correct: number of correct results across runs
         correct_count = sum(1 for r in rows if r.get("mapping_correct"))
         ws_summary.cell(row=row_idx, column=8, value=correct_count)
 
-        # Mapped Concept 1~N: Concept_name(Concept_ID) - 모든 회차 결과 표시
+        # Mapped Concept 1..N: concept_name(concept_id) for every run
         for i, r in enumerate(rows[:num_runs]):
             cid = r.get("best_concept_id") or "N/A"
             cname = r.get("best_concept_name") or "N/A"
             ws_summary.cell(row=row_idx, column=9 + i, value=f"{cname}({cid})")
 
-    # 열 너비 (현황) - Mapped Concept 열은 num_runs만큼 동적 설정
+    # Column widths (summary) - Mapped Concept columns are set per num_runs
     for col_letter, w in {"A": 10, "B": 18, "C": 40, "D": 15, "E": 20, "F": 45, "G": 10, "H": 8}.items():
         ws_summary.column_dimensions[col_letter].width = w
     for i in range(num_runs):
         ws_summary.column_dimensions[openpyxl.utils.get_column_letter(9 + i)].width = 50
 
-    # 시트 2~(1+num_runs): 각 회차 상세 (기존 save_xlsx와 동일 형식)
+    # Sheets 2..(1+num_runs): per-run detail (same format as save_xlsx)
     for run_idx, run_results in enumerate(all_results, 1):
-        ws = wb.create_sheet(title=f"{run_idx}번째 매핑", index=run_idx)
+        ws = wb.create_sheet(title=f"Mapping {run_idx}", index=run_idx)
 
         for col, h in enumerate(XLSX_HEADERS, 1):
             cell = ws.cell(row=1, column=col, value=h)
@@ -497,9 +500,9 @@ def save_xlsx_repeat(
             ws.cell(row=row_idx, column=4, value=r.get("input_domain", "All"))
             ws.cell(row=row_idx, column=5, value=r.get("ground_truth_concept_id", ""))
             ws.cell(row=row_idx, column=6, value=r.get("ground_truth_concept_name", ""))
-            ws.cell(row=row_idx, column=7, value="성공" if r.get("success") else "실패")
+            ws.cell(row=row_idx, column=7, value="Success" if r.get("success") else "Fail")
 
-            correct_cell = ws.cell(row=row_idx, column=8, value="정답" if r.get("mapping_correct") else "오답")
+            correct_cell = ws.cell(row=row_idx, column=8, value="Correct" if r.get("mapping_correct") else "Incorrect")
             if r.get("mapping_correct"):
                 correct_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                 correct_cell.font = Font(color="006100")
@@ -535,7 +538,7 @@ def save_xlsx_repeat(
     return out_path
 
 
-# --- SNUH 데이터 로더 ---
+# --- SNUH data loader ---
 def load_snuh_data(
     csv_path: str,
     sample_size: Optional[int] = None,
@@ -546,8 +549,8 @@ def load_snuh_data(
     filter_domains: Optional[List[str]] = None,
     chunk_size: int = 100000,
 ) -> pd.DataFrame:
-    """SNUH CSV 로드. entity=source_name, domain=domain, gt=omop_concept_id, id=snuh_id.
-    기본 전처리: vocabulary IN ('SNOMED', 'LOINC')
+    """Load the SNUH CSV. entity=source_name, domain=domain, gt=omop_concept_id, id=snuh_id.
+    Default preprocessing: vocabulary IN ('SNOMED', 'LOINC')
     """
     from tqdm import tqdm
 
@@ -558,7 +561,7 @@ def load_snuh_data(
         chunks = []
         for chunk in tqdm(
             pd.read_csv(csv_path, chunksize=chunk_size),
-            desc="데이터 로딩",
+            desc="Loading data",
         ):
             chunks.append(chunk)
         df = pd.concat(chunks, ignore_index=True)
@@ -615,7 +618,7 @@ def snuh_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, 
     return entity, domain_id, rid, gt, gt_name
 
 
-# --- SNOMED 데이터 로더 ---
+# --- SNOMED data loader ---
 def load_snomed_data(
     csv_path: str,
     sample_size: Optional[int] = None,
@@ -625,8 +628,8 @@ def load_snomed_data(
     filter_domains: Optional[List[str]] = None,
     chunk_size: int = 100000,
 ) -> pd.DataFrame:
-    """SNOMED CSV 로드. entity=entity_name, domain=domain_id, gt=concept_id, id=note_id.
-    기본 전처리: domain_id IN ('Condition','Measurement','Drug','Observation','Procedure')
+    """Load the SNOMED CSV. entity=entity_name, domain=domain_id, gt=concept_id, id=note_id.
+    Default preprocessing: domain_id IN ('Condition','Measurement','Drug','Observation','Procedure')
     """
     from tqdm import tqdm
 
@@ -634,7 +637,7 @@ def load_snomed_data(
         filter_domains = ["Condition", "Measurement", "Drug", "Observation", "Procedure"]
 
     chunks = []
-    for chunk in tqdm(pd.read_csv(csv_path, chunksize=chunk_size), desc="데이터 로딩"):
+    for chunk in tqdm(pd.read_csv(csv_path, chunksize=chunk_size), desc="Loading data"):
         chunks.append(chunk)
     df = pd.concat(chunks, ignore_index=True)
 
@@ -663,7 +666,7 @@ def load_snomed_data(
             df = df.head(n)
 
     df = df.reset_index(drop=True)
-    # note_id 없을 경우 row_id(행 인덱스) 자동 생성
+    # If note_id is missing, generate row_id from the row index
     if "note_id" not in df.columns:
         df["row_id"] = df.index.astype(str)
     elif "row_id" not in df.columns:
@@ -673,7 +676,7 @@ def load_snomed_data(
 
 def snomed_row_to_input(row: pd.Series, domain_map: Dict[str, Any]) -> tuple[str, Optional[Any], str, Optional[int], Optional[str]]:
     """(entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name)
-    record_id: row_id(자동생성) 또는 note_id 우선 사용
+    record_id: prefers row_id (auto-generated) or note_id
     """
     entity = str(row["entity_name"]).strip()
     domain_str = str(row["domain_id"]).strip() if pd.notna(row.get("domain_id")) else None

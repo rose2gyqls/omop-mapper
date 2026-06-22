@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-통합 매핑 실행 스크립트
+Unified mapping execution script
 
-데이터 소스(snuh, snomed 등) 선택 시 기본 CSV 경로 및 전처리 적용.
-동일한 timestamp로 JSON(raw), LOG, XLSX 3개 파일을 test_logs/에 생성합니다.
+Selecting a data source (snuh, snomed, etc.) applies the default CSV path and preprocessing.
+Generates three files (JSON (raw), LOG, XLSX) in test_logs/ with the same timestamp.
 
 Usage:
     python scripts/run_mapping.py snuh
     python scripts/run_mapping.py snomed
     python scripts/run_mapping.py snuh --sample-per-domain 5 --random
-    python scripts/run_mapping.py snuh --workers 4   # 병렬 처리
+    python scripts/run_mapping.py snuh --workers 4   # parallel processing
 """
 
 import argparse
@@ -56,7 +56,7 @@ DOMAIN_MAP = {
     "Device": DomainID.DEVICE,
 }
 
-# ProcessPoolExecutor worker용 전역 (각 프로세스에서 초기화)
+# Global for ProcessPoolExecutor workers (initialized in each process)
 _worker_api = None
 
 
@@ -73,8 +73,8 @@ def _worker_init(
     llm_top_p: float | None = None,
     llm_max_tokens: int | None = None,
 ):
-    """Worker 프로세스 초기화: API 인스턴스 1회 생성 + 로깅 설정.
-    capture_only=True: 로그를 캡처 모드로 (멀티 워커 시 엔티티별로 묶어서 출력).
+    """Worker process initialization: create the API instance once + set up logging.
+    capture_only=True: put logs in capture mode (grouped per entity for output when multiple workers).
     """
     global _worker_api
     if log_file_path:
@@ -95,8 +95,8 @@ def _worker_init(
 
 
 def _map_single_task(task, capture_logs: bool = False):
-    """단일 엔티티 매핑 (worker에서 실행, pickle 가능한 인자만 사용).
-    capture_logs=True: API 로그를 캡처해 (test_index, result, log_lines) 반환.
+    """Map a single entity (runs in a worker, uses only picklable arguments).
+    capture_logs=True: capture API logs and return (test_index, result, log_lines).
     task: (row_idx, test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col)
     """
     global _worker_api
@@ -207,11 +207,11 @@ def run_mapping(
     llm_top_p: float | None = None,
     llm_max_tokens: int | None = None,
 ):
-    """매핑 실행: 데이터 로드(기본 경로+전처리) → 매핑 → JSON/LOG/XLSX 출력.
-    workers > 1 이면 ProcessPoolExecutor로 병렬 처리.
-    num_runs > 1 이면 동일 데이터로 N회 반복 (일관성 검증용).
-    use_validation=False(기본): stage 1~3 점수 기반 최고 점수 매핑만 사용.
-    use_validation=True: LLM validation 모듈 포함. 출력 파일명에 _withval 붙음.
+    """Run mapping: load data (default path + preprocessing) -> map -> output JSON/LOG/XLSX.
+    If workers > 1, process in parallel with ProcessPoolExecutor.
+    If num_runs > 1, repeat N times on the same data (for consistency verification).
+    use_validation=False (default): use only the highest-scoring mapping based on stage 1-3 scores.
+    use_validation=True: include the LLM validation module. The output file name gets _withval appended.
     """
     from datetime import datetime
     from tqdm import tqdm
@@ -223,7 +223,7 @@ def run_mapping(
     csv_path = config["csv_path"]
     id_col = config["id_col"]
 
-    # sample_per_domain: 정수 N → 도메인별 N개
+    # sample_per_domain: integer N -> N per domain
     sample_per_domain_dict = None
     if sample_per_domain is not None:
         sample_per_domain_dict = {d: sample_per_domain for d in config["domains"]}
@@ -233,11 +233,11 @@ def run_mapping(
     out_path.mkdir(parents=True, exist_ok=True)
 
     data_type_out = f"{data_type}_withval" if use_validation else data_type
-    # workers > 1: 터미널에는 tqdm 진행률만, 상세로그는 파일로
+    # workers > 1: terminal shows only tqdm progress, detailed logs go to a file
     logger, log_file = setup_logging(out_path, data_type_out, timestamp, console=(workers == 1))
     logger.info("=" * 80)
-    logger.info(f"매핑 시작: data={data_type}, csv={csv_path}")
-    logger.info(f"전처리: {config.get('vocabulary_filter', config.get('filter_domains', '없음'))}")
+    logger.info(f"Mapping started: data={data_type}, csv={csv_path}")
+    logger.info(f"Preprocessing: {config.get('vocabulary_filter', config.get('filter_domains', 'none'))}")
     logger.info(f"output_dir={out_path}")
     if llm_provider or llm_model or llm_base_url or llm_temperature is not None or llm_top_p is not None or llm_max_tokens is not None:
         logger.info(
@@ -251,7 +251,7 @@ def run_mapping(
         )
     logger.info("=" * 80)
 
-    # 데이터 로드 (전처리 적용)
+    # Load data (with preprocessing applied)
     if data_type == "snuh":
         df = load_snuh_data(
             csv_path,
@@ -276,33 +276,33 @@ def run_mapping(
 
     workers = max(1, int(workers))
     num_runs = max(1, int(num_runs))
-    logger.info(f"로드된 데이터: {len(df)}행")
+    logger.info(f"Loaded data: {len(df)} rows")
     logger.info(f"Scoring mode: {scoring_mode}, Workers: {workers}, Runs: {num_runs}, Validation: {'on' if use_validation else 'off'}")
 
-    all_results = []  # num_runs > 1 일 때 [run1_results, run2_results, ...]
+    all_results = []  # when num_runs > 1: [run1_results, run2_results, ...]
     start_time = time.time()
 
     for run_idx in range(num_runs):
         if num_runs > 1:
             logger.info("")
             logger.info("=" * 80)
-            logger.info(f"매핑 Run {run_idx + 1}/{num_runs}")
+            logger.info(f"Mapping Run {run_idx + 1}/{num_runs}")
             logger.info("=" * 80)
 
         results = []
 
-        # 병렬: ProcessPoolExecutor (workers > 1)
+        # Parallel: ProcessPoolExecutor (workers > 1)
         if workers > 1:
             tasks = []
             for idx, row in df.iterrows():
                 entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
                 domain_str = domain_id.value if domain_id else None
-                # SNOMED: CSV의 test_index 사용, 그 외: 행 인덱스+1
+                # SNOMED: use test_index from CSV; otherwise: row index + 1
                 csv_test_index = int(row["test_index"]) if "test_index" in df.columns and pd.notna(row.get("test_index")) else (idx + 1)
                 tasks.append((idx, csv_test_index, entity_name, domain_str, record_id, ground_truth, ground_truth_concept_name, id_col))
 
             completed = 0
-            log_buffer = {}  # row_idx -> log_lines (완료 순서가 아닌 엔티티 순서로 저장)
+            log_buffer = {}  # row_idx -> log_lines (stored in entity order, not completion order)
             map_task = functools.partial(_map_single_task, capture_logs=True)
             with ProcessPoolExecutor(
                 max_workers=workers,
@@ -323,7 +323,7 @@ def run_mapping(
             ) as ex:
                 future_to_row_idx = {ex.submit(map_task, t): t[0] for t in tasks}
                 indexed_results = [None] * len(tasks)
-                with tqdm(total=len(tasks), desc="매핑", unit="건") as pbar:
+                with tqdm(total=len(tasks), desc="Mapping", unit="item") as pbar:
                     for future in as_completed(future_to_row_idx):
                         row_idx = future_to_row_idx[future]
                         try:
@@ -337,13 +337,13 @@ def run_mapping(
                             indexed_results[row_idx] = r
                             completed += 1
                             if completed <= 5:
-                                status = "정답" if r.get("mapping_correct") else ("오답" if r.get("success") else "실패")
+                                status = "Correct" if r.get("mapping_correct") else ("Incorrect" if r.get("success") else "Failed")
                                 logger.info(f"#{r.get('test_index')} {r['entity_name']}: {status}")
                             pbar.update(1)
                         except Exception as e:
                             task = tasks[row_idx]
                             test_index = task[1]
-                            logger.error(f"#{test_index} Worker 예외: {e}")
+                            logger.error(f"#{test_index} Worker exception: {e}")
                             indexed_results[row_idx] = {
                                 "test_index": test_index,
                                 "id": task[4],
@@ -363,7 +363,7 @@ def run_mapping(
                                 "error": str(e),
                             }
                             pbar.update(1)
-                # 로그: 엔티티 순서(row_idx)대로 파일에 기록
+                # Logs: write to the file in entity order (row_idx)
                 if log_buffer:
                     with open(log_file, "a", encoding="utf-8") as f:
                         for row_idx in range(len(tasks)):
@@ -375,7 +375,7 @@ def run_mapping(
                                     f.write(line + "\n")
             results = [r for r in indexed_results if r is not None]
         else:
-            # 순차 처리 (workers == 1)
+            # Sequential processing (workers == 1)
             es_client = ElasticsearchClient()
             api = EntityMappingAPI(
                 es_client=es_client,
@@ -389,10 +389,10 @@ def run_mapping(
                 llm_top_p=llm_top_p,
                 llm_max_tokens=llm_max_tokens,
             )
-            for idx, row in tqdm(df.iterrows(), total=len(df), desc="매핑"):
+            for idx, row in tqdm(df.iterrows(), total=len(df), desc="Mapping"):
                 try:
                     entity_name, domain_id, record_id, ground_truth, ground_truth_concept_name = row_to_input(row, DOMAIN_MAP)
-                    # SNOMED: CSV의 test_index 사용, 그 외: 행 인덱스+1
+                    # SNOMED: use test_index from CSV; otherwise: row index + 1
                     csv_test_index = int(row["test_index"]) if "test_index" in df.columns and pd.notna(row.get("test_index")) else (idx + 1)
 
                     entity_input = EntityInput(
@@ -438,12 +438,12 @@ def run_mapping(
                     results.append(r)
 
                     if idx < 5:
-                        status = "정답" if mapping_correct else ("오답" if r["success"] else "실패")
+                        status = "Correct" if mapping_correct else ("Incorrect" if r["success"] else "Failed")
                         logger.info(f"#{csv_test_index} {entity_name}: {status}")
 
                 except Exception as e:
                     csv_test_index = int(row["test_index"]) if "test_index" in df.columns and pd.notna(row.get("test_index")) else (idx + 1)
-                    logger.error(f"#{csv_test_index} 오류: {e}")
+                    logger.error(f"#{csv_test_index} Error: {e}")
                     entity_col = "source_name" if data_type == "snuh" else "entity_name"
                     rid = str(row.get("row_id", row.get("note_id", "N/A")))
                     results.append({
@@ -467,16 +467,16 @@ def run_mapping(
 
         all_results.append(results)
 
-        # num_runs > 1: 각 run 완료 시마다 JSON/XLSX 즉시 저장 (전체 완료 대기 불필요)
+        # num_runs > 1: save JSON/XLSX immediately after each run completes (no need to wait for all to finish)
         if num_runs > 1:
             completed_runs = len(all_results)
             save_json({"num_runs": completed_runs, "runs": all_results}, out_path, data_type_out, timestamp)
             save_xlsx_repeat(all_results, out_path, data_type_out, timestamp)
-            logger.info(f"Run {completed_runs}/{num_runs} 완료 → JSON/XLSX 저장됨")
+            logger.info(f"Run {completed_runs}/{num_runs} complete -> JSON/XLSX saved")
 
     elapsed = time.time() - start_time
 
-    # 요약: 마지막 run 기준 (단일 run과 동일 포맷)
+    # Summary: based on the last run (same format as a single run)
     results = all_results[-1]
     total = len(results)
     success_count = sum(1 for r in results if r["success"])
@@ -484,13 +484,13 @@ def run_mapping(
 
     logger.info("")
     logger.info("=" * 80)
-    logger.info("결과 요약")
+    logger.info("Results summary")
     logger.info("=" * 80)
-    logger.info(f"총: {total}개, 성공: {success_count}개 ({100 * success_count / total:.2f}%), 정답: {correct_count}개 ({100 * correct_count / total:.2f}%)")
-    logger.info(f"소요: {elapsed:.2f}초 ({elapsed / 60:.2f}분)")
+    logger.info(f"Total: {total}, Success: {success_count} ({100 * success_count / total:.2f}%), Correct: {correct_count} ({100 * correct_count / total:.2f}%)")
+    logger.info(f"Elapsed: {elapsed:.2f}s ({elapsed / 60:.2f}min)")
 
     if workers > 1:
-        print(f"\n총 {total}건, 성공 {success_count}건 ({100 * success_count / total:.1f}%), 정답 {correct_count}건 | 소요 {elapsed / 60:.1f}분")
+        print(f"\nTotal {total}, success {success_count} ({100 * success_count / total:.1f}%), correct {correct_count} | elapsed {elapsed / 60:.1f}min")
 
     if num_runs > 1:
         all_same_count = 0
@@ -501,8 +501,8 @@ def run_mapping(
             ]
             if len(set(concept_ids)) == 1:
                 all_same_count += 1
-        logger.info(f"{num_runs}회 동일 결과: {all_same_count}/{total}개 ({100 * all_same_count / total:.2f}%)")
-        # 이미 각 run 완료 시 저장됨. 최종 경로만 로깅
+        logger.info(f"Identical results across {num_runs} runs: {all_same_count}/{total} ({100 * all_same_count / total:.2f}%)")
+        # Already saved after each run completes. Only log the final paths
         json_path = out_path / f"mapping_{data_type_out}_{timestamp}.json"
         xlsx_path = out_path / f"mapping_{data_type_out}_{timestamp}.xlsx"
     else:
@@ -515,38 +515,38 @@ def run_mapping(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OMOP 매핑 통합 실행")
+    parser = argparse.ArgumentParser(description="OMOP mapping unified runner")
     parser.add_argument(
         "data",
         choices=list(DATA_SOURCES.keys()),
-        help=f"데이터 소스 (기본 CSV 및 전처리 자동 적용). 사용 가능: {list(DATA_SOURCES.keys())}",
+        help=f"Data source (default CSV and preprocessing applied automatically). Available: {list(DATA_SOURCES.keys())}",
     )
-    parser.add_argument("--sample-size", "-n", type=int, default=None, help="샘플 크기 (-n 미지정 시 전체 데이터, sample-per-domain 미사용 시 적용)")
-    parser.add_argument("--random", action="store_true", help="랜덤 샘플링")
-    parser.add_argument("--seed", type=int, default=42, help="랜덤 시드")
+    parser.add_argument("--sample-size", "-n", type=int, default=None, help="Sample size (uses all data if -n not given; applied when sample-per-domain is not used)")
+    parser.add_argument("--random", action="store_true", help="Random sampling")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
         "--sample-per-domain",
         type=int,
         default=None,
         metavar="N",
-        help="도메인별 N개씩 샘플. 예: --sample-per-domain 5",
+        help="Sample N per domain. Example: --sample-per-domain 5",
     )
     parser.add_argument(
         "--scoring",
         default="llm",
         choices=["llm", "llm_with_score", "semantic"],
-        help="Scoring mode (ablation study용)",
+        help="Scoring mode (for ablation study)",
     )
     parser.add_argument(
         "--llm-provider",
         choices=["openai", "together"],
         default=None,
-        help="LLM route 선택. 미지정 시 LLM_PROVIDER/env 기본값 사용.",
+        help="LLM route selection. Uses LLM_PROVIDER/env default if not specified.",
     )
     parser.add_argument(
         "--llm-model",
         default=None,
-        help="모델명 override. Together는 gpt_oss_20b, mistral_small_24b, llama4_maverick alias도 지원.",
+        help="Model name override. Together also supports gpt_oss_20b, mistral_small_24b, llama4_maverick aliases.",
     )
     parser.add_argument(
         "--llm-base-url",
@@ -556,7 +556,7 @@ def main():
     parser.add_argument(
         "--llm-api-key-env",
         default=None,
-        help="API key를 읽을 환경변수 이름. 예: OPENAI_API_KEY",
+        help="Name of the environment variable to read the API key from. Example: OPENAI_API_KEY",
     )
     parser.add_argument(
         "--llm-temperature",
@@ -574,7 +574,7 @@ def main():
         "--llm-max-tokens",
         type=int,
         default=None,
-        help="LLM max output tokens override. 미지정 시 env/default 사용.",
+        help="LLM max output tokens override. Uses env/default if not specified.",
     )
     parser.add_argument(
         "--workers",
@@ -582,7 +582,7 @@ def main():
         type=int,
         default=1,
         metavar="N",
-        help="병렬 워커 수 (기본: 1, 순차 처리). 4~8 권장.",
+        help="Number of parallel workers (default: 1, sequential processing). 4-8 recommended.",
     )
     parser.add_argument(
         "--repeat",
@@ -590,12 +590,12 @@ def main():
         type=int,
         default=1,
         metavar="N",
-        help="동일 데이터로 N회 매핑 반복 (일관성 검증용). 5 입력 시 현황+5개 상세 시트 생성.",
+        help="Repeat mapping N times on the same data (for consistency verification). Entering 5 generates a summary + 5 detail sheets.",
     )
     parser.add_argument(
         "--validation",
         action="store_true",
-        help="LLM validation 모듈 포함 (기본: stage 1~3 점수 기반 최고 점수만 사용). 출력: mapping_{snuh|snomed}_withval_{timestamp}.*",
+        help="Include the LLM validation module (default: use only the highest score based on stage 1-3 scores). Output: mapping_{snuh|snomed}_withval_{timestamp}.*",
     )
 
     args = parser.parse_args()

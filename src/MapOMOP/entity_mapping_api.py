@@ -576,7 +576,7 @@ class EntityMappingAPI:
     def _format_stage1_candidate(self, hit: Dict) -> Dict:
         """Format Stage 1 candidate for storage (full concept schema + stage1 fields)."""
         src = hit['_source']
-        # 정규화 점수 사용 (0~1), 없으면 raw score 사용
+        # Use normalized score (0-1), fall back to raw score if unavailable
         normalized_score = hit.get('_score_normalized') or hit['_score']
         return {
             'concept_id': str(src.get('concept_id', '')),

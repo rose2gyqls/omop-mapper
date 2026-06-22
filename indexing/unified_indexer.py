@@ -5,10 +5,10 @@ Main indexer that orchestrates OMOP CDM data indexing from multiple sources.
 Supports local CSV and PostgreSQL data sources.
 
 Robust indexing:
-    - Checkpoint 파일 기반 재개 (행 번호 기록, 끊긴 위치부터 이어서)
-    - Idempotent _id → 재전송 시 덮어쓰기 (중복 없음)
-    - 429 지수 백오프 + 개별 실패 문서 재시도 (elasticsearch_indexer에서 처리)
-    - 완료 후 데이터 검증 (ES 문서 수 vs 원본 행 수)
+    - Checkpoint file-based resume (records row number, continues from the interruption point)
+    - Idempotent _id -> overwrite on resend (no duplicates)
+    - 429 exponential backoff + per-document retry for failures (handled in elasticsearch_indexer)
+    - Post-completion data validation (ES document count vs source row count)
 
 Index Names (fixed):
     - concept
@@ -90,7 +90,7 @@ class UnifiedIndexer:
             chunk_size: Data processing chunk size (10000+ for concept-small recommended)
             include_embeddings: Whether to include SapBERT embeddings
             lowercase: Whether to lowercase concept/synonym names
-            bulk_delay_sec: Bulk 요청 간 대기 시간(초, 429 완화용)
+            bulk_delay_sec: Delay between bulk requests (seconds, to ease 429 throttling)
         """
         self.data_source = data_source
         self.batch_size = batch_size
@@ -142,7 +142,7 @@ class UnifiedIndexer:
         self._es_indexers = {}
     
     # =========================================================================
-    # Checkpoint 관리
+    # Checkpoint management
     # =========================================================================
     
     def _load_all_checkpoints(self) -> dict:
@@ -160,7 +160,7 @@ class UnifiedIndexer:
         Load checkpoint for a table.
         
         Returns:
-            rows_completed: 파일 시작부터 성공적으로 인덱싱된 총 행 수 (0이면 처음부터)
+            rows_completed: Total number of rows successfully indexed from the start of the file (0 means start from the beginning)
         """
         checkpoint = self._load_all_checkpoints()
         entry = checkpoint.get(table, {})
@@ -175,7 +175,7 @@ class UnifiedIndexer:
         
         Args:
             table: Table name (e.g., 'concept-small')
-            rows_completed: 파일 시작부터 성공적으로 인덱싱된 총 행 수
+            rows_completed: Total number of rows successfully indexed from the start of the file
         """
         checkpoint = self._load_all_checkpoints()
         checkpoint[table] = {
@@ -189,7 +189,7 @@ class UnifiedIndexer:
             self.logger.warning(f"Failed to save checkpoint: {e}")
     
     def _clear_checkpoint(self, table: str):
-        """Clear checkpoint for a table (인덱싱 정상 완료 시)."""
+        """Clear checkpoint for a table (on successful completion of indexing)."""
         checkpoint = self._load_all_checkpoints()
         checkpoint.pop(table, None)
         if checkpoint:
@@ -199,20 +199,20 @@ class UnifiedIndexer:
             except IOError:
                 pass
         else:
-            # 모든 테이블 완료 → 파일 삭제
+            # All tables complete -> delete the file
             if os.path.exists(CHECKPOINT_FILE):
                 os.remove(CHECKPOINT_FILE)
         self.logger.info(f"Checkpoint cleared: {table}")
     
     # =========================================================================
-    # Elasticsearch indexer 관리
+    # Elasticsearch indexer management
     # =========================================================================
     
     def _get_indexer(self, index_type: str) -> ElasticsearchIndexer:
         """Get or create Elasticsearch indexer for index type."""
         if index_type not in self._es_indexers:
             index_name = self.INDEX_NAMES[index_type]
-            # relationship, synonym은 임베딩 불필요
+            # relationship and synonym do not need embeddings
             include_emb = self.include_embeddings and index_type not in ['relationship', 'synonym']
             
             self._es_indexers[index_type] = ElasticsearchIndexer(
@@ -227,22 +227,22 @@ class UnifiedIndexer:
         return self._es_indexers[index_type]
     
     def _verify_count(self, indexer: ElasticsearchIndexer, expected_total: int, table: str):
-        """인덱싱 완료 후 ES 문서 수 검증."""
+        """Verify the ES document count after indexing completes."""
         stats = indexer.get_stats()
         es_count = stats.get('document_count', 0) or 0
         
         if es_count >= expected_total:
             self.logger.info(
-                f"✓ 검증 완료: {table} - ES {es_count:,} docs (원본 {expected_total:,} rows)"
+                f"✓ Validation passed: {table} - ES {es_count:,} docs (source {expected_total:,} rows)"
             )
         else:
             self.logger.warning(
-                f"⚠ 수량 불일치: {table} - ES {es_count:,} docs vs 원본 {expected_total:,} rows "
-                f"(차이: {expected_total - es_count:,})"
+                f"⚠ Count mismatch: {table} - ES {es_count:,} docs vs source {expected_total:,} rows "
+                f"(difference: {expected_total - es_count:,})"
             )
     
     # =========================================================================
-    # 테이블별 인덱싱 (Checkpoint 기반)
+    # Per-table indexing (Checkpoint-based)
     # =========================================================================
     
     def index_concepts(
@@ -257,7 +257,7 @@ class UnifiedIndexer:
         Args:
             delete_existing: Delete existing index
             max_rows: Maximum rows to process
-            skip_rows: Rows to skip (Checkpoint에서 로드)
+            skip_rows: Rows to skip (loaded from Checkpoint)
             
         Returns:
             True if successful
@@ -281,7 +281,7 @@ class UnifiedIndexer:
             actual_max = min(max_rows or total, total - skip_rows)
             
             if actual_max <= 0:
-                self.logger.info(f"CONCEPT: 처리할 행 없음 (total={total:,}, skip={skip_rows:,})")
+                self.logger.info(f"CONCEPT: No rows to process (total={total:,}, skip={skip_rows:,})")
                 self._clear_checkpoint(table_key)
                 return True
             
@@ -325,16 +325,16 @@ class UnifiedIndexer:
                         refresh=is_last_chunk,
                         bulk_delay_sec=self.bulk_delay_sec
                     ):
-                        # 청크 전체 성공 → Checkpoint 저장
+                        # Entire chunk succeeded -> save Checkpoint
                         indexed += len(docs)
                         processed += len(chunk)
                         pbar.update(len(chunk))
                         self._save_checkpoint(table_key, skip_rows + processed)
                     else:
-                        # 청크 실패 → 중단 (재시작 시 이 청크부터 다시)
+                        # Chunk failed -> abort (restart resumes from this chunk)
                         self.logger.error(
                             f"CONCEPT: Chunk failed at offset {skip_rows + processed}. "
-                            f"--resume 로 재시작하면 이 위치부터 재개됩니다."
+                            f"Restart with --resume to continue from this position."
                         )
                         return False
                     
@@ -347,7 +347,7 @@ class UnifiedIndexer:
             self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}")
             self.logger.info(f"Time: {elapsed/60:.1f} min, Speed: {processed/elapsed:.1f} rows/sec")
             
-            # 검증 & Checkpoint 정리
+            # Validate & clean up Checkpoint
             self._verify_count(indexer, total, table_key)
             self._clear_checkpoint(table_key)
             
@@ -386,15 +386,15 @@ class UnifiedIndexer:
             total = self.data_source.get_concept_small_count()
             if total == 0:
                 self.logger.error(
-                    "CONCEPT_SMALL 파일이 없거나 비어있습니다. "
-                    "scripts/prepare_concept_small.py를 먼저 실행하세요."
+                    "The CONCEPT_SMALL file is missing or empty. "
+                    "Run scripts/prepare_concept_small.py first."
                 )
                 return False
             
             actual_max = min(max_rows or total, total - skip_rows)
             
             if actual_max <= 0:
-                self.logger.info(f"CONCEPT_SMALL: 처리할 행 없음 (total={total:,}, skip={skip_rows:,})")
+                self.logger.info(f"CONCEPT_SMALL: No rows to process (total={total:,}, skip={skip_rows:,})")
                 self._clear_checkpoint(table_key)
                 return True
             
@@ -445,7 +445,7 @@ class UnifiedIndexer:
                     else:
                         self.logger.error(
                             f"CONCEPT_SMALL: Chunk failed at offset {skip_rows + processed}. "
-                            f"--resume 로 재시작하면 이 위치부터 재개됩니다."
+                            f"Restart with --resume to continue from this position."
                         )
                         return False
                     
@@ -470,7 +470,7 @@ class UnifiedIndexer:
             self.logger.error(traceback.format_exc())
             return False
     
-    # 인덱싱할 relationship_id 필터 (이 값만 인덱싱)
+    # relationship_id filter for indexing (only these values are indexed)
     ALLOWED_RELATIONSHIP_IDS = {
         'Maps to',
         'Concept alt_to to',
@@ -488,7 +488,7 @@ class UnifiedIndexer:
         max_rows: Optional[int] = None,
         skip_rows: int = 0
     ) -> bool:
-        """Index CONCEPT_RELATIONSHIP data (특정 relationship_id만 필터링)."""
+        """Index CONCEPT_RELATIONSHIP data (filtered to specific relationship_id values)."""
         table_key = 'relationship'
         
         self.logger.info("=" * 60)
@@ -508,7 +508,7 @@ class UnifiedIndexer:
             actual_max = min(max_rows or total, total - skip_rows)
             
             if actual_max <= 0:
-                self.logger.info(f"RELATIONSHIP: 처리할 행 없음 (total={total:,}, skip={skip_rows:,})")
+                self.logger.info(f"RELATIONSHIP: No rows to process (total={total:,}, skip={skip_rows:,})")
                 self._clear_checkpoint(table_key)
                 return True
             
@@ -532,7 +532,7 @@ class UnifiedIndexer:
                     if len(chunk) == 0:
                         continue
                     
-                    # 허용된 relationship_id만 필터링
+                    # Keep only allowed relationship_id values
                     orig_len = len(chunk)
                     chunk = chunk[chunk['relationship_id'].isin(self.ALLOWED_RELATIONSHIP_IDS)]
                     filtered_out += (orig_len - len(chunk))
@@ -557,7 +557,7 @@ class UnifiedIndexer:
                     else:
                         self.logger.error(
                             f"RELATIONSHIP: Chunk failed at offset {skip_rows + processed}. "
-                            f"--resume 로 재시작하면 이 위치부터 재개됩니다."
+                            f"Restart with --resume to continue from this position."
                         )
                         return False
             
@@ -567,7 +567,7 @@ class UnifiedIndexer:
             self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}, Filtered out: {filtered_out:,}")
             self.logger.info(f"Time: {elapsed/60:.1f} min, Speed: {processed/elapsed:.1f} rows/sec")
             
-            # relationship은 필터링된 건수로 검증 (indexed가 맞는 기준)
+            # For relationship, validate against the filtered count (indexed is the correct baseline)
             self._verify_count(indexer, indexed, table_key)
             self._clear_checkpoint(table_key)
             
@@ -585,14 +585,14 @@ class UnifiedIndexer:
         skip_rows: int = 0
     ) -> bool:
         """
-        기존 concept-relationship 인덱스에 'Is a' 관계만 추가 인덱싱.
-        기존 데이터는 절대 삭제하지 않음 (delete_existing=False 고정).
+        Add only 'Is a' relationships to the existing concept-relationship index.
+        Existing data is never deleted (delete_existing=False is fixed).
         """
         table_key = 'relationship'
         ISA_RELATIONSHIP_IDS = {'Is a'}
         
         self.logger.info("=" * 60)
-        self.logger.info("Adding 'Is a' relationships to concept-relationship (기존 데이터 유지)")
+        self.logger.info("Adding 'Is a' relationships to concept-relationship (existing data preserved)")
         self.logger.info("=" * 60)
         
         start_time = time.time()
@@ -600,7 +600,7 @@ class UnifiedIndexer:
         try:
             indexer = self._get_indexer('relationship')
             
-            # 기존 인덱스 절대 삭제하지 않음
+            # Never delete the existing index
             if not indexer.create_index(delete_if_exists=False):
                 self.logger.error("Failed to create/access index")
                 return False
@@ -609,12 +609,12 @@ class UnifiedIndexer:
             actual_max = min(max_rows or total, total - skip_rows)
             
             if actual_max <= 0:
-                self.logger.info(f"RELATIONSHIP(Is a): 처리할 행 없음 (total={total:,}, skip={skip_rows:,})")
+                self.logger.info(f"RELATIONSHIP(Is a): No rows to process (total={total:,}, skip={skip_rows:,})")
                 return True
             
             self.logger.info(f"Total records: {total:,}")
             self.logger.info(f"Processing: {actual_max:,} (skip: {skip_rows:,})")
-            self.logger.info(f"Filtering: {ISA_RELATIONSHIP_IDS} only (추가 인덱싱)")
+            self.logger.info(f"Filtering: {ISA_RELATIONSHIP_IDS} only (additional indexing)")
             
             processed = 0
             indexed = 0
@@ -658,14 +658,14 @@ class UnifiedIndexer:
             
             elapsed = time.time() - start_time
             
-            self.logger.info(f"CONCEPT_RELATIONSHIP 'Is a' 추가 완료")
+            self.logger.info(f"CONCEPT_RELATIONSHIP 'Is a' addition complete")
             self.logger.info(f"Processed: {processed:,}, Indexed: {indexed:,}, Filtered out: {filtered_out:,}")
             self.logger.info(f"Time: {elapsed/60:.1f} min, Speed: {processed/elapsed:.1f} rows/sec")
             
             return True
             
         except Exception as e:
-            self.logger.error(f"CONCEPT_RELATIONSHIP 'Is a' 추가 실패: {e}")
+            self.logger.error(f"CONCEPT_RELATIONSHIP 'Is a' addition failed: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
             return False
@@ -679,7 +679,7 @@ class UnifiedIndexer:
         """
         Index CONCEPT_SYNONYM data.
         
-        단순 조회용 인덱스 (임베딩 없음, 테이블 그대로 인덱싱)
+        Lookup-only index (no embeddings, table indexed as-is)
         """
         table_key = 'synonym'
         
@@ -700,7 +700,7 @@ class UnifiedIndexer:
             actual_max = min(max_rows or total, total - skip_rows)
             
             if actual_max <= 0:
-                self.logger.info(f"SYNONYM: 처리할 행 없음 (total={total:,}, skip={skip_rows:,})")
+                self.logger.info(f"SYNONYM: No rows to process (total={total:,}, skip={skip_rows:,})")
                 self._clear_checkpoint(table_key)
                 return True
             
@@ -710,7 +710,7 @@ class UnifiedIndexer:
             processed = 0
             indexed = 0
             
-            # 임베딩 없이 큰 청크로 빠르게 처리
+            # Process quickly with large chunks since no embeddings are needed
             syn_chunk_size = self.chunk_size * 5
             
             with tqdm(total=actual_max, desc="SYNONYM", unit="rows") as pbar:
@@ -742,7 +742,7 @@ class UnifiedIndexer:
                     else:
                         self.logger.error(
                             f"SYNONYM: Chunk failed at offset {skip_rows + processed}. "
-                            f"--resume 로 재시작하면 이 위치부터 재개됩니다."
+                            f"Restart with --resume to continue from this position."
                         )
                         return False
             
@@ -764,7 +764,7 @@ class UnifiedIndexer:
             return False
     
     # =========================================================================
-    # 전체 인덱싱 오케스트레이션
+    # Full indexing orchestration
     # =========================================================================
     
     def index_all(
@@ -776,11 +776,11 @@ class UnifiedIndexer:
         """
         Index all tables.
         
-        재개 모드(delete_existing=False): Checkpoint 파일에서 각 테이블의
-        마지막 성공 위치를 읽어 해당 행부터 재개합니다.
+        Resume mode (delete_existing=False): reads the last successful position
+        for each table from the Checkpoint file and resumes from that row.
         
         Args:
-            delete_existing: Delete existing indices (False = 재개 모드)
+            delete_existing: Delete existing indices (False = resume mode)
             max_rows: Maximum rows per table
             tables: Tables to index (default: concept-small, relationship, synonym)
             
@@ -790,15 +790,15 @@ class UnifiedIndexer:
         self.logger.info("=" * 60)
         self.logger.info("Starting full indexing")
         if not delete_existing:
-            self.logger.info("Mode: RESUME (Checkpoint 기반 재개)")
+            self.logger.info("Mode: RESUME (Checkpoint-based resume)")
         else:
-            self.logger.info("Mode: FRESH (기존 인덱스 삭제 후 새로 생성)")
+            self.logger.info("Mode: FRESH (delete existing indices and recreate)")
         self.logger.info("=" * 60)
         
         if tables is None:
             tables = ['concept-small', 'relationship', 'synonym']
         
-        # 재개 모드: Checkpoint에서 skip_rows 로드
+        # Resume mode: load skip_rows from Checkpoint
         def skip_for(table: str) -> int:
             if delete_existing:
                 return 0
@@ -806,7 +806,7 @@ class UnifiedIndexer:
         
         results = {}
         
-        # concept (원본 concept 테이블만 인덱싱)
+        # concept (index only the original concept table)
         if 'concept' in tables:
             results['concept'] = self.index_concepts(
                 delete_existing, max_rows, skip_rows=skip_for('concept'))

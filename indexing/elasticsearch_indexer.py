@@ -5,9 +5,9 @@ Provides functionality to index OMOP CDM data into Elasticsearch.
 Supports CONCEPT, CONCEPT_RELATIONSHIP, and CONCEPT_SYNONYM tables.
 
 Robust indexing:
-    - 429 Too Many Requests → 지수 백오프 재시도 (5~300초, 최대 7회)
-    - Bulk 응답 내 개별 실패 문서 → 자동 재시도 (최대 3회)
-    - Idempotent _id 기반 → 재전송 시 덮어쓰기 (중복 없음)
+    - 429 Too Many Requests -> exponential backoff retry (5-300s, up to 7 times)
+    - Per-document failures in bulk responses -> automatic retry (up to 3 times)
+    - Idempotent _id based -> overwrite on resend (no duplicates)
 """
 
 import logging
@@ -22,11 +22,11 @@ from elasticsearch.helpers import bulk
 class ElasticsearchIndexer:
     """Elasticsearch indexer for OMOP CDM data."""
     
-    # 429 재시도 설정
-    MAX_429_RETRIES = 7          # 429 최대 재시도 횟수
-    INITIAL_BACKOFF_SEC = 5      # 첫 백오프 대기 시간 (5, 10, 20, 40, 80, 160, 300초)
-    MAX_BACKOFF_SEC = 300        # 최대 백오프 대기 시간 (5분)
-    MAX_ITEM_RETRIES = 3         # 개별 실패 문서 최대 재시도 횟수
+    # 429 retry settings
+    MAX_429_RETRIES = 7          # Max number of 429 retries
+    INITIAL_BACKOFF_SEC = 5      # Initial backoff wait time (5, 10, 20, 40, 80, 160, 300s)
+    MAX_BACKOFF_SEC = 300        # Max backoff wait time (5 minutes)
+    MAX_ITEM_RETRIES = 3         # Max retries per failed document
     
     # Index mapping configurations
     MAPPINGS = {
@@ -243,8 +243,8 @@ class ElasticsearchIndexer:
         # Add settings
         mapping["settings"] = self.INDEX_SETTINGS.copy()
         
-        # Add embedding field if enabled (concept, concept-small만 해당)
-        # synonym, relationship은 임베딩 불필요
+        # Add embedding field if enabled (applies only to concept, concept-small)
+        # synonym and relationship do not need embeddings
         if self.include_embeddings:
             if "synonym" not in index_lower and "relationship" not in index_lower:
                 embedding_field = {
@@ -314,7 +314,7 @@ class ElasticsearchIndexer:
         return False
     
     def _generate_doc_id(self, doc: Dict) -> str:
-        """Generate deterministic document ID based on index type (멱등성 보장)."""
+        """Generate deterministic document ID based on index type (ensures idempotency)."""
         index_lower = self.index_name.lower()
         
         if "relationship" in index_lower:
@@ -324,7 +324,7 @@ class ElasticsearchIndexer:
             unique_str = f"{doc.get('concept_id', '')}_{doc.get('concept_synonym_name', '')}"
             return hashlib.md5(unique_str.encode()).hexdigest()
         elif "small" in index_lower:
-            # concept-small: concept_id + concept_name으로 고유 ID 생성
+            # concept-small: generate unique ID from concept_id + concept_name
             unique_str = f"{doc.get('concept_id', '')}_{doc.get('concept_name', '')}"
             return hashlib.md5(unique_str.encode()).hexdigest()
         else:
@@ -353,8 +353,8 @@ class ElasticsearchIndexer:
         """
         Send bulk request with robust retry logic.
         
-        1. 429 → 지수 백오프로 전체 배치 재시도 (5, 10, 20, 40, 80, 160, 300초)
-        2. 응답 내 개별 실패 문서 → 실패한 문서만 재시도 (최대 3회)
+        1. 429 -> retry the entire batch with exponential backoff (5, 10, 20, 40, 80, 160, 300s)
+        2. Per-document failures in the response -> retry only the failed documents (up to 3 times)
         
         Returns:
             (success_count, failed_count)
@@ -375,10 +375,10 @@ class ElasticsearchIndexer:
                 if not failed_items:
                     return (success, 0)
                 
-                # ── 개별 실패 문서 재시도 ──
+                # -- Retry individual failed documents --
                 self.logger.warning(f"{len(failed_items)} items failed in bulk response")
                 
-                # 실패한 _id 추출
+                # Extract failed _id values
                 failed_ids = set()
                 for item in failed_items:
                     for action_type, info in item.items():
@@ -397,7 +397,7 @@ class ElasticsearchIndexer:
                     if not retry_actions:
                         break
                     
-                    wait = min(2 * (2 ** item_attempt), 30)  # 2, 4, 8초 (최대 30초)
+                    wait = min(2 * (2 ** item_attempt), 30)  # 2, 4, 8s (max 30s)
                     time.sleep(wait)
                     self.logger.info(
                         f"Retrying {len(retry_actions)} failed items "
@@ -421,7 +421,7 @@ class ElasticsearchIndexer:
                             retry_actions = []
                             break
                         
-                        # 여전히 실패한 것만 다시 추출
+                        # Re-extract only the still-failing items
                         still_failed_ids = set()
                         for item in r_failed:
                             for at, info in item.items():
@@ -467,17 +467,17 @@ class ElasticsearchIndexer:
         """
         Index documents into Elasticsearch with robust retry.
         
-        - 429 → 지수 백오프 재시도 (최대 7회, 5~300초 대기)
-        - Bulk 응답 내 개별 실패 → 자동 재시도 (최대 3회)
-        - 모든 문서가 성공해야 True 반환 (Checkpoint 기반 재개의 안전성 보장)
-        - Idempotent _id → 재전송 시 덮어쓰기 (중복 없음)
+        - 429 -> exponential backoff retry (up to 7 times, 5-300s wait)
+        - Per-document failures in bulk response -> automatic retry (up to 3 times)
+        - Returns True only if all documents succeed (ensures safety of Checkpoint-based resume)
+        - Idempotent _id -> overwrite on resend (no duplicates)
         
         Args:
             documents: List of documents to index
             batch_size: Batch size for bulk indexing
             show_progress: Whether to show progress logs
             refresh: If True, refresh index after indexing
-            bulk_delay_sec: Bulk 요청 간 대기 시간(초, 429 완화용)
+            bulk_delay_sec: Delay between bulk requests (seconds, to ease 429 throttling)
             
         Returns:
             True if ALL documents were indexed successfully
@@ -492,7 +492,7 @@ class ElasticsearchIndexer:
         for i in range(0, len(documents), batch_size):
             batch = documents[i:i + batch_size]
             
-            # Bulk 요청 간 대기 (429 완화)
+            # Wait between bulk requests (eases 429 throttling)
             if bulk_delay_sec > 0 and i > 0:
                 time.sleep(bulk_delay_sec)
             
@@ -505,7 +505,7 @@ class ElasticsearchIndexer:
                 progress = (i + len(batch)) / len(documents) * 100
                 self.logger.info(f"Progress: {progress:.1f}% ({total_indexed}/{len(documents)})")
         
-        # Refresh (마지막에만)
+        # Refresh (only at the end)
         if refresh:
             try:
                 self.es.indices.refresh(index=self.index_name)
@@ -517,7 +517,7 @@ class ElasticsearchIndexer:
             f"/ {len(documents)} total"
         )
         
-        # 모든 문서가 성공한 경우에만 True (Checkpoint 진행 조건)
+        # True only if all documents succeeded (condition for Checkpoint progress)
         return total_failed == 0
     
     def search_by_embedding(

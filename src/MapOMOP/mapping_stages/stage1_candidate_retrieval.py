@@ -100,14 +100,14 @@ class Stage1CandidateRetrieval:
             hit['_search_type'] = 'combined'
             all_candidates.append(hit)
         
-        # concept_id + concept_name 기준 중복 제거 (높은 정규화 점수 유지)
+        # Deduplicate by concept_id + concept_name (keep higher normalized score)
         all_candidates = deduplicate_by_concept(
             all_candidates,
             get_concept=lambda c: c.get('_source', {}),
             get_score=lambda c: c.get('_score_normalized') or c.get('_score', 0.0)
         )
         
-        # 후보군 결과 로깅: [lexical|semantic|combined] concept_name (concept_id) ES점수 -> 정규화점수
+        # Log candidate results: [lexical|semantic|combined] concept_name (concept_id) ES score -> normalized score
         for hit in all_candidates:
             src = hit.get('_source', {})
             st = hit.get('_search_type', 'unknown')

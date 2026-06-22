@@ -1,117 +1,117 @@
 #!/bin/bash
-# OMOP CDM 인덱싱 스크립트
+# OMOP CDM indexing script
 #
-# ── 기본 사용법 ──
-#   ./scripts/index.sh                                    # 기본 설정 (local_csv, concept-small/relationship/synonym)
-#   ./scripts/index.sh local_csv                          # Local CSV 인덱싱
-#   ./scripts/index.sh postgres                           # PostgreSQL 인덱싱
-#   ./scripts/index.sh --prepare-only                     # CONCEPT_SMALL.csv 생성만
+# ── Basic usage ──
+#   ./scripts/index.sh                                    # Default settings (local_csv, concept-small/relationship/synonym)
+#   ./scripts/index.sh local_csv                          # Local CSV indexing
+#   ./scripts/index.sh postgres                           # PostgreSQL indexing
+#   ./scripts/index.sh --prepare-only                     # Generate CONCEPT_SMALL.csv only
 #
-# ── 테이블 지정 (복수 가능) ──
+# ── Specifying tables (multiple allowed) ──
 #   ./scripts/index.sh local_csv --tables concept-small synonym
-#   ./scripts/index.sh local_csv --tables concept-small   # concept-small만
+#   ./scripts/index.sh local_csv --tables concept-small   # concept-small only
 #
-# ── 기존 concept-relationship에 'Is a' 관계만 추가 (기존 데이터 삭제 없음) ──
+# ── Add only 'Is a' relationships to existing concept-relationship (no deletion of existing data) ──
 #   ./scripts/index.sh local_csv --add-isa
 #   ./scripts/index.sh postgres --add-isa
 #
-# ── 끊긴 뒤 재시작 (Checkpoint 기반) ──
-#   ./scripts/index.sh local_csv --resume                 # Checkpoint에서 마지막 성공 위치 읽어서 재개
+# ── Restart after an interruption (Checkpoint-based) ──
+#   ./scripts/index.sh local_csv --resume                 # Read the last successful position from the checkpoint and resume
 #   ./scripts/index.sh local_csv --resume --tables synonym
 #
-# ── 429 완화 (bulk 요청 간 대기) ──
+# ── Mitigate 429s (wait between bulk requests) ──
 #   ./scripts/index.sh local_csv --resume --bulk-delay 1
 #
-# ── 테스트 (일부 행만) ──
+# ── Test (partial rows only) ──
 #   ./scripts/index.sh local_csv --max-rows 10000
 #
-# ── 데이터 폴더 지정 ──
+# ── Specifying the data folder ──
 #   DATA_FOLDER=/path/to/csv ./scripts/index.sh local_csv
 #   ./scripts/index.sh local_csv --data-folder /path/to/csv
 #
-# ── 안전성 보장 ──
-#   - 멱등한 _id: 같은 데이터 재전송 시 덮어쓰기 (중복 없음)
-#   - Checkpoint: 청크 단위로 진행 상황 기록, 실패 시 해당 청크부터 재시작
-#   - 429 백오프: 5~300초 지수 백오프 재시도 (최대 7회)
-#   - 개별 실패: bulk 응답 내 실패 문서 자동 재시도 (최대 3회)
-#   - 검증: 완료 후 ES 문서 수 vs 원본 행 수 비교
+# ── Safety guarantees ──
+#   - Idempotent _id: re-sending the same data overwrites (no duplicates)
+#   - Checkpoint: record progress per chunk, restart from that chunk on failure
+#   - 429 backoff: exponential backoff retry of 5-300s (up to 7 times)
+#   - Individual failures: automatically retry failed documents within a bulk response (up to 3 times)
+#   - Verification: after completion, compare ES document count vs source row count
 
 set -e
 
-# 스크립트 디렉토리 기준으로 프로젝트 루트 찾기
+# Find the project root relative to the script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
 # ============================================================================
-# 설정 (필요시 수정)
+# Settings (edit if needed)
 # ============================================================================
-DATA_FOLDER="${DATA_FOLDER:-/Users/rose/omop-mapper/data/omop-cdm}"
+DATA_FOLDER="${DATA_FOLDER:-$PROJECT_ROOT/data/omop-cdm}"
 
 # ============================================================================
-# 메인 로직
+# Main logic
 # ============================================================================
 
 echo "============================================"
-echo "OMOP CDM 인덱싱"
+echo "OMOP CDM indexing"
 echo "============================================"
-echo "프로젝트: $PROJECT_ROOT"
-echo "데이터 폴더: $DATA_FOLDER"
+echo "Project: $PROJECT_ROOT"
+echo "Data folder: $DATA_FOLDER"
 echo "============================================"
 
-# --prepare-only 옵션 체크
+# Check the --prepare-only option
 if [[ "$1" == "--prepare-only" ]]; then
     echo ""
-    echo "[Step] CONCEPT_SMALL.csv 생성"
+    echo "[Step] Generate CONCEPT_SMALL.csv"
     echo "--------------------------------------------"
     python scripts/prepare_concept_small.py --data-folder "$DATA_FOLDER"
     echo ""
-    echo "완료!"
+    echo "Done!"
     exit 0
 fi
 
-# 데이터 소스 확인 (첫 번째 인자 또는 기본값)
+# Determine the data source (first argument or default)
 SOURCE_TYPE="${1:-local_csv}"
 
-# --add-isa: CONCEPT_SMALL 불필요 (CONCEPT_RELATIONSHIP만 사용)
+# --add-isa: CONCEPT_SMALL not needed (uses CONCEPT_RELATIONSHIP only)
 ADD_ISA=false
 for arg in "$@"; do [[ "$arg" == "--add-isa" ]] && ADD_ISA=true && break; done
 
-# local_csv인 경우 CONCEPT_SMALL.csv 생성 (--add-isa 모드에서는 스킵)
+# For local_csv, generate CONCEPT_SMALL.csv (skipped in --add-isa mode)
 if [[ "$SOURCE_TYPE" == "local_csv" && "$ADD_ISA" != "true" ]]; then
     CONCEPT_SMALL_PATH="$DATA_FOLDER/CONCEPT_SMALL.csv"
     
     echo ""
-    echo "[Step 1/2] CONCEPT_SMALL.csv 확인"
+    echo "[Step 1/2] Check CONCEPT_SMALL.csv"
     echo "--------------------------------------------"
     
     if [[ -f "$CONCEPT_SMALL_PATH" ]]; then
-        echo "  -> 이미 존재: $CONCEPT_SMALL_PATH"
-        echo "  -> 재생성하려면: ./scripts/index.sh --prepare-only"
+        echo "  -> Already exists: $CONCEPT_SMALL_PATH"
+        echo "  -> To regenerate: ./scripts/index.sh --prepare-only"
     else
-        echo "  -> 생성 중..."
+        echo "  -> Creating..."
         python scripts/prepare_concept_small.py --data-folder "$DATA_FOLDER"
-        echo "  -> 완료"
+        echo "  -> Done"
     fi
     
     echo ""
-    echo "[Step 2/2] Elasticsearch 인덱싱"
+    echo "[Step 2/2] Elasticsearch indexing"
     echo "--------------------------------------------"
 elif [[ "$SOURCE_TYPE" == "local_csv" && "$ADD_ISA" == "true" ]]; then
     echo ""
-    echo "[Step] concept-relationship에 'Is a' 관계 추가"
+    echo "[Step] Add 'Is a' relationships to concept-relationship"
     echo "--------------------------------------------"
 else
     echo ""
-    echo "[Step] Elasticsearch 인덱싱 (PostgreSQL)"
+    echo "[Step] Elasticsearch indexing (PostgreSQL)"
     echo "--------------------------------------------"
 fi
 
-# 인덱싱 실행 (DATA_FOLDER를 Python에 전달; 명령줄 --data-folder가 있으면 그쪽이 우선)
+# Run indexing (pass DATA_FOLDER to Python; a command-line --data-folder takes precedence)
 python scripts/run_indexing.py --data-folder "$DATA_FOLDER" "$@"
 
 echo ""
 echo "============================================"
-echo "완료!"
+echo "Done!"
 echo "============================================"

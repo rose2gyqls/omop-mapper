@@ -3,12 +3,12 @@ Stage 2: Standard Concept Collection
 
 Converts concepts using relationship transformations and "Maps to" relationships.
 Process (2 rounds of [relation transform → Maps to]):
-1. 1차 라운드: Stage 1 후보군 → TRANSFORM_RELATIONSHIP_IDS 관계 변환
-   → 변환된/미변환 후보 모두 non-std면 Maps to 적용
-   → std 결과들만 2차로 넘김
-2. 2차 라운드: std 결과들 → TRANSFORM_RELATIONSHIP_IDS 관계 변환
-   → 변환된/미변환 후보 모두 non-std면 Maps to 적용
-3. 1차+2차 결과 모두 합쳐서 중복 제거
+1. Round 1: Stage 1 candidates → transform via TRANSFORM_RELATIONSHIP_IDS
+   → for both transformed and untransformed candidates, apply Maps to if non-std
+   → only std results are passed to round 2
+2. Round 2: std results → transform via TRANSFORM_RELATIONSHIP_IDS
+   → for both transformed and untransformed candidates, apply Maps to if non-std
+3. Merge round 1 and round 2 results and deduplicate
 """
 
 import logging
@@ -52,9 +52,9 @@ class Stage2StandardCollection:
         Convert Stage 1 candidates to standard concepts.
         
         Process:
-        1. 1차 라운드: 관계 변환 → 변환/미변환 모두 Maps to → std만 2차로
-        2. 2차 라운드: std 결과에 대해 같은 프로세스 반복
-        3. 전체 결과 중복 제거
+        1. Round 1: relation transform → Maps to for both transformed/untransformed → only std to round 2
+        2. Round 2: repeat the same process on std results
+        3. Deduplicate all results
         
         Args:
             stage1_candidates: Candidates from Stage 1
@@ -67,7 +67,7 @@ class Stage2StandardCollection:
         
         initial_candidates = self._prepare_initial_candidates(stage1_candidates)
         
-        # 1차 라운드: 관계 변환 → Maps to
+        # Round 1: relation transform → Maps to
         first_round_all = self._apply_transform_and_maps_to(initial_candidates)
         first_round_dedup = deduplicate_by_concept(
             first_round_all,
@@ -75,7 +75,7 @@ class Stage2StandardCollection:
             get_score=lambda c: c.get('elasticsearch_score', 0.0)
         )
         
-        # 2차 라운드: std 결과만 2차 입력으로, 같은 프로세스
+        # Round 2: feed only std results as input, same process
         first_round_std = self._filter_std_only(first_round_dedup)
         second_round_all = (
             self._apply_transform_and_maps_to(first_round_std)
@@ -87,7 +87,7 @@ class Stage2StandardCollection:
             get_score=lambda c: c.get('elasticsearch_score', 0.0)
         ) if second_round_all else []
         
-        # 1차 + 2차 전체 합쳐서 최종 중복 제거 후 stage3로
+        # Merge round 1 + round 2, deduplicate, then pass to stage 3
         all_results = first_round_dedup + second_round_dedup
         deduplicated = deduplicate_by_concept(
             all_results,
@@ -95,9 +95,9 @@ class Stage2StandardCollection:
             get_score=lambda c: c.get('elasticsearch_score', 0.0)
         )
         
-        self._log_candidates_detail("1차 라운드 결과", first_round_dedup)
-        self._log_candidates_detail("2차 라운드 결과", second_round_dedup)
-        self._log_candidates_detail("중복 제거 결과", deduplicated)
+        self._log_candidates_detail("Round 1 results", first_round_dedup)
+        self._log_candidates_detail("Round 2 results", second_round_dedup)
+        self._log_candidates_detail("Deduplicated results", deduplicated)
         
         return deduplicated
     
@@ -125,10 +125,10 @@ class Stage2StandardCollection:
         return candidates
     
     def _log_candidates_detail(self, title: str, candidates: List[Dict[str, Any]]):
-        """변환 결과 로깅: concept_name (concept_id) [relation_type] ← from 원본 (변환 관계 파악 가능)"""
+        """Log transform results: concept_name (concept_id) [relation_type] ← from source (shows transform relation)."""
         logger.info(f"  [{title}]")
         if not candidates:
-            logger.info("    (없음)")
+            logger.info("    (none)")
             return
         for c in candidates:
             concept = c.get('concept', {})
@@ -147,11 +147,11 @@ class Stage2StandardCollection:
         candidates: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        [관계 변환 → Maps to] 한 라운드 적용.
+        Apply one round of [relation transform → Maps to].
         
-        - TRANSFORM_RELATIONSHIP_IDS로 지정된 관계로 변환
-        - 변환된 후보군 + 변환되지 않은 원본 모두에 대해:
-          std면 그대로 추가, non-std면 Maps to로 std 찾아서 추가
+        - Transform via the relationships specified in TRANSFORM_RELATIONSHIP_IDS
+        - For both transformed candidates and untransformed originals:
+          if std, add as-is; if non-std, find std via Maps to and add
         """
         result = []
         
@@ -159,12 +159,12 @@ class Stage2StandardCollection:
             concept = candidate['concept']
             concept_id = str(concept.get('concept_id', ''))
             
-            # 1) 원본: std면 그대로, non-std면 Maps to
+            # 1) Original: std as-is, non-std via Maps to
             self._add_candidate_or_maps_to(
                 candidate, concept, candidate.get('original_non_standard'), 'original', result
             )
             
-            # 2) Relationship 변환
+            # 2) Relationship transform
             related_concepts = self._get_related_concepts_with_relation(concept_id)
             for related, relation_id in related_concepts:
                 related_id = str(related.get('concept_id', ''))
@@ -188,7 +188,7 @@ class Stage2StandardCollection:
         result: List[Dict[str, Any]]
     ) -> None:
         """
-        std면 그대로 추가, non-std면 Maps to로 std 찾아서 추가.
+        If std, add as-is; if non-std, find std via Maps to and add.
         """
         is_std = concept.get('standard_concept') in ['S', 'C']
         
@@ -218,7 +218,7 @@ class Stage2StandardCollection:
                     })
     
     def _filter_std_only(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """std(standard_concept in S/C)인 결과만 반환."""
+        """Return only std results (standard_concept in S/C)."""
         return [
             c for c in candidates
             if c.get('concept', {}).get('standard_concept') in ['S', 'C']
